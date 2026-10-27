@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -13,7 +14,7 @@ from sqlalchemy import delete, select
 
 from . import events
 from .benchmarks.base import BenchContext, ScoreRecord
-from .benchmarks.matching import Matcher, split_effort
+from .benchmarks.matching import Matcher
 from .benchmarks.registry import SOURCES
 from .catalog.modelsdev import load_catalog
 from .db import session_scope
@@ -297,17 +298,23 @@ async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
         events.publish("refresh.progress", {"kind": "benchmarks", "provider": cls.spec.name})
         try:
             records = await asyncio.wait_for(source.fetch(), PROVIDER_TIMEOUT)
+            matched = await asyncio.to_thread(persist_scores, source_id, records, matcher)
         except Exception as exc:
             log.warning("Benchmark source %s failed: %s", source_id, exc)
             stats["failed"] += 1
             stats["errors"].append(f"{cls.spec.name}: {str(exc)[:300]}")
             return
-        matched = await asyncio.to_thread(persist_scores, source_id, records, matcher)
         stats["ok"] += 1
         stats["records"] += len(records)
         stats["matched"] += matched
 
-    await asyncio.gather(*(one(sid) for sid in SOURCES))
+    # Wait for every source, even after one fails, so none is still writing once the job lock is released.
+    results = await asyncio.gather(*(one(sid) for sid in SOURCES), return_exceptions=True)
+    for sid, result in zip(SOURCES, results, strict=True):
+        if isinstance(result, BaseException):
+            log.error("Benchmark source %s failed", sid, exc_info=result)
+            stats["failed"] += 1
+            stats["errors"].append(f"{SOURCES[sid].spec.name}: {str(result)[:300]}")
     return stats
 
 
@@ -336,13 +343,16 @@ def persist_scores(source_id: str, records: list[ScoreRecord], matcher: Matcher)
     ts = now()
     rows: dict[tuple[str, str, str], BenchmarkScore] = {}
     metrics = {m.id: m for m in cls.spec.metrics}
+    skipped = 0
     for rec in records:
         metric = metrics.get(rec.metric)
         if metric is None:
             continue
-        base_name, parsed_effort = split_effort(rec.source_model)
-        effort = rec.effort or parsed_effort
-        canonical, method = matcher.match(source_id, rec.source_model, [*rec.model_ids, base_name])
+        if not math.isfinite(rec.value):  # SQLite stores NaN as NULL, which the NOT NULL column rejects
+            skipped += 1
+            continue
+        effort = rec.effort or matcher.effort(rec.source_model)
+        canonical, method = matcher.match(source_id, rec.source_model, rec.model_ids, rec.fallback_ids)
         key = (rec.metric, rec.source_model, effort)
         rows[key] = BenchmarkScore(
             source=source_id,
@@ -358,9 +368,15 @@ def persist_scores(source_id: str, records: list[ScoreRecord], matcher: Matcher)
             tokens_per_task=rec.tokens_per_task,
             as_of=rec.as_of,
             url=rec.url,
-            extra={**rec.extra, "model_ids": [i for i in rec.model_ids if i]},
+            extra={
+                **rec.extra,
+                "model_ids": [i for i in rec.model_ids if i],
+                "fallback_ids": [i for i in rec.fallback_ids if i],
+            },
             fetched_at=ts,
         )
+    if skipped:
+        log.warning("Benchmark source %s: skipped %d non-finite values", source_id, skipped)
     by_metric: dict[str, list[BenchmarkScore]] = defaultdict(list)
     for row in rows.values():
         by_metric[row.metric].append(row)
@@ -384,9 +400,9 @@ async def rematch_scores() -> int:
         matched = 0
         with session_scope() as s:
             for row in s.scalars(select(BenchmarkScore)):
-                base_name, _ = split_effort(row.source_model)
-                hints = [*(row.extra or {}).get("model_ids", []), base_name]
-                cid, method = matcher.match(row.source, row.source_model, hints)
+                extra = row.extra or {}
+                hints, fallback = extra.get("model_ids", []), extra.get("fallback_ids", [])
+                cid, method = matcher.match(row.source, row.source_model, hints, fallback)
                 row.canonical_id, row.match_method = cid, method
                 matched += 1 if cid else 0
         return matched

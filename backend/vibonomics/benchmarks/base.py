@@ -10,7 +10,8 @@ Rules for sources:
 - Fill ``spec.license`` and ``spec.attribution`` honestly; the UI shows them next to the numbers.
 - Put any IDs that help matching into ``ScoreRecord.model_ids`` (OpenRouter ids, provider API ids,
   canonical ``creator/model`` ids). Put reasoning effort ("max", "high"...) in ``effort``, not in
-  ``source_model``-derived ids.
+  ``source_model``-derived ids. An id with an effort-like suffix removed goes in ``fallback_ids``,
+  because the suffix may be part of the model's name ("kimi-k2-thinking", "qwen3-max").
 - Raise ``vibonomics.http.FetchError`` on failure; return [] only when the source is genuinely empty.
 """
 
@@ -60,6 +61,8 @@ class ScoreRecord:
     value: float
     effort: str = ""
     model_ids: list[str] = field(default_factory=list)
+    fallback_ids: list[str] = field(default_factory=list)
+    """Tried only when ``source_model`` and ``model_ids`` match nothing as given."""
     cost_per_task: float | None = None
     tokens_per_task: float | None = None
     as_of: str | None = None
