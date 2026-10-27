@@ -1,0 +1,67 @@
+[
+ {
+  "model_name": "Claude Opus 5.5 (Max)",
+  "organization": "anthropic",
+  "license": "Proprietary",
+  "rating": 1806.9194673086658,
+  "rating_lower": 1793.5573888805984,
+  "rating_upper": 1820.2815457367337,
+  "variance": 46.47847295824163,
+  "vote_count": 3140,
+  "rank": 1,
+  "category": "overall",
+  "leaderboard_publish_date": "2026-10-23"
+ },
+ {
+  "model_name": "GPT-6 Astra (Max)",
+  "organization": "openai",
+  "license": "Proprietary",
+  "rating": 1774.3132570847915,
+  "rating_lower": 1764.4029695774339,
+  "rating_upper": 1784.2235445921492,
+  "variance": 25.56679716294417,
+  "vote_count": 6579,
+  "rank": 2,
+  "category": "overall",
+  "leaderboard_publish_date": "2026-10-23"
+ },
+ {
+  "model_name": "Claude Sonnet 5.5 (xHigh)",
+  "organization": "anthropic",
+  "license": "Proprietary",
+  "rating": 1768.9190226748196,
+  "rating_lower": 1756.7371060296073,
+  "rating_upper": 1781.100939320032,
+  "variance": 38.63092124051141,
+  "vote_count": 3822,
+  "rank": 3,
+  "category": "overall",
+  "leaderboard_publish_date": "2026-10-23"
+ },
+ {
+  "model_name": "GPT-6.1 Sol (Max)",
+  "organization": "openai",
+  "license": "Proprietary",
+  "rating": 1793.795939959323,
+  "rating_lower": 1763.1755236758554,
+  "rating_upper": 1824.4163562427907,
+  "variance": 244.07651809825512,
+  "vote_count": 577,
+  "rank": 1,
+  "category": "webdev-html",
+  "leaderboard_publish_date": "2026-10-23"
+ },
+ {
+  "model_name": "GPT-6 Astra (Max)",
+  "organization": "openai",
+  "license": "Proprietary",
+  "rating": 1777.4496172789145,
+  "rating_lower": 1755.8871947885384,
+  "rating_upper": 1799.0120397692908,
+  "variance": 121.03164067484967,
+  "vote_count": 1266,
+  "rank": 2,
+  "category": "webdev-html",
+  "leaderboard_publish_date": "2026-10-23"
+ }
+]

@@ -1,0 +1,20 @@
+/** Every query key in one place, so the event stream can invalidate exactly what changed. */
+export const keys = {
+  auth: ['auth', 'status'] as const,
+  system: ['system', 'status'] as const,
+  models: ['models'] as const,
+  model: (id: number) => ['models', id] as const,
+  providers: ['providers'] as const,
+  claudeSubscription: ['subscription', 'claude'] as const,
+  providerTypes: ['providers', 'types'] as const,
+  settings: ['settings'] as const,
+  refreshStatus: ['refresh', 'status'] as const,
+  refreshRuns: ['refresh', 'runs'] as const,
+  benchmarkRows: ['benchmarks', 'rows'] as const,
+  canonical: (q: string) => ['benchmarks', 'canonical', q] as const,
+  evals: ['evals'] as const,
+  suites: ['evals', 'suites'] as const,
+  judges: ['evals', 'judges'] as const,
+  runs: ['evals', 'runs'] as const,
+  run: (id: number) => ['evals', 'runs', id] as const,
+};

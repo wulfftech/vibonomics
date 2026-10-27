@@ -1,0 +1,49 @@
+{
+ "data": [
+  {
+   "id": "openai/gpt-6.1-sol",
+   "canonical_slug": "openai/gpt-6.1-sol-20260929",
+   "name": "OpenAI: GPT-6.1 Sol"
+  },
+  {
+   "id": "openai/gpt-6.1-sol:batch",
+   "canonical_slug": "openai/gpt-6.1-sol-20260929",
+   "name": "OpenAI: GPT-6.1 Sol (batch)"
+  },
+  {
+   "id": "anthropic/claude-opus-5.5",
+   "canonical_slug": "anthropic/claude-opus-5.5-20260921",
+   "name": "Anthropic: Claude Opus 5.5"
+  },
+  {
+   "id": "anthropic/claude-opus-5.5:batch",
+   "canonical_slug": "anthropic/claude-opus-5.5-20260921",
+   "name": "Anthropic: Claude Opus 5.5 (batch)"
+  },
+  {
+   "id": "qwen/qwen3.8-max-0902",
+   "canonical_slug": "qwen/qwen3.8-max-20260902",
+   "name": "Qwen: Qwen3.8 Max (0902)"
+  },
+  {
+   "id": "z-ai/glm-5.3",
+   "canonical_slug": "z-ai/glm-5.3-20260816",
+   "name": "Z.ai: GLM 5.3"
+  },
+  {
+   "id": "z-ai/glm-5.3:batch",
+   "canonical_slug": "z-ai/glm-5.3-20260816",
+   "name": "Z.ai: GLM 5.3 (batch)"
+  },
+  {
+   "id": "anthropic/claude-opus-4.8",
+   "canonical_slug": "anthropic/claude-4.8-opus-20260528",
+   "name": "Anthropic: Claude Opus 4.8"
+  },
+  {
+   "id": "anthropic/claude-opus-4.8:batch",
+   "canonical_slug": "anthropic/claude-4.8-opus-20260528",
+   "name": "Anthropic: Claude Opus 4.8 (batch)"
+  }
+ ]
+}

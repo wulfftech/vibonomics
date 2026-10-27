@@ -1,0 +1,4479 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Vibonomics",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/system/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "System Status",
+        "operationId": "system_status_api_system_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/status": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Status",
+        "operationId": "status_api_auth_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Login",
+        "operationId": "login_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatus"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Logout",
+        "operationId": "logout_api_auth_logout_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "List Models",
+        "operationId": "list_models_api_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/{model_pk}": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Model Detail",
+        "operationId": "model_detail_api_models__model_pk__get",
+        "parameters": [
+          {
+            "name": "model_pk",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Model Pk"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/types": {
+      "get": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Provider Types",
+        "operationId": "provider_types_api_providers_types_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderTypeOut"
+                  },
+                  "type": "array",
+                  "title": "Response Provider Types Api Providers Types Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers": {
+      "get": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "List Providers",
+        "operationId": "list_providers_api_providers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderOut"
+                  },
+                  "type": "array",
+                  "title": "Response List Providers Api Providers Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Create Provider",
+        "operationId": "create_provider_api_providers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/{provider_id}": {
+      "put": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Update Provider",
+        "operationId": "update_provider_api_providers__provider_id__put",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Delete Provider",
+        "operationId": "delete_provider_api_providers__provider_id__delete",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/test": {
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Test Provider Draft",
+        "description": "Test the values currently in the add-provider form, before anything is saved.",
+        "operationId": "test_provider_draft_api_providers_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/{provider_id}/test": {
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Test Provider",
+        "description": "Test the saved configuration, optionally overriding fields from the open form.",
+        "operationId": "test_provider_api_providers__provider_id__test_post",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProviderTestOverride"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/{provider_id}/refresh": {
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Refresh Provider",
+        "description": "Refresh everything after a provider is added or its key changes.",
+        "operationId": "refresh_provider_api_providers__provider_id__refresh_post",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Refresh Provider Api Providers  Provider Id  Refresh Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Settings",
+        "operationId": "get_settings_api_settings_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Put Settings",
+        "operationId": "put_settings_api_settings_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/refresh": {
+      "post": {
+        "tags": [
+          "refresh"
+        ],
+        "summary": "Trigger Refresh",
+        "operationId": "trigger_refresh_api_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshStatus"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/refresh/status": {
+      "get": {
+        "tags": [
+          "refresh"
+        ],
+        "summary": "Refresh Status",
+        "operationId": "refresh_status_api_refresh_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/refresh/runs": {
+      "get": {
+        "tags": [
+          "refresh"
+        ],
+        "summary": "Refresh Runs",
+        "operationId": "refresh_runs_api_refresh_runs_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RefreshRunOut"
+                  },
+                  "title": "Response Refresh Runs Api Refresh Runs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/benchmarks/rows": {
+      "get": {
+        "tags": [
+          "benchmarks"
+        ],
+        "summary": "Score Rows",
+        "operationId": "score_rows_api_benchmarks_rows_get",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "name": "unmatched_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Unmatched Only"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ScoreRowOut"
+                  },
+                  "title": "Response Score Rows Api Benchmarks Rows Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/benchmarks/aliases": {
+      "put": {
+        "tags": [
+          "benchmarks"
+        ],
+        "summary": "Set Alias",
+        "operationId": "set_alias_api_benchmarks_aliases_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AliasIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Set Alias Api Benchmarks Aliases Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/benchmarks/canonical": {
+      "get": {
+        "tags": [
+          "benchmarks"
+        ],
+        "summary": "Canonical Search",
+        "operationId": "canonical_search_api_benchmarks_canonical_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 30,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CanonicalOut"
+                  },
+                  "title": "Response Canonical Search Api Benchmarks Canonical Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/subscription/claude": {
+      "get": {
+        "tags": [
+          "subscription"
+        ],
+        "summary": "Claude Subscription",
+        "operationId": "claude_subscription_api_subscription_claude_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaudeSubscriptionOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "subscription"
+        ],
+        "summary": "Clear Claude Snapshot",
+        "description": "Forget received snapshots (for example after testing the status-line command).",
+        "operationId": "clear_claude_snapshot_api_subscription_claude_delete",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/api/subscription/claude/rotate": {
+      "post": {
+        "tags": [
+          "subscription"
+        ],
+        "summary": "Rotate Claude Token",
+        "description": "Replace the ingest token (for example after it was pasted somewhere public).",
+        "operationId": "rotate_claude_token_api_subscription_claude_rotate_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaudeSubscriptionOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/subscription/ingest/claude": {
+      "post": {
+        "tags": [
+          "subscription"
+        ],
+        "summary": "Ingest Claude",
+        "operationId": "ingest_claude_api_subscription_ingest_claude_post",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Token"
+            }
+          },
+          {
+            "name": "x-vibonomics-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Vibonomics-Token"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Ingest Claude Api Subscription Ingest Claude Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/evals/suites": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Suites",
+        "operationId": "suites_api_evals_suites_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SuiteOut"
+                  },
+                  "type": "array",
+                  "title": "Response Suites Api Evals Suites Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/evals/judges": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Judges",
+        "operationId": "judges_api_evals_judges_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/JudgeOut"
+                  },
+                  "type": "array",
+                  "title": "Response Judges Api Evals Judges Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/evals/runs": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Start Run",
+        "operationId": "start_run_api_evals_runs_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalRunIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "List Runs",
+        "operationId": "list_runs_api_evals_runs_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EvalRunOut"
+                  },
+                  "title": "Response List Runs Api Evals Runs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/evals/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Run Detail",
+        "operationId": "run_detail_api_evals_runs__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Delete Run",
+        "operationId": "delete_run_api_evals_runs__run_id__delete",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/evals/runs/{run_id}/cancel": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Cancel Run",
+        "operationId": "cancel_run_api_evals_runs__run_id__cancel_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AliasIn": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "source_model": {
+            "type": "string",
+            "title": "Source Model"
+          },
+          "canonical_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "source_model",
+          "canonical_id"
+        ],
+        "title": "AliasIn"
+      },
+      "AppSettings": {
+        "properties": {
+          "general": {
+            "$ref": "#/components/schemas/GeneralSettings"
+          },
+          "refresh": {
+            "$ref": "#/components/schemas/RefreshSettings"
+          },
+          "highlight": {
+            "$ref": "#/components/schemas/HighlightSettings"
+          },
+          "scoring": {
+            "$ref": "#/components/schemas/ScoringSettings"
+          },
+          "benchmarks": {
+            "$ref": "#/components/schemas/BenchmarkSettings"
+          },
+          "evals": {
+            "$ref": "#/components/schemas/EvalSettings"
+          },
+          "subscriptions": {
+            "$ref": "#/components/schemas/SubscriptionSettings"
+          }
+        },
+        "type": "object",
+        "title": "AppSettings"
+      },
+      "AuthStatus": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "authenticated": {
+            "type": "boolean",
+            "title": "Authenticated"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled",
+          "authenticated"
+        ],
+        "title": "AuthStatus"
+      },
+      "BalanceOut": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "fetched_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fetched At"
+          },
+          "account_balance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Balance"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "USD"
+          },
+          "account_total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Total"
+          },
+          "account_used": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Used"
+          },
+          "key_usage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Usage"
+          },
+          "key_limit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Limit"
+          },
+          "key_remaining": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Remaining"
+          },
+          "key_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Label"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "details": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Details"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "BalanceOut"
+      },
+      "BenchmarkSettings": {
+        "properties": {
+          "sources": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BenchmarkSourceSettings"
+            },
+            "type": "object",
+            "title": "Sources"
+          },
+          "aa_terms_acknowledged": {
+            "type": "boolean",
+            "title": "Aa Terms Acknowledged",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "BenchmarkSettings"
+      },
+      "BenchmarkSourceOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "homepage": {
+            "type": "string",
+            "title": "Homepage"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "license": {
+            "type": "string",
+            "title": "License"
+          },
+          "attribution": {
+            "type": "string",
+            "title": "Attribution"
+          },
+          "default_enabled": {
+            "type": "boolean",
+            "title": "Default Enabled"
+          },
+          "requires_key": {
+            "type": "boolean",
+            "title": "Requires Key"
+          },
+          "key_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Label"
+          },
+          "key_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Url"
+          },
+          "terms_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terms Warning"
+          },
+          "metrics": {
+            "items": {
+              "$ref": "#/components/schemas/vibonomics__api__settings__MetricOut"
+            },
+            "type": "array",
+            "title": "Metrics"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "key_set": {
+            "type": "boolean",
+            "title": "Key Set"
+          },
+          "key_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Hint"
+          },
+          "records": {
+            "type": "integer",
+            "title": "Records"
+          },
+          "matched": {
+            "type": "integer",
+            "title": "Matched"
+          },
+          "fetched_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fetched At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "homepage",
+          "description",
+          "license",
+          "attribution",
+          "default_enabled",
+          "requires_key",
+          "key_label",
+          "key_url",
+          "terms_warning",
+          "metrics",
+          "enabled",
+          "key_set",
+          "key_hint",
+          "records",
+          "matched",
+          "fetched_at"
+        ],
+        "title": "BenchmarkSourceOut"
+      },
+      "BenchmarkSourceSettings": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "api_key_enc": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key Enc"
+          }
+        },
+        "type": "object",
+        "title": "BenchmarkSourceSettings"
+      },
+      "CanonicalOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "CanonicalOut"
+      },
+      "ClaudeSubscriptionOut": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnapshotOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ingest_path": {
+            "type": "string",
+            "title": "Ingest Path"
+          },
+          "ingest_token": {
+            "type": "string",
+            "title": "Ingest Token"
+          },
+          "statusline_command": {
+            "type": "string",
+            "title": "Statusline Command"
+          },
+          "docs_url": {
+            "type": "string",
+            "title": "Docs Url"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "title",
+          "snapshot",
+          "ingest_path",
+          "ingest_token",
+          "statusline_command",
+          "docs_url",
+          "note"
+        ],
+        "title": "ClaudeSubscriptionOut"
+      },
+      "EvalResultOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "provider_id": {
+            "type": "integer",
+            "title": "Provider Id"
+          },
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "check_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Score"
+          },
+          "judge_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Score"
+          },
+          "judge_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Notes"
+          },
+          "steps": {
+            "type": "integer",
+            "title": "Steps"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "title": "Latency Ms"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "transcript": {
+            "items": {},
+            "type": "array",
+            "title": "Transcript"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider_id",
+          "model_id",
+          "task_id",
+          "category",
+          "status",
+          "score",
+          "check_score",
+          "judge_score",
+          "judge_notes",
+          "steps",
+          "input_tokens",
+          "output_tokens",
+          "cost_usd",
+          "latency_ms",
+          "error"
+        ],
+        "title": "EvalResultOut"
+      },
+      "EvalRunDetail": {
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/EvalRunOut"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/EvalResultOut"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run",
+          "results"
+        ],
+        "title": "EvalRunDetail"
+      },
+      "EvalRunIn": {
+        "properties": {
+          "suite": {
+            "type": "string",
+            "title": "Suite"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/ModelRef"
+            },
+            "type": "array",
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Targets"
+          },
+          "judge": {
+            "$ref": "#/components/schemas/ModelRef"
+          },
+          "task_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "suite",
+          "targets",
+          "judge"
+        ],
+        "title": "EvalRunIn"
+      },
+      "EvalRunOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "suite": {
+            "type": "string",
+            "title": "Suite"
+          },
+          "judge_provider_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Provider Id"
+          },
+          "judge_model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Model Id"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/TargetOut"
+            },
+            "type": "array",
+            "title": "Targets"
+          },
+          "progress": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Progress"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Summary"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "created_at",
+          "finished_at",
+          "status",
+          "suite",
+          "judge_provider_id",
+          "judge_model_id",
+          "targets",
+          "progress",
+          "summary",
+          "error"
+        ],
+        "title": "EvalRunOut"
+      },
+      "EvalSettings": {
+        "properties": {
+          "judge_provider_config_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Provider Config Id"
+          },
+          "judge_model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Model Id"
+          },
+          "max_steps": {
+            "type": "integer",
+            "maximum": 60.0,
+            "minimum": 2.0,
+            "title": "Max Steps",
+            "default": 14
+          },
+          "max_output_tokens": {
+            "type": "integer",
+            "maximum": 65536.0,
+            "minimum": 256.0,
+            "title": "Max Output Tokens",
+            "default": 4096
+          },
+          "concurrency": {
+            "type": "integer",
+            "maximum": 8.0,
+            "minimum": 1.0,
+            "title": "Concurrency",
+            "default": 2
+          },
+          "request_timeout_seconds": {
+            "type": "integer",
+            "maximum": 1800.0,
+            "minimum": 10.0,
+            "title": "Request Timeout Seconds",
+            "default": 180
+          },
+          "sandbox_mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "sidecar",
+              "local",
+              "disabled"
+            ],
+            "title": "Sandbox Mode",
+            "description": "auto = sidecar when VIBONOMICS_SANDBOX_URL is set, otherwise disabled",
+            "default": "auto"
+          }
+        },
+        "type": "object",
+        "title": "EvalSettings"
+      },
+      "ExtraUsageOut": {
+        "properties": {
+          "used": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "utilization": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Utilization"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "USD"
+          },
+          "monthly": {
+            "type": "boolean",
+            "title": "Monthly",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "ExtraUsageOut"
+      },
+      "GeneralSettings": {
+        "properties": {
+          "instance_name": {
+            "type": "string",
+            "title": "Instance Name",
+            "default": "Vibonomics"
+          },
+          "hide_inactive_models": {
+            "type": "boolean",
+            "title": "Hide Inactive Models",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "GeneralSettings"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HighlightSettings": {
+        "properties": {
+          "new_model_days": {
+            "type": "integer",
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "New Model Days",
+            "default": 7
+          },
+          "new_discount_days": {
+            "type": "integer",
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "New Discount Days",
+            "default": 7
+          }
+        },
+        "type": "object",
+        "title": "HighlightSettings"
+      },
+      "JudgeOut": {
+        "properties": {
+          "provider_id": {
+            "type": "integer",
+            "title": "Provider Id"
+          },
+          "provider_name": {
+            "type": "string",
+            "title": "Provider Name"
+          },
+          "provider_type": {
+            "type": "string",
+            "title": "Provider Type"
+          },
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "composite": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Composite"
+          },
+          "is_free": {
+            "type": "boolean",
+            "title": "Is Free"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider_id",
+          "provider_name",
+          "provider_type",
+          "model_id",
+          "name",
+          "composite",
+          "is_free"
+        ],
+        "title": "JudgeOut"
+      },
+      "LoginIn": {
+        "properties": {
+          "password": {
+            "type": "string",
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "title": "LoginIn"
+      },
+      "ModelDetail": {
+        "properties": {
+          "row": {
+            "$ref": "#/components/schemas/ModelRow"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "metrics": {
+            "items": {
+              "$ref": "#/components/schemas/vibonomics__api__models__MetricOut"
+            },
+            "type": "array",
+            "title": "Metrics"
+          },
+          "reported_cost_sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reported Cost Sources"
+          },
+          "price_history": {
+            "items": {
+              "$ref": "#/components/schemas/PricePointOut"
+            },
+            "type": "array",
+            "title": "Price History"
+          },
+          "other_offers": {
+            "items": {
+              "$ref": "#/components/schemas/OtherOfferOut"
+            },
+            "type": "array",
+            "title": "Other Offers"
+          },
+          "endpoints": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Endpoints"
+          },
+          "tests": {
+            "items": {
+              "$ref": "#/components/schemas/TestResultOut"
+            },
+            "type": "array",
+            "title": "Tests"
+          },
+          "snippets": {
+            "items": {
+              "$ref": "#/components/schemas/SnippetOut"
+            },
+            "type": "array",
+            "title": "Snippets"
+          },
+          "attributions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Attributions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "row",
+          "description",
+          "metrics",
+          "reported_cost_sources",
+          "price_history",
+          "other_offers",
+          "endpoints",
+          "tests",
+          "snippets",
+          "attributions"
+        ],
+        "title": "ModelDetail"
+      },
+      "ModelRef": {
+        "properties": {
+          "provider_id": {
+            "type": "integer",
+            "title": "Provider Id"
+          },
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider_id",
+          "model_id"
+        ],
+        "title": "ModelRef"
+      },
+      "ModelRow": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "provider_id": {
+            "type": "integer",
+            "title": "Provider Id"
+          },
+          "provider_type": {
+            "type": "string",
+            "title": "Provider Type"
+          },
+          "provider_name": {
+            "type": "string",
+            "title": "Provider Name"
+          },
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "creator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Creator"
+          },
+          "canonical_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Id"
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "max_output": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output"
+          },
+          "input_modalities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Input Modalities"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning"
+          },
+          "tool_call": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call"
+          },
+          "open_weights": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open Weights"
+          },
+          "release_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Date"
+          },
+          "price": {
+            "$ref": "#/components/schemas/PriceOut"
+          },
+          "list_price": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriceOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "discount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount"
+          },
+          "discount_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Note"
+          },
+          "discount_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Until"
+          },
+          "is_free": {
+            "type": "boolean",
+            "title": "Is Free"
+          },
+          "pricing_source": {
+            "type": "string",
+            "title": "Pricing Source"
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time",
+            "title": "First Seen"
+          },
+          "is_new": {
+            "type": "boolean",
+            "title": "Is New"
+          },
+          "new_discount": {
+            "type": "boolean",
+            "title": "New Discount"
+          },
+          "price_drop": {
+            "type": "boolean",
+            "title": "Price Drop"
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active"
+          },
+          "testable": {
+            "type": "boolean",
+            "title": "Testable"
+          },
+          "scores": {
+            "$ref": "#/components/schemas/ScoresOut"
+          },
+          "reported_cost_per_task": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported Cost Per Task"
+          },
+          "test": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestSummaryOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider_id",
+          "provider_type",
+          "provider_name",
+          "model_id",
+          "name",
+          "creator",
+          "canonical_id",
+          "family",
+          "context_length",
+          "max_output",
+          "input_modalities",
+          "reasoning",
+          "tool_call",
+          "open_weights",
+          "release_date",
+          "price",
+          "list_price",
+          "discount",
+          "discount_note",
+          "discount_until",
+          "is_free",
+          "pricing_source",
+          "first_seen",
+          "is_new",
+          "new_discount",
+          "price_drop",
+          "active",
+          "testable",
+          "scores",
+          "reported_cost_per_task",
+          "test"
+        ],
+        "title": "ModelRow"
+      },
+      "ModelsResponse": {
+        "properties": {
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelRow"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/UsageProfile"
+            },
+            "type": "array",
+            "title": "Profiles"
+          },
+          "default_profile": {
+            "type": "string",
+            "title": "Default Profile"
+          },
+          "provider_count": {
+            "type": "integer",
+            "title": "Provider Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generated_at",
+          "models",
+          "profiles",
+          "default_profile",
+          "provider_count"
+        ],
+        "title": "ModelsResponse"
+      },
+      "OptionFieldOut": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "required": {
+            "type": "boolean",
+            "title": "Required"
+          },
+          "placeholder": {
+            "type": "string",
+            "title": "Placeholder"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "description",
+          "required",
+          "placeholder"
+        ],
+        "title": "OptionFieldOut"
+      },
+      "OtherOfferOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "provider_name": {
+            "type": "string",
+            "title": "Provider Name"
+          },
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "price": {
+            "$ref": "#/components/schemas/PriceOut"
+          },
+          "discount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount"
+          },
+          "is_free": {
+            "type": "boolean",
+            "title": "Is Free"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider_name",
+          "model_id",
+          "price",
+          "discount",
+          "is_free"
+        ],
+        "title": "OtherOfferOut"
+      },
+      "PriceOut": {
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "output": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "cache_read": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read"
+          },
+          "cache_write": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Write"
+          }
+        },
+        "type": "object",
+        "title": "PriceOut"
+      },
+      "PricePointOut": {
+        "properties": {
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Observed At"
+          },
+          "price_input": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Input"
+          },
+          "price_output": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Output"
+          },
+          "price_cache_read": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Cache Read"
+          },
+          "discount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount"
+          }
+        },
+        "type": "object",
+        "required": [
+          "observed_at",
+          "price_input",
+          "price_output",
+          "price_cache_read",
+          "discount"
+        ],
+        "title": "PricePointOut"
+      },
+      "ProviderIn": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "options": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Options"
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key",
+            "description": "null keeps the stored key, empty string clears it"
+          },
+          "mgmt_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mgmt Key"
+          },
+          "extra_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "ProviderIn"
+      },
+      "ProviderOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "options": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Options"
+          },
+          "api_key_set": {
+            "type": "boolean",
+            "title": "Api Key Set"
+          },
+          "api_key_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key Hint"
+          },
+          "api_key_locked": {
+            "type": "boolean",
+            "title": "Api Key Locked"
+          },
+          "mgmt_key_set": {
+            "type": "boolean",
+            "title": "Mgmt Key Set"
+          },
+          "mgmt_key_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mgmt Key Hint"
+          },
+          "mgmt_key_locked": {
+            "type": "boolean",
+            "title": "Mgmt Key Locked"
+          },
+          "extra_key_set": {
+            "type": "boolean",
+            "title": "Extra Key Set",
+            "default": false
+          },
+          "extra_key_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Key Hint"
+          },
+          "extra_key_locked": {
+            "type": "boolean",
+            "title": "Extra Key Locked",
+            "default": false
+          },
+          "last_refresh_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Refresh At"
+          },
+          "last_refresh_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Refresh Status"
+          },
+          "last_refresh_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Refresh Message"
+          },
+          "model_count": {
+            "type": "integer",
+            "title": "Model Count"
+          },
+          "balance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BalanceOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "billing_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Url"
+          },
+          "balance_support": {
+            "type": "string",
+            "title": "Balance Support"
+          },
+          "balance_note": {
+            "type": "string",
+            "title": "Balance Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "name",
+          "enabled",
+          "base_url",
+          "options",
+          "api_key_set",
+          "api_key_hint",
+          "api_key_locked",
+          "mgmt_key_set",
+          "mgmt_key_hint",
+          "mgmt_key_locked",
+          "last_refresh_at",
+          "last_refresh_status",
+          "last_refresh_message",
+          "model_count",
+          "balance",
+          "billing_url",
+          "balance_support",
+          "balance_note"
+        ],
+        "title": "ProviderOut"
+      },
+      "ProviderTestOverride": {
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "mgmt_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mgmt Key"
+          },
+          "extra_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Key"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Options"
+          }
+        },
+        "type": "object",
+        "title": "ProviderTestOverride",
+        "description": "Values from an unsaved form; only the fields present replace the stored ones."
+      },
+      "ProviderTypeOut": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "homepage": {
+            "type": "string",
+            "title": "Homepage"
+          },
+          "keys_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keys Url"
+          },
+          "billing_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Url"
+          },
+          "default_base_url": {
+            "type": "string",
+            "title": "Default Base Url"
+          },
+          "balance": {
+            "type": "string",
+            "title": "Balance"
+          },
+          "balance_note": {
+            "type": "string",
+            "title": "Balance Note"
+          },
+          "mgmt_key_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mgmt Key Label"
+          },
+          "mgmt_key_help": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mgmt Key Help"
+          },
+          "models_require_key": {
+            "type": "boolean",
+            "title": "Models Require Key"
+          },
+          "custom": {
+            "type": "boolean",
+            "title": "Custom"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/OptionFieldOut"
+            },
+            "type": "array",
+            "title": "Options"
+          },
+          "env_key": {
+            "type": "string",
+            "title": "Env Key"
+          },
+          "env_mgmt_key": {
+            "type": "string",
+            "title": "Env Mgmt Key"
+          },
+          "extra_key_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Key Label"
+          },
+          "extra_key_help": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Key Help"
+          },
+          "extra_key_env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Key Env"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "name",
+          "description",
+          "homepage",
+          "keys_url",
+          "billing_url",
+          "default_base_url",
+          "balance",
+          "balance_note",
+          "mgmt_key_label",
+          "mgmt_key_help",
+          "models_require_key",
+          "custom",
+          "options",
+          "env_key",
+          "env_mgmt_key"
+        ],
+        "title": "ProviderTypeOut"
+      },
+      "ProviderUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Options"
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "mgmt_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mgmt Key"
+          },
+          "extra_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Key"
+          }
+        },
+        "type": "object",
+        "title": "ProviderUpdate"
+      },
+      "RefreshIn": {
+        "properties": {
+          "kinds": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "models",
+                "balances",
+                "benchmarks"
+              ]
+            },
+            "type": "array",
+            "title": "Kinds"
+          }
+        },
+        "type": "object",
+        "title": "RefreshIn"
+      },
+      "RefreshRunOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "trigger": {
+            "type": "string",
+            "title": "Trigger"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "stats": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Stats"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "trigger",
+          "started_at",
+          "finished_at",
+          "status",
+          "message",
+          "stats"
+        ],
+        "title": "RefreshRunOut"
+      },
+      "RefreshSettings": {
+        "properties": {
+          "models_interval_hours": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Models Interval Hours",
+            "description": "0 disables scheduled model/price refresh",
+            "default": 6
+          },
+          "balances_interval_minutes": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Balances Interval Minutes",
+            "default": 30
+          },
+          "benchmarks_interval_hours": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Benchmarks Interval Hours",
+            "default": 24
+          },
+          "refresh_on_startup": {
+            "type": "boolean",
+            "title": "Refresh On Startup",
+            "default": true
+          },
+          "openrouter_endpoint_discounts": {
+            "type": "boolean",
+            "title": "Openrouter Endpoint Discounts",
+            "description": "Query OpenRouter's per-provider endpoints to detect discounts (one request per model)",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "RefreshSettings"
+      },
+      "RefreshStatus": {
+        "properties": {
+          "running": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Running"
+          },
+          "last": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RefreshRunOut"
+            },
+            "type": "object",
+            "title": "Last"
+          }
+        },
+        "type": "object",
+        "required": [
+          "running",
+          "last"
+        ],
+        "title": "RefreshStatus"
+      },
+      "SandboxInfo": {
+        "properties": {
+          "effective_mode": {
+            "type": "string",
+            "title": "Effective Mode"
+          },
+          "sidecar_url_set": {
+            "type": "boolean",
+            "title": "Sidecar Url Set"
+          }
+        },
+        "type": "object",
+        "required": [
+          "effective_mode",
+          "sidecar_url_set"
+        ],
+        "title": "SandboxInfo"
+      },
+      "ScoreRowOut": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "source_model": {
+            "type": "string",
+            "title": "Source Model"
+          },
+          "metrics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Metrics"
+          },
+          "canonical_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Id"
+          },
+          "match_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match Method"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "source_model",
+          "metrics",
+          "canonical_id",
+          "match_method"
+        ],
+        "title": "ScoreRowOut"
+      },
+      "ScoresOut": {
+        "properties": {
+          "intelligence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intelligence"
+          },
+          "coding": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coding"
+          },
+          "agentic": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agentic"
+          },
+          "composite": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Composite"
+          },
+          "own_test": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Own Test"
+          },
+          "source_count": {
+            "type": "integer",
+            "title": "Source Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "ScoresOut"
+      },
+      "ScoringSettings": {
+        "properties": {
+          "intelligence_weight": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Intelligence Weight",
+            "default": 0.3
+          },
+          "coding_weight": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Coding Weight",
+            "default": 0.35
+          },
+          "agentic_weight": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Agentic Weight",
+            "default": 0.35
+          },
+          "own_tests_weight": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Own Tests Weight",
+            "description": "Weight of Vibonomics's own test results vs third-party data",
+            "default": 1.0
+          },
+          "free_model_cost": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Free Model Cost",
+            "description": "Assumed blended USD per 1M tokens for free models when ranking value (they would otherwise have infinite value)",
+            "default": 0.01
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/UsageProfile"
+            },
+            "type": "array",
+            "title": "Profiles"
+          },
+          "default_profile": {
+            "type": "string",
+            "title": "Default Profile",
+            "default": "agentic"
+          }
+        },
+        "type": "object",
+        "title": "ScoringSettings"
+      },
+      "SettingsIn": {
+        "properties": {
+          "settings": {
+            "$ref": "#/components/schemas/AppSettings"
+          },
+          "benchmark_keys": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Benchmark Keys",
+            "description": "source id \u2192 new key; empty string clears, omitted keeps"
+          }
+        },
+        "type": "object",
+        "required": [
+          "settings"
+        ],
+        "title": "SettingsIn"
+      },
+      "SettingsOut": {
+        "properties": {
+          "settings": {
+            "$ref": "#/components/schemas/AppSettings"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/BenchmarkSourceOut"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/SandboxInfo"
+          },
+          "auth_enabled": {
+            "type": "boolean",
+            "title": "Auth Enabled"
+          },
+          "secret_key_from_env": {
+            "type": "boolean",
+            "title": "Secret Key From Env"
+          }
+        },
+        "type": "object",
+        "required": [
+          "settings",
+          "sources",
+          "sandbox",
+          "auth_enabled",
+          "secret_key_from_env"
+        ],
+        "title": "SettingsOut"
+      },
+      "SnapshotOut": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Received At"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/WindowOut"
+            },
+            "type": "array",
+            "title": "Windows"
+          },
+          "extra_usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtraUsageOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "spend_limit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SpendLimitOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "received_at"
+        ],
+        "title": "SnapshotOut"
+      },
+      "SnippetOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "harness": {
+            "type": "string",
+            "title": "Harness"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "language": {
+            "type": "string",
+            "title": "Language"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "docs_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docs Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "harness",
+          "title",
+          "language",
+          "content"
+        ],
+        "title": "SnippetOut"
+      },
+      "SpendLimitOut": {
+        "properties": {
+          "used_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Usd"
+          },
+          "limit_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit Usd"
+          },
+          "used_percentage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Percentage"
+          },
+          "resets_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resets At"
+          },
+          "period": {
+            "type": "string",
+            "title": "Period",
+            "default": "monthly"
+          }
+        },
+        "type": "object",
+        "title": "SpendLimitOut"
+      },
+      "SubscriptionSettings": {
+        "properties": {
+          "claude_ingest_token_enc": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claude Ingest Token Enc"
+          }
+        },
+        "type": "object",
+        "title": "SubscriptionSettings"
+      },
+      "SuiteOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/TaskOut"
+            },
+            "type": "array",
+            "title": "Tasks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "tasks"
+        ],
+        "title": "SuiteOut"
+      },
+      "SystemStatus": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "instance_name": {
+            "type": "string",
+            "title": "Instance Name"
+          },
+          "url_base": {
+            "type": "string",
+            "title": "Url Base"
+          },
+          "sandbox_mode": {
+            "type": "string",
+            "title": "Sandbox Mode"
+          },
+          "auth_enabled": {
+            "type": "boolean",
+            "title": "Auth Enabled"
+          },
+          "running_jobs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Running Jobs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "instance_name",
+          "url_base",
+          "sandbox_mode",
+          "auth_enabled",
+          "running_jobs"
+        ],
+        "title": "SystemStatus"
+      },
+      "TargetOut": {
+        "properties": {
+          "provider_id": {
+            "type": "integer",
+            "title": "Provider Id"
+          },
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "provider_name": {
+            "type": "string",
+            "title": "Provider Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider_id",
+          "model_id",
+          "name",
+          "provider_name"
+        ],
+        "title": "TargetOut"
+      },
+      "TaskOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "uses_sandbox": {
+            "type": "boolean",
+            "title": "Uses Sandbox"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "category",
+          "description",
+          "uses_sandbox"
+        ],
+        "title": "TaskOut"
+      },
+      "TestResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "message"
+        ],
+        "title": "TestResult"
+      },
+      "TestResultOut": {
+        "properties": {
+          "run_id": {
+            "type": "integer",
+            "title": "Run Id"
+          },
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "judge_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Notes"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "task_id",
+          "category",
+          "status",
+          "score",
+          "judge_notes",
+          "created_at"
+        ],
+        "title": "TestResultOut"
+      },
+      "TestSummaryOut": {
+        "properties": {
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "tasks": {
+            "type": "integer",
+            "title": "Tasks",
+            "default": 0
+          },
+          "runs": {
+            "type": "integer",
+            "title": "Runs",
+            "default": 0
+          },
+          "last_run_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run At"
+          },
+          "tokens_per_task": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Per Task"
+          },
+          "cost_per_task": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Task"
+          }
+        },
+        "type": "object",
+        "title": "TestSummaryOut"
+      },
+      "UsageProfile": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "input_weight": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Input Weight"
+          },
+          "output_weight": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Output Weight"
+          },
+          "cache_hit_rate": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Cache Hit Rate",
+            "default": 0
+          },
+          "task_input_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Task Input Tokens"
+          },
+          "task_output_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Task Output Tokens"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "input_weight",
+          "output_weight",
+          "task_input_tokens",
+          "task_output_tokens"
+        ],
+        "title": "UsageProfile",
+        "description": "How input/output/cache prices are folded into one blended $/1M figure and an estimated task cost."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WindowOut": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "used_percentage": {
+            "type": "number",
+            "title": "Used Percentage"
+          },
+          "resets_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resets At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "used_percentage"
+        ],
+        "title": "WindowOut"
+      },
+      "vibonomics__api__models__MetricOut": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "source_name": {
+            "type": "string",
+            "title": "Source Name"
+          },
+          "metric": {
+            "type": "string",
+            "title": "Metric"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "dimension": {
+            "type": "string",
+            "title": "Dimension"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value"
+          },
+          "percentile": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percentile"
+          },
+          "effort": {
+            "type": "string",
+            "title": "Effort"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "cost_per_task": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Task"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "source_name",
+          "metric",
+          "label",
+          "dimension",
+          "value",
+          "percentile",
+          "effort",
+          "as_of",
+          "url",
+          "cost_per_task"
+        ],
+        "title": "MetricOut"
+      },
+      "vibonomics__api__settings__MetricOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "dimension": {
+            "type": "string",
+            "title": "Dimension"
+          },
+          "unit": {
+            "type": "string",
+            "title": "Unit"
+          },
+          "weight": {
+            "type": "number",
+            "title": "Weight"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "dimension",
+          "unit",
+          "weight",
+          "description"
+        ],
+        "title": "MetricOut"
+      }
+    }
+  }
+}

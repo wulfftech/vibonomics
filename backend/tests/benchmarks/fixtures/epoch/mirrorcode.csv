@@ -1,0 +1,3 @@
+Model version,mean_score,Best score (across scorers),Release date,Organization,Country,Training compute (FLOP),Training compute notes,stderr,Log viewer,Logs,Started at,id
+gemini-4-argon_high,0.5888888888888889,0.5888888888888889,2026-09-30,Google DeepMind,United States of America,,,0.1171381252539371,,,2026-10-14T10:00:34.000Z,h7xMzFUTMGSGqUSKUpxkUW
+claude-opus-5-5_max,0.774,0.774,2026-09-22,Anthropic,United States of America,,,0.0831,,,2026-09-22T16:42:00.000Z,mirrorcode-ml-2l-claude-opus-5-5

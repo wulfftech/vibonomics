@@ -1,0 +1,341 @@
+"""Provider configuration (keys), connection tests and balances."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .. import crypto, events
+from ..catalog.modelsdev import load_catalog
+from ..db import get_session, session_scope
+from ..http import FetchError
+from ..jobs import run_job, spawn
+from ..orm import Balance, ProviderConfig
+from ..provider_service import env_locked, resolve
+from ..providers.base import FetchContext, ResolvedProvider
+from ..providers.registry import all_specs, get_adapter_class
+from ..settings_store import load_settings
+
+router = APIRouter(prefix="/api/providers", tags=["providers"])
+
+
+class OptionFieldOut(BaseModel):
+    key: str
+    label: str
+    description: str
+    required: bool
+    placeholder: str
+
+
+class ProviderTypeOut(BaseModel):
+    type: str
+    name: str
+    description: str
+    homepage: str
+    keys_url: str | None
+    billing_url: str | None
+    default_base_url: str
+    balance: str
+    balance_note: str
+    mgmt_key_label: str | None
+    mgmt_key_help: str | None
+    models_require_key: bool
+    custom: bool
+    options: list[OptionFieldOut]
+    env_key: str
+    env_mgmt_key: str
+    extra_key_label: str | None = None
+    extra_key_help: str | None = None
+    extra_key_env: str | None = None
+
+
+class BalanceOut(BaseModel):
+    status: str
+    fetched_at: datetime | None = None
+    account_balance: float | None = None
+    currency: str = "USD"
+    account_total: float | None = None
+    account_used: float | None = None
+    key_usage: float | None = None
+    key_limit: float | None = None
+    key_remaining: float | None = None
+    key_label: str | None = None
+    message: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProviderOut(BaseModel):
+    id: int
+    type: str
+    name: str
+    enabled: bool
+    base_url: str | None
+    options: dict[str, Any]
+    api_key_set: bool
+    api_key_hint: str | None
+    api_key_locked: bool
+    mgmt_key_set: bool
+    mgmt_key_hint: str | None
+    mgmt_key_locked: bool
+    extra_key_set: bool = False
+    extra_key_hint: str | None = None
+    extra_key_locked: bool = False
+    last_refresh_at: datetime | None
+    last_refresh_status: str | None
+    last_refresh_message: str | None
+    model_count: int
+    balance: BalanceOut | None
+    billing_url: str | None
+    balance_support: str
+    balance_note: str
+
+
+class ProviderIn(BaseModel):
+    type: str
+    name: str | None = None
+    enabled: bool = True
+    base_url: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+    api_key: str | None = Field(None, description="null keeps the stored key, empty string clears it")
+    mgmt_key: str | None = None
+    extra_key: str | None = None
+
+
+class ProviderUpdate(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    base_url: str | None = None
+    options: dict[str, Any] | None = None
+    api_key: str | None = None
+    mgmt_key: str | None = None
+    extra_key: str | None = None
+
+
+class TestResult(BaseModel):
+    ok: bool
+    message: str
+
+
+class ProviderTestOverride(BaseModel):
+    """Values from an unsaved form; only the fields present replace the stored ones."""
+
+    api_key: str | None = None
+    mgmt_key: str | None = None
+    extra_key: str | None = None
+    base_url: str | None = None
+    options: dict[str, Any] | None = None
+
+
+@router.get("/types", response_model=list[ProviderTypeOut])
+def provider_types() -> list[ProviderTypeOut]:
+    return [
+        ProviderTypeOut(
+            type=s.type,
+            name=s.name,
+            description=s.description,
+            homepage=s.homepage,
+            keys_url=s.keys_url,
+            billing_url=s.billing_url,
+            default_base_url=s.default_base_url,
+            balance=s.balance,
+            balance_note=s.balance_note,
+            mgmt_key_label=s.mgmt_key_label,
+            mgmt_key_help=s.mgmt_key_help,
+            models_require_key=s.models_require_key,
+            custom=s.custom,
+            options=[OptionFieldOut(**o.__dict__) for o in s.options],
+            env_key=s.env_key,
+            env_mgmt_key=s.env_mgmt_key,
+            extra_key_label=s.extra_key_label,
+            extra_key_help=s.extra_key_help,
+            extra_key_env=s.env_extra_key if s.extra_key_label else None,
+        )
+        for s in sorted(all_specs(), key=lambda s: (s.custom, s.name.lower()))
+    ]
+
+
+def _balance_out(b: Balance | None) -> BalanceOut | None:
+    if b is None:
+        return None
+    return BalanceOut.model_validate(b, from_attributes=True)
+
+
+def _provider_out(p: ProviderConfig, session: Session) -> ProviderOut:
+    resolved = resolve(p)
+    key_locked, mgmt_locked, extra_locked = env_locked(p.type)
+    cls = get_adapter_class(p.type)
+    return ProviderOut(
+        id=p.id,
+        type=p.type,
+        name=p.name,
+        enabled=p.enabled,
+        base_url=p.base_url,
+        options=dict(p.options or {}),
+        api_key_set=bool(resolved.api_key),
+        api_key_hint=crypto.mask(resolved.api_key),
+        api_key_locked=key_locked,
+        mgmt_key_set=bool(resolved.mgmt_key),
+        mgmt_key_hint=crypto.mask(resolved.mgmt_key),
+        mgmt_key_locked=mgmt_locked,
+        extra_key_set=bool(resolved.extra_key),
+        extra_key_hint=crypto.mask(resolved.extra_key),
+        extra_key_locked=extra_locked,
+        last_refresh_at=p.last_refresh_at,
+        last_refresh_status=p.last_refresh_status,
+        last_refresh_message=p.last_refresh_message,
+        model_count=sum(1 for m in p.models if m.active),
+        balance=_balance_out(session.get(Balance, p.id)),
+        billing_url=cls.spec.billing_url if cls else None,
+        balance_support=cls.spec.balance if cls else "none",
+        balance_note=cls.spec.balance_note if cls else "",
+    )
+
+
+@router.get("", response_model=list[ProviderOut])
+def list_providers(session: Session = Depends(get_session)) -> list[ProviderOut]:
+    providers = session.scalars(select(ProviderConfig).order_by(ProviderConfig.name)).all()
+    return [_provider_out(p, session) for p in providers]
+
+
+def _apply_secret(current: str | None, new_value: str | None) -> str | None:
+    if new_value is None:
+        return current
+    return crypto.encrypt(new_value.strip()) if new_value.strip() else None
+
+
+@router.post("", response_model=ProviderOut, status_code=201)
+def create_provider(body: ProviderIn, session: Session = Depends(get_session)) -> ProviderOut:
+    cls = get_adapter_class(body.type)
+    if cls is None:
+        raise HTTPException(400, f"Unknown provider type '{body.type}'")
+    if cls.spec.custom and not body.base_url:
+        raise HTTPException(400, "A base URL is required for custom providers")
+    p = ProviderConfig(
+        type=body.type,
+        name=(body.name or cls.spec.name).strip(),
+        enabled=body.enabled,
+        base_url=(body.base_url or "").strip() or None,
+        options=body.options,
+        api_key_enc=_apply_secret(None, body.api_key),
+        mgmt_key_enc=_apply_secret(None, body.mgmt_key),
+        extra_key_enc=_apply_secret(None, body.extra_key),
+    )
+    session.add(p)
+    session.flush()
+    events.publish("providers.changed", {"id": p.id})
+    return _provider_out(p, session)
+
+
+@router.put("/{provider_id}", response_model=ProviderOut)
+def update_provider(provider_id: int, body: ProviderUpdate, session: Session = Depends(get_session)) -> ProviderOut:
+    p = session.get(ProviderConfig, provider_id)
+    if p is None:
+        raise HTTPException(404, "Provider not found")
+    if body.name is not None:
+        p.name = body.name.strip() or p.name
+    if body.enabled is not None:
+        p.enabled = body.enabled
+    if body.base_url is not None:
+        p.base_url = body.base_url.strip() or None
+    if body.options is not None:
+        p.options = body.options
+    p.api_key_enc = _apply_secret(p.api_key_enc, body.api_key)
+    p.mgmt_key_enc = _apply_secret(p.mgmt_key_enc, body.mgmt_key)
+    p.extra_key_enc = _apply_secret(p.extra_key_enc, body.extra_key)
+    session.flush()
+    events.publish("providers.changed", {"id": p.id})
+    return _provider_out(p, session)
+
+
+@router.delete("/{provider_id}", status_code=204)
+def delete_provider(provider_id: int, session: Session = Depends(get_session)) -> None:
+    p = session.get(ProviderConfig, provider_id)
+    if p is None:
+        raise HTTPException(404, "Provider not found")
+    session.delete(p)
+    events.publish("providers.changed", {"id": provider_id})
+
+
+@router.post("/test", response_model=TestResult)
+async def test_provider_draft(body: ProviderIn) -> TestResult:
+    """Test the values currently in the add-provider form, before anything is saved."""
+    cls = get_adapter_class(body.type)
+    if cls is None:
+        raise HTTPException(400, f"Unknown provider type '{body.type}'")
+    if cls.spec.custom and not (body.base_url or "").strip():
+        raise HTTPException(400, "A base URL is required for custom providers")
+    transient = ProviderConfig(
+        type=body.type,
+        name=(body.name or cls.spec.name).strip(),
+        base_url=(body.base_url or "").strip() or None,
+        options=body.options or {},
+        api_key_enc=crypto.encrypt(body.api_key) if body.api_key else None,
+        mgmt_key_enc=crypto.encrypt(body.mgmt_key) if body.mgmt_key else None,
+        extra_key_enc=crypto.encrypt(body.extra_key) if body.extra_key else None,
+    )
+    with session_scope() as session:
+        settings = load_settings(session)
+    return await _run_test(resolve(transient), settings)
+
+
+@router.post("/{provider_id}/test", response_model=TestResult)
+async def test_provider(provider_id: int, body: ProviderTestOverride | None = None) -> TestResult:
+    """Test the saved configuration, optionally overriding fields from the open form."""
+    with session_scope() as session:
+        p = session.get(ProviderConfig, provider_id)
+        if p is None:
+            raise HTTPException(404, "Provider not found")
+        settings = load_settings(session)
+    resolved = _override(resolve(p), body)
+    return await _run_test(resolved, settings)
+
+
+def _override(cfg: ResolvedProvider, body: ProviderTestOverride | None) -> ResolvedProvider:
+    if body is None:
+        return cfg
+    if body.api_key is not None:
+        cfg.api_key = body.api_key.strip() or None
+    if body.mgmt_key is not None:
+        cfg.mgmt_key = body.mgmt_key.strip() or None
+    if body.extra_key is not None:
+        cfg.extra_key = body.extra_key.strip() or None
+    if body.base_url is not None:
+        cfg.base_url = body.base_url.strip() or None
+    if body.options is not None:
+        cfg.options = {**cfg.options, **{k: v for k, v in body.options.items() if v not in (None, "")}}
+    return cfg
+
+
+async def _run_test(resolved: ResolvedProvider, settings: Any) -> TestResult:
+    adapter_cls = get_adapter_class(resolved.type)
+    if adapter_cls is None:
+        raise HTTPException(400, "Unknown provider type")
+    catalog = await load_catalog()
+    adapter = adapter_cls(resolved, FetchContext(catalog=catalog, settings=settings))
+    try:
+        message = await asyncio.wait_for(adapter.test_connection(), 45)
+        return TestResult(ok=True, message=message)
+    except TimeoutError:
+        return TestResult(ok=False, message="Timed out after 45 seconds")
+    except FetchError as exc:
+        return TestResult(ok=False, message=str(exc) or "The provider rejected the request")
+    except Exception as exc:  # a bad base URL or unexpected payload should still explain itself
+        return TestResult(ok=False, message=f"{type(exc).__name__}: {exc}"[:500])
+
+
+@router.post("/{provider_id}/refresh", status_code=202)
+async def refresh_provider(provider_id: int) -> dict[str, str]:
+    """Refresh everything after a provider is added or its key changes."""
+    spawn(_refresh_after_change())
+    return {"status": "started"}
+
+
+async def _refresh_after_change() -> None:
+    await run_job("models", "provider")
+    await run_job("balances", "provider")

@@ -1,0 +1,30 @@
+[
+ {
+  "name": "2026-08-26-xai-grok-4-6-none-grok-build.json",
+  "path": "leaderboard/submissions/2026-08-26-xai-grok-4-6-none-grok-build.json",
+  "size": 15886,
+  "type": "file",
+  "download_url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench/main/leaderboard/submissions/2026-08-26-xai-grok-4-6-none-grok-build.json"
+ },
+ {
+  "name": "2026-09-01-gemini-gemini-3-8-flash-high-mini-swe-agent.json",
+  "path": "leaderboard/submissions/2026-09-01-gemini-gemini-3-8-flash-high-mini-swe-agent.json",
+  "size": 15943,
+  "type": "file",
+  "download_url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench/main/leaderboard/submissions/2026-09-01-gemini-gemini-3-8-flash-high-mini-swe-agent.json"
+ },
+ {
+  "name": "2026-09-30-anthropic-claude-opus-5-5-max-claude-code.json",
+  "path": "leaderboard/submissions/2026-09-30-anthropic-claude-opus-5-5-max-claude-code.json",
+  "size": 15923,
+  "type": "file",
+  "download_url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench/main/leaderboard/submissions/2026-09-30-anthropic-claude-opus-5-5-max-claude-code.json"
+ },
+ {
+  "name": "2026-09-30-openai-gpt-6-1-sol-max-codex.json",
+  "path": "leaderboard/submissions/2026-09-30-openai-gpt-6-1-sol-max-codex.json",
+  "size": 15889,
+  "type": "file",
+  "download_url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench/main/leaderboard/submissions/2026-09-30-openai-gpt-6-1-sol-max-codex.json"
+ }
+]

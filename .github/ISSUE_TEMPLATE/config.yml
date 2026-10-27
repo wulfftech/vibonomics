@@ -1,0 +1,8 @@
+﻿blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/wulfftech/vibonomics/security/advisories/new
+    about: Report privately. Do not open a public issue for a security problem.
+  - name: Question or setup help
+    url: https://github.com/wulfftech/vibonomics/discussions
+    about: Ask here if you are stuck with deployment, keys or a provider.

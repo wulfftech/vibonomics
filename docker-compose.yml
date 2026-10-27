@@ -1,0 +1,77 @@
+name: vibonomics
+
+services:
+  vibonomics:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: vibonomics:local
+    container_name: vibonomics
+    ports:
+      - "${VIBONOMICS_PORT:-2289}:2289"
+    volumes:
+      - "${VIBONOMICS_CONFIG:-./config}:/config"
+    # Everything in .env reaches the app (provider keys, password, secret key), so keys can be
+    # supplied by environment instead of the Settings page. The file is optional.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: "${TZ:-Etc/UTC}"
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-002}"
+      # Repeated here so they also work when exported in the shell without a .env file.
+      VIBONOMICS_PASSWORD: "${VIBONOMICS_PASSWORD:-}"
+      VIBONOMICS_SECRET_KEY: "${VIBONOMICS_SECRET_KEY:-}"
+      VIBONOMICS_URL_BASE: "${VIBONOMICS_URL_BASE:-}"
+      VIBONOMICS_LOG_LEVEL: "${VIBONOMICS_LOG_LEVEL:-info}"
+      VIBONOMICS_SANDBOX_URL: "http://sandbox:2290"
+      VIBONOMICS_SANDBOX_TOKEN: "${VIBONOMICS_SANDBOX_TOKEN:-}"
+    depends_on:
+      - sandbox
+    networks:
+      - default
+      - sandboxnet
+    restart: unless-stopped
+
+  # Executes model-written code during tests. Isolated: no secrets, no /config, no internet,
+  # read-only filesystem, non-root, capped CPU/memory/processes.
+  sandbox:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: vibonomics:local
+    container_name: vibonomics-sandbox
+    command: ["python", "-m", "vibonomics", "sandbox"]
+    environment:
+      VIBONOMICS_SANDBOX_PORT: "2290"
+      VIBONOMICS_SANDBOX_TOKEN: "${VIBONOMICS_SANDBOX_TOKEN:-}"
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 2
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2290/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - sandboxnet
+    restart: unless-stopped
+
+networks:
+  sandboxnet:
+    internal: true

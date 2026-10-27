@@ -1,0 +1,44 @@
+# Curated mappings from a benchmark source's model name to a models.dev canonical model id.
+# Keys are matched case-insensitively. Use null to deliberately ignore a row (e.g. agent systems
+# that don't correspond to a single model). Operators can add their own overrides in the UI.
+#
+# Only add entries the automatic matcher gets wrong or can't find, and only for models people still
+# compare. Checked against models.dev on 2026-10-24.
+#
+# <source id>:
+#   "<source model name>": "<creator>/<model>"
+
+arena:
+  "Grok 4.20 Beta (Reasoning, 0309)": xai/grok-4.20-0309-reasoning
+  "Grok 4 Fast (Reasoning)": xai/grok-4-fast-reasoning
+  "Grok 4 Fast (Non-Reasoning)": xai/grok-4-fast-non-reasoning
+  "Grok 4.1 Fast (Reasoning)": xai/grok-4.1-fast-reasoning
+  # ByteDance's international brand for Doubao Seed.
+  "Dola Seed 2.0 Pro": bytedance-seed/seed-2.0-pro
+  # models.dev also lists a "Devstral 2 (latest)" alias, which makes the name ambiguous.
+  "Devstral 2": mistral/devstral-2512
+  # Multi-agent system, not a single model.
+  "Grok 4.20 Multi-Agent Beta (0309)": null
+  # Unreleased experimental endpoints.
+  "amazon-nova-experimental-chat (10-09)": null
+  "amazon-nova-experimental-chat (10-20)": null
+  "amazon-nova-experimental-chat (11-10)": null
+  "amazon-nova-experimental-chat (12-10)": null
+  "amazon-nova-experimental-chat (26-01-10)": null
+  "amazon-nova-experimental-chat (26-02-10)": null
+  # 2023-24 models whose names collapse onto today's successors.
+  "Mistral Medium": null
+  "Ministral 8B (2410)": null
+
+epoch:
+  "GPT-4o (Nov 2024)": openai/gpt-4o-2024-11-20
+  "gpt-4o-2024-11-20": openai/gpt-4o-2024-11-20
+  # 2024 models whose names collapse onto different catalogue entries.
+  "Ministral 3B": null
+  "Qwen2.5-72B": null
+
+livebench:
+  "deepseek-v4-flash-vision": deepseek/deepseek-v4-flash-vision-exp
+  "nemotron-super-vl-3.5-nvfp4": nvidia/nemotron-3.5-super-vl-120b-a12b
+  # Community fine-tune.
+  "smaug-nemotron-3.5-nvfp4": null

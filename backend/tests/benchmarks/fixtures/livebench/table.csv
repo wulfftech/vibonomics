@@ -1,0 +1,6 @@
+model,long_agentic,reasoning,coding,browser,data_analysis,research,design
+claude-opus-5.5,85.0,92.2,96.3,80.0,80.3,85.0,86.9
+gemma-4-31b,13.3,68.3,49.0,4.0,53.3,44.4,58.4
+gpt-6.1-sol,73.0,92.6,96.0,88.0,82.7,83.5,82.1
+nemotron-lightning-3.5,8.3,42.9,22.6,0.0,43.1,40.0,43.9
+qwen3.8-max,42.3,88.2,60.3,32.0,78.4,69.9,78.6

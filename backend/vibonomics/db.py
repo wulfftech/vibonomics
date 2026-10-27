@@ -1,0 +1,73 @@
+"""SQLite engine and session handling."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from functools import lru_cache
+
+from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.orm import Session, sessionmaker
+
+from .config import get_config
+
+
+@lru_cache(maxsize=1)
+def get_engine() -> Engine:
+    cfg = get_config()
+    cfg.config_dir.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(
+        f"sqlite:///{cfg.db_path}",
+        connect_args={"check_same_thread": False, "timeout": 60},
+        pool_pre_ping=True,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):  # type: ignore[no-untyped-def]
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.execute("PRAGMA busy_timeout=60000")
+        cur.close()
+
+    return engine
+
+
+@lru_cache(maxsize=1)
+def _session_factory() -> sessionmaker[Session]:
+    return sessionmaker(bind=get_engine(), expire_on_commit=False)
+
+
+@contextmanager
+def session_scope() -> Iterator[Session]:
+    session = _session_factory()()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def get_session() -> Iterator[Session]:
+    """FastAPI dependency."""
+    with session_scope() as session:
+        yield session
+
+
+def init_db() -> None:
+    from .migrations import upgrade_to_head
+
+    upgrade_to_head(get_engine())
+    db_path = get_config().db_path
+    for suffix in ("", "-wal", "-shm"):
+        path = db_path.with_name(db_path.name + suffix)
+        if path.exists():
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass

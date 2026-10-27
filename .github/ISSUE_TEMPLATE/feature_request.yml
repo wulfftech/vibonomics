@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest a provider, a score source, or a change to how the app works.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a new provider or benchmark source, say where the data comes from and what its licence
+        allows. Vibonomics fetches at runtime and keeps licences honest, so a source that forbids
+        redistribution or model-selection use is a different conversation.
+  - type: dropdown
+    id: kind
+    label: What kind of request is this?
+    options:
+      - New provider adapter
+      - New benchmark or score source
+      - Price or balance source
+      - Models table or filters
+      - Test suite or judge behaviour
+      - Config snippets for a harness
+      - Deployment or configuration
+      - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation you are in, not only the feature you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to see
+  - type: input
+    id: source
+    attributes:
+      label: Data source (for providers and score sources)
+      description: API endpoint or page, auth type, and the licence or terms that apply.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered, including other tools
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked the open issues and the README for this already being covered.
+          required: true

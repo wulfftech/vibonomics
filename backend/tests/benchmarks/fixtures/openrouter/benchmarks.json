@@ -1,0 +1,74 @@
+{
+ "_note": "Shape from the OpenRouter OpenAPI spec for GET /benchmarks (docs example, 2026-10-24); values illustrative. The keyed endpoint could not be fetched without an account.",
+ "data": [
+  {
+   "agentic_index": 58.3,
+   "coding_index": 65.8,
+   "display_name": "GPT-4o",
+   "intelligence_index": 71.2,
+   "model_permaslug": "openai/gpt-4o",
+   "pricing": {"completion": "0.00001", "prompt": "0.0000025"},
+   "source": "artificial-analysis"
+  },
+  {
+   "accuracy": 0.72,
+   "accuracy_stddev": 0.03,
+   "avg_cost_per_task": 0.002,
+   "benchmark_type": "gpqa_diamond",
+   "display_name": "GPT-4o",
+   "last_run_timestamp": "2026-06-03T12:00:00Z",
+   "model_permaslug": "openai/gpt-4o",
+   "source": "openrouter",
+   "total_tasks": 300
+  },
+  {
+   "accuracy": 0.81,
+   "accuracy_stddev": null,
+   "avg_cost_per_task": 0.41,
+   "benchmark_type": "tau_bench_verified_airline",
+   "display_name": "Claude Opus 4.8",
+   "last_run_timestamp": "2026-09-12T08:30:00Z",
+   "model_permaslug": "anthropic/claude-4.8-opus-20260528",
+   "source": "openrouter",
+   "total_tasks": 50
+  },
+  {
+   "avg_cost_per_task": 0.031,
+   "avg_latency_per_task_ms": 45210,
+   "benchmark_type": "search_browsecomp",
+   "display_name": "GPT-4o",
+   "last_run_timestamp": "2026-07-28T13:38:18Z",
+   "model_permaslug": "openai/gpt-4o",
+   "primary_metric": "accuracy",
+   "primary_score": 0.72,
+   "search_engine": "exa",
+   "search_surface": "server-tool",
+   "source": "openrouter",
+   "total_tasks": 100
+  },
+  {
+   "arena": "models",
+   "category": "codecategories",
+   "display_name": "Claude Sonnet 4",
+   "elo": 1423,
+   "model_permaslug": "anthropic/claude-sonnet-4",
+   "source": "design-arena",
+   "win_rate": 72
+  },
+  {
+   "benchmark_type": "gpqa_diamond",
+   "display_name": "Broken row without accuracy",
+   "model_permaslug": "openai/gpt-broken",
+   "source": "openrouter"
+  }
+ ],
+ "meta": {
+  "as_of": "2026-10-23T12:00:00Z",
+  "citation": null,
+  "model_count": 3,
+  "source": "openrouter",
+  "source_url": null,
+  "task_type": null,
+  "version": "v1"
+ }
+}

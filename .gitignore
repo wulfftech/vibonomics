@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+site-packages/
+
+# Node / Vite
+node_modules/
+frontend/dist/
+frontend/.vite/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# App data: local config dir, databases, the encryption key file.
+# Nothing here may reach a commit: config/ holds API keys.
+config/
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+secret.key
+
+# Environment files (keep the example)
+.env
+.env.*
+!.env.example
+
+# Built SPA copied into the backend package by the Docker build
+backend/vibonomics/static/
+
+# Logs and caches
+*.log
+logs/
+.cache/
+backend/.cache/
+
+# Editors and OS
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local agent settings (shared agent rules live in AGENTS.md)
+.claude/settings.local.json
+.opencode/

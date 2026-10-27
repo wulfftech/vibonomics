@@ -1,0 +1,15 @@
+.git
+.gitignore
+frontend/node_modules
+frontend/dist
+backend/.venv
+backend/**/__pycache__
+backend/.pytest_cache
+backend/.ruff_cache
+config
+**/*.db
+**/*.db-wal
+**/*.db-shm
+secret.key
+.env
+docs/screenshots

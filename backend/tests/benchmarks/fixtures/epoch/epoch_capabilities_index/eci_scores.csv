@@ -1,0 +1,7 @@
+Model,Display name,eci,eci_ci_low,eci_ci_high,date,Organization,Country (of organization),Model accessibility,Accessibility group,model_versions
+Claude Opus 5.5,Claude Opus 5.5,168.83,165.25,173.95,2026-09-22,Anthropic,United States of America,API access,Closed weights,
+GPT-6.1 Sol,GPT-6.1 Sol,168.37,165.0,174.43,2026-09-29,OpenAI,United States of America,API access,Closed weights,
+Qwen3.8 Max (0902),Qwen3.8 Max (0902),155.08,153.03,157.19,2026-09-01,Alibaba,China,API access,Closed weights,
+Muse Spark,Muse Spark,152.03,149.79,154.49,2026-04-08,Meta AI,United States of America,API access,Closed weights,
+Claude Opus 4.5,Claude Opus 4.5,150.11,147.81,153.01,2025-11-24,Anthropic,United States of America,API access,Closed weights,
+Broken row,Broken row,n/a,165.25,173.95,2026-09-22,Anthropic,United States of America,API access,Closed weights,

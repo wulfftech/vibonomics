@@ -1,0 +1,57 @@
+{
+ "source_jobs": [
+  "3837153f-6673-539d-b3e2-99a6edd3c5db"
+ ],
+ "source_filter": {
+  "agent": "codex",
+  "agent_version": "0.159.0",
+  "model_name": "openai/gpt-6.1-sol",
+  "reasoning_effort": "max"
+ },
+ "metadata": {
+  "agent_display": {
+   "url": "https://openai.com/codex/",
+   "label": "Codex"
+  },
+  "agent_org": {
+   "url": "https://openai.com",
+   "label": "OpenAI"
+  },
+  "model_display": {
+   "url": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+   "label": "GPT-6.1 Sol"
+  },
+  "model_org": {
+   "url": "https://openai.com",
+   "label": "OpenAI"
+  },
+  "date": "2026-09-29",
+  "display_date": "Sep 29, 2026",
+  "reasoning_effort": "max"
+ },
+ "metrics": {
+  "accuracy": 58.18,
+  "accuracy_ci95_half_width": 3.11,
+  "display_accuracy": "**58.2%** ± 3.1%",
+  "n_trials": 330,
+  "successes": 192,
+  "pass_at_2": 0.6652,
+  "pass_at_3": 0.7015,
+  "pass_at_4": 0.7242,
+  "pass_at_5": 0.7424,
+  "uncached_input_tokens": 1428621998,
+  "cached_input_tokens": 1354187811,
+  "output_tokens": 31314516,
+  "total_tokens": 1459936514,
+  "display_total_tokens": "1.5B",
+  "total_cost_usd": 634.24,
+  "display_cost": "$634.24",
+  "display_total_cost_usd": "$634.24",
+  "avg_trial_duration_sec": 3176.7
+ },
+ "disqualified_trials": [],
+ "trials": [
+  "012f7fa8-33dd-5787-8a5f-7e981fa73693",
+  "01ffb2c9-c111-560d-9311-c612728b38b3"
+ ]
+}

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The backend replaces the placeholder in the base tag with the configured URL base, so relative
+      asset and API URLs resolve under that base on every route. It replaces every occurrence, so the
+      placeholder may appear literally only in the base tag.
+    -->
+    <base href="__URL_BASE__/" />
+    <title>Vibonomics</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <script>
+      // Vite's dev server serves this file verbatim, so the placeholder survives; fall back to the
+      // site root there. The placeholder is assembled at runtime: written literally, the backend
+      // would rewrite it too, and this would then reset the real URL base to "/".
+      (function () {
+        var base = document.querySelector('base');
+        var placeholder = '__URL' + '_BASE__/';
+        if (base && base.getAttribute('href') === placeholder) {
+          base.setAttribute('href', '/');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
