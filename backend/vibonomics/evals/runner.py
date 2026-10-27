@@ -17,6 +17,7 @@ from ..orm import EvalResult, EvalRun, Model, ProviderConfig
 from ..provider_service import build_adapter
 from ..providers.base import FetchContext
 from ..sandbox.executor import UnsafePath, safe_relative_path
+from ..scoring import GRADED_STATUSES
 from ..settings_store import AppSettings, load_settings
 from . import sandbox_client
 from .graders import grade_answer, grade_tool_calls
@@ -226,13 +227,15 @@ async def _run(run_id: int) -> None:
                     (input_tokens * model.price_input + output_tokens * model.price_output) / 1_000_000, 6
                 )
             _store_result(run_id, result)
+            status = result.get("status") or "error"
             summaries[target.key].append(
                 {
                     "task": task.id,
                     "category": task.category,
-                    "score": float(result.get("score") or 0.0),
-                    "status": result.get("status") or "failed",
-                    "notes": result.get("judge_notes"),
+                    # Errored and ungraded results have no grade; they must not average in as zero.
+                    "score": float(result["score"]) if status in GRADED_STATUSES else None,
+                    "status": status,
+                    "notes": result.get("judge_notes") or result.get("error"),
                 }
             )
             done += 1
@@ -246,22 +249,29 @@ async def _run(run_id: int) -> None:
             "judge": {"provider_id": judge_provider_id, "model_id": judge_model},
             "sandbox": sandbox,
         }
-        if sandbox == "disabled":
-            summary["note"] = EXEC_DISABLED_NOTE
+        notes = [EXEC_DISABLED_NOTE] if sandbox == "disabled" else []
+        errors = len(target_errors) * len(tasks)
+        ungraded = 0
         for target in targets:
             items = summaries[target.key]
+            scores = [item["score"] for item in items if item["score"] is not None]
             assessment = None
-            if judge is not None and items and not judge.last_error:
+            if judge is not None and scores and not judge.last_error:
                 try:
                     assessment = await judge.assess(target.name, items)
                 except ChatError as exc:
                     log.warning("Judge assessment failed: %s", exc)
                     judge.last_error = str(exc)[:400]
-            scores = [item["score"] for item in items]
+            target_errored = sum(1 for item in items if item["status"] == "error")
+            target_ungraded = sum(1 for item in items if item["status"] == "ungraded")
+            errors += target_errored
+            ungraded += target_ungraded
             summary["targets"][target.key] = {
                 "score": round(sum(scores) / len(scores), 1) if scores else None,
                 "tasks": len(items),
                 "passed": sum(1 for item in items if item["status"] == "passed"),
+                "errors": target_errored,
+                "ungraded": target_ungraded,
                 "tokens": _sum(run_id, target, "tokens"),
                 "cost": _sum(run_id, target, "cost"),
                 "assessment": assessment,
@@ -269,9 +279,16 @@ async def _run(run_id: int) -> None:
         judge_error = judge_setup_error or (judge.last_error if judge is not None else None)
         if judge_error:
             summary["judge_error"] = judge_error
-            summary["note"] = ("The judge model failed, so scoring used deterministic checks only. " + judge_error)[
-                :600
-            ]
+            notes.append(("The judge model failed, so scoring used deterministic checks only. " + judge_error)[:600])
+        if ungraded:
+            notes.append(
+                f"Tasks with no test result and no judge score ({ungraded}) are marked ungraded and left out of "
+                "the scores."
+            )
+        if errors:
+            notes.append(f"Tasks that ended in an error ({errors}) are left out of the scores.")
+        if notes:
+            summary["note"] = " ".join(notes)
     finally:
         for target in targets:
             await target.client.aclose()
@@ -370,7 +387,7 @@ class Usage:
 
 def _status(score: float | None) -> str:
     if score is None:
-        return "error"
+        return "ungraded"
     if score >= PASS_THRESHOLD:
         return "passed"
     if score >= PARTIAL_THRESHOLD:
@@ -533,19 +550,23 @@ async def _agentic(
         judge_score, judge_notes = await judge.grade_task(
             task, transcript, tests_note, workspace_note=_workspace_note(workspace)
         )
+    error: str | None = None
     if check_score is not None and judge_score is not None:
-        score = round(0.7 * check_score + 0.3 * judge_score * 10, 1)
+        score: float | None = round(0.7 * check_score + 0.3 * judge_score * 10, 1)
     elif judge_score is not None:
         score = round(judge_score * 10, 1)
     elif check_score is not None:
         score = check_score
     else:
-        score = 0.0
+        # Nothing graded the work (tests not run, judge failed): ungraded, not a zero.
+        score = None
+        error = "Not graded: there is no test result and no judge score, so this task is left out of the scores."
     return {
         "score": score,
         "check_score": check_score,
         "judge_score": judge_score,
         "judge_notes": judge_notes or tests_note,
+        "error": error,
     }
 
 

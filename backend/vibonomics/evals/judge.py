@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from asyncio import Lock
 from typing import Any
@@ -57,6 +58,15 @@ def _parse_json(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _parse_score(raw: Any) -> float | None:
+    """The judge's 0-10 score, or None when it is not a finite number (``"8/10"``, ``null``, ``NaN``)."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(10.0, value)) if math.isfinite(value) else None
+
+
 class Judge:
     def __init__(self, client: LLMClient):
         self.client = client
@@ -101,9 +111,9 @@ class Judge:
     async def assess(self, model_name: str, summary: list[dict[str, Any]]) -> str | None:
         lines = []
         for item in summary:
+            score = "not scored" if item["score"] is None else f"score {item['score']:.0f}/100"
             lines.append(
-                f"- {item['task']} ({item['category']}): score {item['score']:.0f}/100, status {item['status']}. "
-                f"{item.get('notes') or ''}"
+                f"- {item['task']} ({item['category']}): {score}, status {item['status']}. {item.get('notes') or ''}"
             )
         prompt = (
             f"Model: {model_name}\n\nResults on Vibonomics's agentic coding suite:\n" + "\n".join(lines) + "\n\n"
@@ -128,22 +138,20 @@ class Judge:
                     self.last_error = str(exc)[:400]
                     return None, None
                 data = _parse_json(reply.text)
-                if data is not None:
-                    score: float | None = None
-                    if expect_score:
-                        raw = data.get("score")
-                        try:
-                            score = max(0.0, min(10.0, float(raw)))
-                        except (TypeError, ValueError):
-                            score = None
-                    note = data.get(key)
-                    if not isinstance(note, str):
-                        note = data.get("notes")
-                    note_text = str(note).strip() if note else None
-                    return score, note_text
+                if data is None:
+                    problem = "The judge kept returning text instead of JSON."
+                    retry = "That was not valid JSON. Reply with the JSON object only."
+                else:
+                    score = _parse_score(data.get("score")) if expect_score else None
+                    if score is not None or not expect_score:
+                        note = data.get(key)
+                        if not isinstance(note, str):
+                            note = data.get("notes")
+                        note_text = str(note).strip() if note else None
+                        return score, note_text
+                    problem = f"The judge replied without a numeric score (got {json.dumps(data.get('score'))[:60]})."
+                    retry = 'The "score" must be a number from 0 to 10. Reply with the JSON object only.'
                 messages.append({"role": "assistant", "content": reply.text})
-                messages.append(
-                    {"role": "user", "content": "That was not valid JSON. Reply with the JSON object only."}
-                )
-            self.last_error = self.last_error or "The judge kept returning text instead of JSON."
+                messages.append({"role": "user", "content": retry})
+            self.last_error = self.last_error or problem
             return None, None
