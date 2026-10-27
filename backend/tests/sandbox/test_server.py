@@ -50,3 +50,11 @@ def test_token_is_required_when_configured(client, monkeypatch):
     assert ok.status_code == 200
     monkeypatch.delenv("VIBONOMICS_SANDBOX_TOKEN")
     assert os.environ.get("VIBONOMICS_SANDBOX_TOKEN") is None
+
+
+def test_a_workspace_that_cannot_be_written_is_a_result_not_a_server_error(client):
+    body = {"files": {"tests": "x", "tests/test_a.py": "pass\n"}, "command": ["python", "-c", "pass"]}
+    response = client.post("/run", json=body)
+    assert response.status_code == 200
+    assert response.json()["exit_code"] is None
+    assert "FileExistsError" in response.json()["stderr"]
