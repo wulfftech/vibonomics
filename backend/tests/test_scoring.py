@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from sqlalchemy import delete
 
+from vibonomics.benchmarks.base import SourceSpec
 from vibonomics.db import init_db, session_scope
 from vibonomics.orm import BenchmarkScore
-from vibonomics.scoring import compute_scores
+from vibonomics.scoring import compute_scores, source_in_use
 from vibonomics.settings_store import AppSettings, BenchmarkSourceSettings
 
 MODEL = "acme/scoring-test-model"
@@ -50,3 +51,21 @@ def test_only_sources_in_use_count():
     assert _sources(settings) == {"artificial-analysis"}
     settings.benchmarks.aa_terms_acknowledged = False
     assert _sources(settings) == set()
+
+
+def test_a_source_outside_this_module_registry_is_decided_from_the_callers_spec():
+    """A caller that swapped SOURCES for its own mapping (the refresh job, in tests) must not get a
+    KeyError from scoring's copy of the registry."""
+    spec = SourceSpec(
+        id="not-in-registry",
+        name="Not In Registry",
+        homepage="https://example.com",
+        description="",
+        license="test",
+        attribution="test",
+        metrics=(),
+    )
+    settings = AppSettings()
+    assert source_in_use(settings, "not-in-registry", spec) is True
+    settings.benchmarks.sources["not-in-registry"] = BenchmarkSourceSettings(enabled=False)
+    assert source_in_use(settings, "not-in-registry", spec) is False
