@@ -61,9 +61,11 @@ def parse_models(data: Any) -> list[ScoreRecord]:
         slug = str(m.get("slug") or "")
         slug_base, slug_effort = _slug_base(slug) if slug else ("", "")
         creator = m.get("model_creator") if isinstance(m.get("model_creator"), dict) else {}
-        hints = [base, slug_base]
-        if creator.get("slug") and slug_base:
-            hints.insert(0, f"{creator['slug']}/{slug_base}")
+        prefix = f"{creator['slug']}/" if creator.get("slug") else ""
+        # "kimi-k2-thinking" and "qwen3-max" are models, so the slug is tried as given; without its
+        # effort-like suffix it is only a fallback.
+        hints = [f"{prefix}{slug}" if prefix and slug else "", base, slug]
+        fallback = [f"{prefix}{slug_base}" if prefix else "", slug_base] if slug_effort else []
         pricing = m.get("pricing") if isinstance(m.get("pricing"), dict) else {}
         for metric, keys in _METRICS.items():
             value = next((v for v in (_num(evals.get(k)) for k in keys) if v is not None), None)
@@ -76,6 +78,7 @@ def parse_models(data: Any) -> list[ScoreRecord]:
                     value=round(value, 2),
                     effort=effort or slug_effort,
                     model_ids=[h for h in hints if h],
+                    fallback_ids=[h for h in fallback if h],
                     as_of=today,
                     url=f"https://artificialanalysis.ai/models/{slug}" if slug else "https://artificialanalysis.ai",
                     extra={

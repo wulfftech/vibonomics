@@ -1,16 +1,23 @@
 """Benchmark source parsers against captured fixtures (no network)."""
 
+import asyncio
 import io
 import json
+import math
 import zipfile
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
+from vibonomics import events, jobs
 from vibonomics.benchmarks import arena, artificial_analysis, epoch, livebench, openrouter_datasets, terminal_bench
+from vibonomics.benchmarks.base import BenchmarkSource, MetricSpec, ScoreRecord, SourceSpec
 from vibonomics.benchmarks.matching import Matcher, split_effort
 from vibonomics.catalog.modelsdev import ModelsDevCatalog
+from vibonomics.db import init_db, session_scope
 from vibonomics.http import FetchError
+from vibonomics.orm import BenchmarkScore, RefreshRun
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -196,3 +203,154 @@ def test_split_effort_variants():
     assert split_effort("Claude Opus 5.5 (Max)") == ("Claude Opus 5.5", "max")
     assert split_effort("gpt-6_xhigh") == ("gpt-6", "xhigh")
     assert split_effort("plain-model") == ("plain-model", "")
+
+
+def _catalog(*models: tuple[str, ...]) -> ModelsDevCatalog:
+    """One provider listing (canonical id, name[, provider model id]) in the order given."""
+    listed = {}
+    for cid, name, *mid in models:
+        model_id = mid[0] if mid else cid.split("/", 1)[1]
+        listed[model_id] = {"id": model_id, "name": name, "canonical_model_id": cid}
+    return ModelsDevCatalog({"vendor": {"id": "vendor", "models": listed}})
+
+
+@pytest.mark.parametrize("order", [1, -1], ids=["listed", "reversed"])
+def test_matcher_keeps_dated_snapshots_apart(order):
+    june = ("anthropic/claude-3-5-sonnet-20240620", "Claude Sonnet 3.5")
+    october = ("anthropic/claude-3-5-sonnet-20241022", "Claude Sonnet 3.5 v2")
+    flash = ("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash")
+    flash_1017 = ("deepseek/deepseek-v4.1-flash-1017", "DeepSeek V4.1 Flash 1017")
+    matcher = Matcher(_catalog(*[june, october, flash, flash_1017][::order]))
+
+    def match(name: str) -> str | None:
+        return matcher.match("arena", name, [])[0]
+
+    assert match("claude-3-5-sonnet-20241022") == october[0]
+    assert match("claude-3-5-sonnet-20240620") == june[0]
+    # Undated, the name fits both snapshots equally, so neither may claim it.
+    assert match("claude-3-5-sonnet") is None
+    assert match("Claude 3.5 Sonnet") is None
+    assert match("Claude Sonnet 3.5") == june[0]
+    # A full date reaches a short-dated release for that day, otherwise the undated model.
+    assert match("DeepSeek-V4.1-Flash-20261017") == flash_1017[0]
+    assert match("DeepSeek-V4.1-Flash-20260101") == flash[0]
+
+
+def _aa_model(name: str, slug: str, creator: str) -> dict:
+    return {
+        "name": name,
+        "slug": slug,
+        "model_creator": {"slug": creator},
+        "evaluations": {"artificial_analysis_intelligence_index": 50},
+    }
+
+
+def test_matcher_strips_effort_words_only_when_the_full_name_fails():
+    matcher = Matcher(
+        _catalog(
+            ("moonshotai/kimi-k2", "Kimi K2"),
+            ("moonshotai/kimi-k2-thinking", "Kimi K2 Thinking"),
+            ("alibaba/qwen3", "Qwen3"),
+            ("alibaba/qwen3-max", "Qwen3 Max"),
+            ("openai/gpt-6", "GPT-6"),
+        )
+    )
+    kimi, qwen, gpt = artificial_analysis.parse_models(
+        {
+            "data": [
+                _aa_model("Kimi K2 Thinking", "kimi-k2-thinking", "moonshotai"),
+                _aa_model("Qwen3 Max", "qwen3-max", "alibaba"),
+                _aa_model("GPT-6 (high)", "gpt-6-high", "openai"),
+            ]
+        }
+    )
+    assert "qwen3" not in qwen.model_ids and "alibaba/qwen3" not in qwen.model_ids
+    for rec, expected in [(kimi, "moonshotai/kimi-k2-thinking"), (qwen, "alibaba/qwen3-max"), (gpt, "openai/gpt-6")]:
+        assert matcher.match("artificial-analysis", rec.source_model, rec.model_ids, rec.fallback_ids)[0] == expected
+
+    # With no catalogue entry for the full name, the stripped slug is still a fallback.
+    only_k2 = Matcher(_catalog(("moonshotai/kimi-k2", "Kimi K2")))
+    assert only_k2.match("artificial-analysis", kimi.source_model, kimi.model_ids, kimi.fallback_ids) == (
+        "moonshotai/kimi-k2",
+        "id",
+    )
+
+
+# -- Refresh ----------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def database():
+    init_db()
+
+
+def test_persist_scores_keeps_effort_like_names_and_skips_non_finite_values(database):
+    matcher = Matcher(
+        _catalog(
+            ("mistral/mistral", "Mistral 7B", "mistral"),
+            ("mistral/mistral-medium", "Mistral Medium", "mistral-medium-latest"),
+            ("openai/gpt-6", "GPT-6"),
+        )
+    )
+    records = [
+        ScoreRecord(metric="coding", source_model="mistral-medium", value=60.0, model_ids=["mistral-medium"]),
+        ScoreRecord(metric="coding", source_model="gpt-6-high", value=80.0, model_ids=["gpt-6-high"]),
+        ScoreRecord(metric="coding", source_model="broken-row", value=math.nan, model_ids=["broken-row"]),
+    ]
+    assert jobs.persist_scores("livebench", records, matcher) == 2
+    with session_scope() as s:
+        rows = s.scalars(select(BenchmarkScore).where(BenchmarkScore.source == "livebench"))
+        stored = {r.source_model: (r.canonical_id, r.effort) for r in rows}
+    assert stored == {"mistral-medium": ("mistral/mistral-medium", ""), "gpt-6-high": ("openai/gpt-6", "high")}
+
+
+def _fake_source(source_id: str, delay: float) -> type[BenchmarkSource]:
+    class Fake(BenchmarkSource):
+        spec = SourceSpec(
+            id=source_id,
+            name=source_id.title(),
+            homepage="https://example.com",
+            description="",
+            license="test",
+            attribution="test",
+            metrics=(MetricSpec("score", "Score", "coding"),),
+        )
+
+        async def fetch(self) -> list[ScoreRecord]:
+            await asyncio.sleep(delay)
+            return [ScoreRecord(metric="score", source_model=f"{source_id}-model", value=1.0)]
+
+    return Fake
+
+
+async def test_benchmark_refresh_waits_for_every_source_when_one_fails(database, monkeypatch):
+    persisted: list[str] = []
+    real_persist = jobs.persist_scores
+
+    def persist(source_id: str, records: list[ScoreRecord], matcher: Matcher) -> int:
+        if source_id == "broken":
+            raise RuntimeError("database is locked")
+        count = real_persist(source_id, records, matcher)
+        persisted.append(source_id)
+        return count
+
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return _catalog()
+
+    monkeypatch.setattr(events, "_loop", None)
+    monkeypatch.setattr(jobs, "SOURCES", {"broken": _fake_source("broken", 0), "slow": _fake_source("slow", 0.05)})
+    monkeypatch.setattr(jobs, "persist_scores", persist)
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+
+    await jobs.run_job("benchmarks")
+
+    # The slow source finished writing before the job (and its lock) let go.
+    assert persisted == ["slow"]
+    with session_scope() as s:
+        run = s.scalars(
+            select(RefreshRun).where(RefreshRun.kind == "benchmarks").order_by(RefreshRun.id.desc())
+        ).first()
+        assert run is not None
+        assert run.status == "partial"
+        assert run.message == "Broken: database is locked"
+        assert run.stats["ok"] == 1 and run.stats["failed"] == 1

@@ -1,7 +1,9 @@
 """Match benchmark model names to models.dev canonical ids.
 
 Order: operator alias (DB) → curated alias (aliases.yaml) → explicit id hints → normalised name
-→ fuzzy name (match method "fuzzy": unambiguous suffix-stripped or word-order-insensitive keys).
+→ fuzzy name (match method "fuzzy": unambiguous suffix-stripped or word-order-insensitive keys), all
+for the names as given, then again with effort words stripped. Exact ids win over normalised keys,
+and a normalised key shared by several models matches none of them.
 Unmatched records are still stored (canonical_id NULL) so the operator can map them in Settings.
 """
 
@@ -22,7 +24,8 @@ _EFFORT_PATTERNS = [
     ),
     re.compile(r"[_:](max|xhigh|high|medium|low|minimal|thinking|reasoning)$", re.I),
     # After a hyphen, "max" and "thinking" are usually part of the model name (Qwen3.8-Max,
-    # kimi-k2-thinking), so only the unambiguous effort words count.
+    # kimi-k2-thinking), so only the usual effort words count. Even those can be part of a name
+    # (mistral-medium), so the matcher tries the full name first.
     re.compile(r"-(xhigh|high|medium|low|minimal)$", re.I),
 ]
 
@@ -160,13 +163,17 @@ def _unique(pairs: list[tuple[str, str]]) -> dict[str, str]:
     return {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
 
 
+def _clean(values: list[str]) -> list[str]:
+    """Stripped, non-empty values in order, without repeats."""
+    return list(dict.fromkeys(v.strip() for v in values if v and v.strip()))
+
+
 class Matcher:
     def __init__(self, catalog: ModelsDevCatalog, operator_aliases: dict[tuple[str, str], str | None] | None = None):
         self.catalog = catalog
         self.operator_aliases = operator_aliases or {}
         self.index = catalog.canonical_index()
         self._by_provider_id: dict[str, str] = {}
-        self._by_key: dict[str, str] = {}
         for pid, provider in catalog.data.items():
             if not isinstance(provider, dict):
                 continue
@@ -179,74 +186,109 @@ class Matcher:
         # Exact ids keep their snapshot suffix ("qwen3.8-max-0902"), so a dated benchmark name can
         # reach the dated model before date-stripped keys collapse it onto the undated one.
         self._by_exact = _unique([(exact_key(cid), cid) for cid in self.index])
-        # A canonical id whose tail *is* the date-stripped key owns that key; dated snapshots
-        # ("deepseek-v4.1-flash-1017") only get it when no undated model exists.
-        for cid in self.index:
+        # Date-stripped keys of ids and names ("anthropic/claude-opus-5-5", "Claude Opus 5.5" →
+        # "claude-opus-5-5"). A canonical id whose tail *is* the key owns it, so dated snapshots
+        # ("deepseek-v4.1-flash-1017") only get it when no undated model exists. A key left with more
+        # than one model (two dated snapshots, two owners) is ambiguous and resolves to nothing.
+        claims: dict[str, set[str]] = {}
+        owners: dict[str, set[str]] = {}
+        for cid, info in self.index.items():
             k = normalize_model_key(cid)
             if k == exact_key(cid):
-                self._by_key.setdefault(k, cid)
-        for cid, info in self.index.items():
-            self._by_key.setdefault(normalize_model_key(cid), cid)
-            self._by_key.setdefault(normalize_model_key(info.name), cid)
-            # "anthropic/claude-opus-5-5" → also "claude-opus-5-5" and "claude-opus-5.5"
-            tail = cid.split("/", 1)[-1]
-            self._by_key.setdefault(normalize_model_key(tail), cid)
+                owners.setdefault(k, set()).add(cid)
+            for key in (k, normalize_model_key(info.name)):
+                if key:
+                    claims.setdefault(key, set()).add(cid)
+        claims.update(owners)
+        self._by_key = {k: next(iter(ids)) for k, ids in claims.items() if len(ids) == 1}
         # Fallback indexes, consulted only when every candidate failed the exact keys above. Keys
-        # shared by more than one canonical model are ambiguous and dropped.
+        # shared by more than one canonical model are ambiguous and dropped, and so are keys the exact
+        # index already found ambiguous.
         variants: list[tuple[str, str]] = []
         for cid, info in self.index.items():
             names = [cid.split("/", 1)[-1], info.name]
             if ": " in info.name:  # "OpenAI: GPT-5.2 Chat"
                 names.append(info.name.split(": ", 1)[1])
             variants += [(v, cid) for name in names for v in _catalog_variants(split_qualifiers(name)[0])]
-        self._by_alt = {k: v for k, v in _unique(variants).items() if k not in self._by_key}
-        self._by_tokens = _unique([(token_key(k), cid) for k, cid in [*self._by_key.items(), *self._by_alt.items()]])
+        self._by_alt = {k: v for k, v in _unique(variants).items() if k not in claims}
+        self._by_tokens = _unique(
+            [(token_key(k), cid) for k, ids in claims.items() for cid in ids]
+            + [(token_key(k), cid) for k, cid in self._by_alt.items()]
+        )
         self._creators = {cid.split("/", 1)[0].lower() for cid in self.index if "/" in cid}
 
     def _name(self, value: str) -> str | None:
-        """Exact name match, then the normalised (date-stripped) key.
+        """Exact id match, then the normalised (date-stripped) key.
 
-        Short snapshot suffixes name distinct releases ('qwen3.8-max-0902', 'deepseek-v4-pro-0813'), so
-        those match exactly. Full dates ('claude-opus-4-5-20251101', 'gpt-4o-2024-08-06') usually pin the
-        same model as the undated alias and keep collapsing onto it, except where the catalogue has a
-        short-dated release for that day ('DeepSeek-V4.1-Flash-20261017' → deepseek-v4.1-flash-1017).
+        Snapshot suffixes name distinct releases ('qwen3.8-max-0902', 'claude-3-5-sonnet-20241022'), so a
+        catalogue id with the same suffix wins. A full date that the catalogue doesn't list reaches a
+        short-dated release for that day ('DeepSeek-V4.1-Flash-20261017' → deepseek-v4.1-flash-1017), or
+        else collapses onto the undated model ('claude-opus-4-5-20251101' → claude-opus-4-5).
         """
         ek = exact_key(value)
-        m = _TRAILING_DATE.search(ek)
-        cid = self._by_exact.get(f"{ek[: m.start()]}-{m.group(2)}{m.group(3)}") if m else self._by_exact.get(ek)
+        cid = self._by_exact.get(ek)
+        if cid is None and (m := _TRAILING_DATE.search(ek)):
+            cid = self._by_exact.get(f"{ek[: m.start()]}-{m.group(2)}{m.group(3)}")
         return cid or self._by_key.get(normalize_model_key(value))
 
-    def _fuzzy(self, cand: str) -> str | None:
+    def _fuzzy(self, cand: str, strip_effort: bool) -> str | None:
         """Last-resort name match.
 
-        Drops trailing '(...)' qualifiers, matches catalogue ids without '-it' / '-instruct' /
-        '-preview' / parameter-count suffixes ('Gemma 4 31B' → gemma-4-31b-it, 'Nemotron 3 Ultra' →
-        nemotron-3-ultra-550b-a55b) when that is unambiguous, drops a leading creator word, and
-        finally ignores word order ('claude-4.8-opus' → Claude Opus 4.8).
+        Drops trailing '(...)' qualifiers (and an effort suffix with ``strip_effort``), matches catalogue
+        ids without '-it' / '-instruct' / '-preview' / parameter-count suffixes ('Gemma 4 31B' →
+        gemma-4-31b-it, 'Nemotron 3 Ultra' → nemotron-3-ultra-550b-a55b) when that is unambiguous, drops a
+        leading creator word, and finally ignores word order ('claude-4.8-opus' → Claude Opus 4.8).
         """
         base, _effort, rest = split_qualifiers(cand)
         sizes = [q for q in rest if _SIZE_TOKEN.match(q.lower())]
         if sizes:  # "Qwen2.5-Coder (7B)" must not fall back to whichever Qwen2.5-Coder size exists
             base = " ".join([base, *sizes])
-        for form in dict.fromkeys([base, split_effort(base)[0]]):
-            k = normalize_model_key(form)
-            if not k:
-                continue
-            cid = self._by_key.get(k) or self._by_alt.get(k)
+        if strip_effort:
+            base = split_effort(base)[0]
+        k = normalize_model_key(base)
+        if not k:
+            return None
+        cid = self._by_key.get(k) or self._by_alt.get(k)
+        if cid:
+            return cid
+        # "NVIDIA-Nemotron-3-Ultra" / "meta-llama-4-maverick" → drop the creator word.
+        head, _, tail = k.partition("-")
+        if tail and "-" in tail and head in self._creators:
+            cid = self._by_key.get(tail) or self._by_alt.get(tail)
             if cid:
                 return cid
-            # "NVIDIA-Nemotron-3-Ultra" / "meta-llama-4-maverick" → drop the creator word.
-            head, _, tail = k.partition("-")
-            if tail and "-" in tail and head in self._creators:
-                cid = self._by_key.get(tail) or self._by_alt.get(tail)
-                if cid:
-                    return cid
-            cid = self._by_tokens.get(token_key(form))
-            if cid:
-                return cid
-        return None
+        return self._by_tokens.get(token_key(base))
 
-    def match(self, source: str, source_model: str, model_ids: list[str] | None = None) -> tuple[str | None, str]:
+    def _match_forms(self, ids: list[str], names: list[str], strip_effort: bool) -> tuple[str | None, str]:
+        """Explicit id hints, then exact names, then fuzzy names."""
+        for hint in ids:
+            if hint in self.index:
+                return hint, "id"
+            cid = self._by_provider_id.get(hint.lower()) or self._by_provider_id.get(hint.lower().split(":")[0])
+            if cid:
+                return cid, "id"
+        for name in names:
+            cid = self._name(name)
+            # Drop a leading vendor word: "MoonshotAI: Kimi K3" / "Anthropic Claude Opus 5.5"
+            if cid is None and ": " in name:
+                cid = self._name(name.split(": ", 1)[1])
+            if cid:
+                return cid, "name"
+        for name in names:
+            cid = self._fuzzy(name, strip_effort)
+            if cid:
+                return cid, "fuzzy"
+        return None, "unmatched"
+
+    def match(
+        self, source: str, source_model: str, model_ids: list[str] | None = None, fallback_ids: list[str] | None = None
+    ) -> tuple[str | None, str]:
+        """Canonical id and match method for one benchmark row.
+
+        Names and hints are matched as given first. Only when that finds nothing are effort words
+        stripped ('gpt-6_xhigh' → gpt-6) and ``fallback_ids`` tried, because an effort word can be part
+        of a model's name ('Kimi K2 Thinking', 'mistral-medium').
+        """
         key = (source, source_model)
         if key in self.operator_aliases:
             return self.operator_aliases[key], "operator"
@@ -254,30 +296,14 @@ class Matcher:
         if source_model.lower() in curated:
             return curated[source_model.lower()], "curated"
 
-        for hint in model_ids or []:
-            if not hint:
-                continue
-            h = hint.strip()
-            if h in self.index:
-                return h, "id"
-            cid = self._by_provider_id.get(h.lower()) or self._by_provider_id.get(h.lower().split(":")[0])
-            if cid:
-                return cid, "id"
-        candidates = [c.strip() for c in [source_model, *(model_ids or [])] if c and c.strip()]
-        for cand in candidates:
-            base, _effort = split_effort(cand)
-            # The full name first: "Qwen2.5-Max" is a model, not Qwen2.5 at max effort.
-            for form in dict.fromkeys([cand, base]):
-                cid = self._name(form)
-                if cid:
-                    return cid, "name"
-                # Drop a leading vendor word: "MoonshotAI: Kimi K3" / "Anthropic Claude Opus 5.5"
-                if ": " in form:
-                    cid = self._name(form.split(": ", 1)[1])
-                    if cid:
-                        return cid, "name"
-        for cand in candidates:
-            cid = self._fuzzy(cand)
-            if cid:
-                return cid, "fuzzy"
-        return None, "unmatched"
+        hints = _clean(model_ids or [])
+        names = _clean([source_model, *hints])
+        cid, method = self._match_forms(hints, names, strip_effort=False)
+        if cid is None:
+            stripped = _clean([*(split_effort(n)[0] for n in names), *(fallback_ids or [])])
+            cid, method = self._match_forms(stripped, stripped, strip_effort=True)
+        return cid, method
+
+    def effort(self, name: str) -> str:
+        """The effort suffix of a benchmark name, unless the whole name is a catalogue model ('mistral-medium')."""
+        return "" if self._name(name) else split_effort(name)[1]
