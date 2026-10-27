@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from ..http import scrub_secrets
 from ..providers.base import ChatTarget
 
 log = logging.getLogger(__name__)
@@ -211,7 +212,7 @@ class LLMClient:
             try:
                 response = await self._client.post(url, json=payload, headers=headers)
             except httpx.HTTPError as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+                last_error = scrub_secrets(f"{type(exc).__name__}: {exc}", headers)
                 if attempt == 3:
                     break
                 await asyncio.sleep(2 * (attempt + 1))

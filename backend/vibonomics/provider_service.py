@@ -25,12 +25,17 @@ def resolve(cfg: ProviderConfig) -> ResolvedProvider:
         id=cfg.id,
         type=cfg.type,
         name=cfg.name,
-        api_key=api_key,
-        mgmt_key=mgmt_key,
+        api_key=_trimmed(api_key),
+        mgmt_key=_trimmed(mgmt_key),
         base_url=cfg.base_url,
         options=dict(cfg.options or {}),
-        extra_key=extra_key,
+        extra_key=_trimmed(extra_key),
     )
+
+
+def _trimmed(secret: str | None) -> str | None:
+    """A pasted key often carries a trailing newline, which no API accepts in a header."""
+    return (secret or "").strip() or None
 
 
 def build_adapter(cfg: ProviderConfig, ctx: FetchContext) -> ProviderAdapter | None:
