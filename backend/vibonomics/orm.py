@@ -241,7 +241,7 @@ class EvalResult(Base):
     canonical_id: Mapped[str | None] = mapped_column(String(300), nullable=True, index=True)
     task_id: Mapped[str] = mapped_column(String(100))
     category: Mapped[str] = mapped_column(String(50))
-    status: Mapped[str] = mapped_column(String(20))  # passed | partial | failed | error | skipped
+    status: Mapped[str] = mapped_column(String(20))  # passed | partial | failed | error | ungraded | skipped
     score: Mapped[float] = mapped_column(Float, default=0.0)  # 0-100
     check_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     judge_score: Mapped[float | None] = mapped_column(Float, nullable=True)

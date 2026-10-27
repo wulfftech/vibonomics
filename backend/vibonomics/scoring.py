@@ -27,6 +27,10 @@ from .settings_store import AppSettings
 
 DIMENSIONS = ("intelligence", "coding", "agentic")
 
+# Result statuses that carry a real grade. The others ("error": the model call failed, "ungraded": no test
+# result and no judge score, "skipped") store a placeholder score of 0 and stay out of every average.
+GRADED_STATUSES = ("passed", "partial", "failed")
+
 
 @dataclass
 class MetricValue:
@@ -81,7 +85,7 @@ def _wmean(pairs: list[tuple[float, float]]) -> float | None:
 
 
 def own_test_scores(session: Session) -> dict[tuple[int, str], dict[str, Any]]:
-    """Average Vibonomics test score per (provider_config_id, model_id), from finished runs."""
+    """Average Vibonomics test score per (provider_config_id, model_id), from graded results of finished runs."""
     rows = session.execute(
         select(
             EvalResult.provider_config_id,
@@ -95,7 +99,7 @@ def own_test_scores(session: Session) -> dict[tuple[int, str], dict[str, Any]]:
             func.count(func.distinct(EvalResult.run_id)),
         )
         .join(EvalRun, EvalRun.id == EvalResult.run_id)
-        .where(EvalRun.status == "done", EvalResult.status != "skipped")
+        .where(EvalRun.status == "done", EvalResult.status.in_(GRADED_STATUSES))
         .group_by(EvalResult.provider_config_id, EvalResult.model_id)
     ).all()
     result: dict[tuple[int, str], dict[str, Any]] = {}

@@ -11,9 +11,11 @@ from vibonomics.evals import runner
 from vibonomics.evals.llm import ChatError, ChatReply, ToolCall
 from vibonomics.evals.tasks_coding import MEAN_REFERENCE
 from vibonomics.orm import EvalResult, EvalRun, Model, ProviderConfig
+from vibonomics.scoring import own_test_scores
 from vibonomics.settings_store import load_settings, save_settings
 
 MODEL_ID = "fake/agentic-model"
+QUICK_TASKS = ("instr-json", "tool-pick", "agentic-fix-mean")
 
 
 class FakeClient:
@@ -89,7 +91,9 @@ def _no_catalog(monkeypatch):
     monkeypatch.setattr(runner, "load_catalog", load_catalog)
 
 
-def _seed() -> tuple[int, int]:
+def _seed(
+    task_ids: tuple[str, ...] = QUICK_TASKS, sandbox_mode: str = "local", extra_targets: tuple[dict, ...] = ()
+) -> tuple[int, int]:
     with session_scope() as session:
         provider = ProviderConfig(
             type="openrouter",
@@ -112,7 +116,7 @@ def _seed() -> tuple[int, int]:
             )
         )
         settings = load_settings(session)
-        settings.evals.sandbox_mode = "local"
+        settings.evals.sandbox_mode = sandbox_mode
         settings.evals.concurrency = 1
         save_settings(session, settings)
         session.flush()
@@ -120,8 +124,11 @@ def _seed() -> tuple[int, int]:
             suite="quick",
             judge_provider_config_id=provider.id,
             judge_model_id=MODEL_ID,
-            targets=[{"provider_id": provider.id, "model_id": MODEL_ID, "name": "Fake model", "provider_name": "Fake"}],
-            progress={"total": 3, "done": 0, "task_ids": ["instr-json", "tool-pick", "agentic-fix-mean"]},
+            targets=[
+                {"provider_id": provider.id, "model_id": MODEL_ID, "name": "Fake model", "provider_name": "Fake"},
+                *extra_targets,
+            ],
+            progress={"total": len(task_ids), "done": 0, "task_ids": list(task_ids)},
             status="queued",
         )
         session.add(run)
@@ -240,3 +247,129 @@ async def test_an_unavailable_sandbox_is_not_a_pass(monkeypatch):
     note, score = await runner._grade_agentic(task, dict(task.workspace), _local_sandbox())
     assert score is None
     assert note == "Tests were not executed (Sandbox unavailable: ConnectError: connection refused)."
+class RateLimitedToolsClient(FakeClient):
+    """The model under test hits a provider rate limit on the tool-use task."""
+
+    async def chat(self, messages, tools=None):
+        if any(t.name == "get_forecast" for t in tools or []):
+            raise ChatError("HTTP 429: rate limited by the provider")
+        return await super().chat(messages, tools)
+
+
+@pytest.mark.asyncio
+async def test_model_errors_are_reported_and_left_out_of_scores(monkeypatch):
+    monkeypatch.setattr(runner, "LLMClient", RateLimitedToolsClient)
+    gone = {"provider_id": 987_654, "model_id": "gone/model", "name": "Gone model", "provider_name": "Gone"}
+    run_id, provider_id = _seed(extra_targets=(gone,))
+    await runner.execute(run_id)
+
+    with session_scope() as session:
+        run = session.get(EvalRun, run_id)
+        results = list(session.query(EvalResult).filter(EvalResult.run_id == run_id))
+        assert run is not None
+        assert run.status == "done", run.error
+        mine = {r.task_id: r for r in results if r.provider_config_id == provider_id}
+        assert mine["tool-pick"].status == "error"
+        assert "429" in mine["tool-pick"].error
+        missing = [r for r in results if r.provider_config_id == gone["provider_id"]]
+        assert len(missing) == len(QUICK_TASKS)
+        assert {r.status for r in missing} == {"error"}
+
+        summary = run.summary["targets"][f"{provider_id}|{MODEL_ID}"]
+        # instr-json scores 100 and agentic-fix-mean 94; the rate-limited task does not average in as 0.
+        assert summary["score"] == pytest.approx(97.0)
+        assert summary["tasks"] == 3
+        assert summary["passed"] == 2
+        assert summary["errors"] == 1
+        assert summary["ungraded"] == 0
+        # One task of the model under test plus every task of the target that could not be set up.
+        assert "ended in an error (4)" in run.summary["note"]
+
+        own = own_test_scores(session)
+        assert own[(provider_id, MODEL_ID)]["score"] == pytest.approx(97.0)
+        assert own[(provider_id, MODEL_ID)]["tasks"] == 2
+        assert (gone["provider_id"], gone["model_id"]) not in own
+
+
+@pytest.mark.asyncio
+async def test_ungraded_task_is_reported_and_left_out_of_scores(monkeypatch):
+    # No sandbox and no judge: the agentic task has neither a test result nor a judge score.
+    monkeypatch.setattr(runner, "LLMClient", FailingJudgeClient)
+    run_id, provider_id = _seed(task_ids=("instr-json", "agentic-fix-mean"), sandbox_mode="disabled")
+    await runner.execute(run_id)
+
+    with session_scope() as session:
+        run = session.get(EvalRun, run_id)
+        results = {r.task_id: r for r in session.query(EvalResult).filter(EvalResult.run_id == run_id)}
+        assert run is not None
+        assert run.status == "done", run.error
+        assert results["instr-json"].status == "passed"
+        agentic = results["agentic-fix-mean"]
+        assert agentic.status == "ungraded"
+        assert agentic.check_score is None
+        assert agentic.judge_score is None
+        assert "Not graded" in agentic.error
+
+        summary = run.summary["targets"][f"{provider_id}|{MODEL_ID}"]
+        assert summary["score"] == pytest.approx(100.0)
+        assert summary["tasks"] == 2
+        assert summary["passed"] == 1
+        assert summary["ungraded"] == 1
+        assert summary["errors"] == 0
+        assert "429" in run.summary["judge_error"]
+        note = run.summary["note"]
+        assert runner.EXEC_DISABLED_NOTE in note
+        assert "deterministic checks only" in note
+        assert "no judge score (1) are marked ungraded" in note
+
+        own = own_test_scores(session)
+        assert own[(provider_id, MODEL_ID)]["score"] == pytest.approx(100.0)
+        assert own[(provider_id, MODEL_ID)]["tasks"] == 1
+
+
+class UnparseableScoreJudgeClient(FakeClient):
+    """The judge answers the probe, then grades with JSON whose score is not a number."""
+
+    reply = ""
+    grading_requests = 0
+
+    async def chat(self, messages, tools=None):
+        system = next((m.get("content") for m in messages if m.get("role") == "system"), "") or ""
+        if "exacting evaluator" in system and str(messages[1].get("content") or "").startswith("TASK:"):
+            type(self).grading_requests += 1
+            return ChatReply(text=self.reply)
+        return await super().chat(messages, tools)
+
+
+@pytest.mark.parametrize(
+    ("reply", "reported"),
+    [
+        ('{"score": "8/10", "notes": "Clear, minimal change."}', '"8/10"'),
+        ('{"notes": "Clear, minimal change."}', "null"),
+        ('{"score": NaN, "notes": "Clear, minimal change."}', "NaN"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unparseable_judge_score_is_reported(monkeypatch, reply, reported):
+    monkeypatch.setattr(runner, "LLMClient", UnparseableScoreJudgeClient)
+    monkeypatch.setattr(UnparseableScoreJudgeClient, "reply", reply)
+    monkeypatch.setattr(UnparseableScoreJudgeClient, "grading_requests", 0)
+    run_id, provider_id = _seed(task_ids=("agentic-fix-mean",), sandbox_mode="disabled")
+    await runner.execute(run_id)
+
+    with session_scope() as session:
+        run = session.get(EvalRun, run_id)
+        result = session.query(EvalResult).filter(EvalResult.run_id == run_id).one()
+        assert run is not None
+        assert run.status == "done", run.error
+        # Asked once more for a numeric score, then reported instead of scored.
+        assert UnparseableScoreJudgeClient.grading_requests == 2
+        assert result.judge_score is None
+        assert result.status == "ungraded"
+        assert "numeric score" in run.summary["judge_error"]
+        assert reported in run.summary["judge_error"]
+        assert runner.EXEC_DISABLED_NOTE in run.summary["note"]
+        summary = run.summary["targets"][f"{provider_id}|{MODEL_ID}"]
+        assert summary["score"] is None
+        assert summary["ungraded"] == 1
+        assert summary["assessment"] is None
