@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from vibonomics import crypto
+from vibonomics.catalog.modelsdev import ModelsDevCatalog
 from vibonomics.db import init_db, session_scope
 from vibonomics.evals import runner
 from vibonomics.evals.llm import ChatError, ChatReply, ToolCall
@@ -76,6 +77,16 @@ class FakeClient:
 @pytest.fixture(scope="module", autouse=True)
 def _database():
     init_db()
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog(monkeypatch):
+    """Tests must not fetch models.dev; the fake client needs nothing from the catalog."""
+
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return ModelsDevCatalog({})
+
+    monkeypatch.setattr(runner, "load_catalog", load_catalog)
 
 
 def _seed() -> tuple[int, int]:
