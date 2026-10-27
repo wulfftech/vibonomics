@@ -146,6 +146,8 @@ def test_refresh_unknown_provider_is_404(monkeypatch):
 def test_refresh_batch_rejects_an_empty_list(monkeypatch):
     client = _client(monkeypatch)
     assert client.post("/api/providers/refresh", json={"provider_ids": []}).status_code == 422
+
+
 def test_a_key_with_a_stray_newline_never_reaches_the_message(monkeypatch):
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
