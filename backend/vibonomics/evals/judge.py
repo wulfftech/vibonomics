@@ -32,7 +32,8 @@ def _condense(transcript: list[dict[str, Any]]) -> str:
             calls = entry.get("tool_calls") or []
             line = f"ASSISTANT: {text[:1200]}"
             for call in calls[:6]:
-                fn = call.get("function") or {}
+                # Transcripts store the compact tool_call_payload form; the OpenAI wire form nests it.
+                fn = call.get("function") or call
                 line += f"\n  CALL {fn.get('name')}({str(fn.get('arguments'))[:400]})"
             parts.append(line)
         elif role == "tool":
