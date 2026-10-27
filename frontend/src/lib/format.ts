@@ -29,12 +29,15 @@ export function money(value: number | null | undefined): string {
   return `${sign}$${Number(abs.toPrecision(2)).toString()}`;
 }
 
-/** 131072 → "128k", 1048576 → "1M", 200000 → "200k". Powers-of-two sizes are read in binary units. */
+/**
+ * 131072 → "128k", 1048576 → "1M", 200000 → "200k", 128000 → "128k". Sizes that are a multiple of 1024
+ * but not of 1000 are read in binary units; 128000 is 125 × 1024 and still means 128k.
+ */
 export function compactTokens(value: number | null | undefined): string {
   if (value === null || value === undefined || value <= 0) {
     return DASH;
   }
-  const binary = value % 1024 === 0;
+  const binary = value % 1024 === 0 && value % 1000 !== 0;
   const k = binary ? 1024 : 1000;
   const m = k * k;
   if (value >= m) {
