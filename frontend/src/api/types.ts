@@ -31,6 +31,7 @@ export type SubscriptionSnapshot = Schemas['SnapshotOut'];
 export type SubscriptionWindow = Schemas['WindowOut'];
 export type ExtraUsage = Schemas['ExtraUsageOut'];
 export type SpendLimit = Schemas['SpendLimitOut'];
+export type SessionStats = Schemas['SessionStatsOut'];
 
 export type RefreshStatus = Schemas['RefreshStatus'];
 export type RefreshKind = NonNullable<Schemas['RefreshIn']['kinds']>[number];

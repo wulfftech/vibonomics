@@ -1298,6 +1298,30 @@ export interface components {
              */
             default_profile: string;
         };
+        /**
+         * SessionStatsOut
+         * @description What the status line says about the session that sent it (cost so far, context pressure).
+         */
+        SessionStatsOut: {
+            /** Cost Usd */
+            cost_usd?: number | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+            /** Lines Added */
+            lines_added?: number | null;
+            /** Lines Removed */
+            lines_removed?: number | null;
+            /** Context Used Percentage */
+            context_used_percentage?: number | null;
+            /** Context Input Tokens */
+            context_input_tokens?: number | null;
+            /** Context Output Tokens */
+            context_output_tokens?: number | null;
+            /** Context Size */
+            context_size?: number | null;
+            /** Cache Hit Ratio */
+            cache_hit_ratio?: number | null;
+        };
         /** SettingsIn */
         SettingsIn: {
             settings: components["schemas"]["AppSettings"];
@@ -1335,6 +1359,7 @@ export interface components {
             windows?: components["schemas"]["WindowOut"][];
             extra_usage?: components["schemas"]["ExtraUsageOut"] | null;
             spend_limit?: components["schemas"]["SpendLimitOut"] | null;
+            session?: components["schemas"]["SessionStatsOut"] | null;
             /** Model */
             model?: string | null;
             /** Version */

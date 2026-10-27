@@ -315,6 +315,64 @@ async def test_opencode_test_connection_never_calls_the_inference_models_route(c
     assert "Key stored" in message and "1 models" in message
 
 
-async def test_opencode_no_balance_api(ctx):
+async def test_opencode_console_no_balance_api(ctx):
     info = await make(opencode.OpenCodeAdapter, ctx).fetch_balance()
     assert info.status == "unsupported"
+    assert "console" in (info.message or "").lower()
+
+
+async def test_opencode_go_usage_needs_a_key(ctx):
+    info = await make(opencode.OpenCodeGoAdapter, ctx).fetch_balance()
+    assert info.status == "needs_key"
+
+
+@respx.mock
+async def test_opencode_go_reports_usage_windows(ctx):
+    route = respx.get(opencode.USAGE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "usage": {
+                    "rolling": {"status": "ok", "percent": 4.5, "resetsAt": "2026-10-27T16:20:31.000Z"},
+                    "weekly": {"status": "rate-limited", "percent": 100, "resetsAt": "2026-11-02T00:00:00.000Z"},
+                    "monthly": {"status": "ok", "percent": 50, "resetsAt": "2026-11-22T12:28:46.000Z"},
+                }
+            },
+        )
+    )
+    info = await make(opencode.OpenCodeGoAdapter, ctx, key="k").fetch_balance()
+    assert info.status == "ok"
+    windows = {w["key"]: w for w in info.details["usage_windows"]}
+    assert windows["rolling"]["used_percentage"] == 4.5
+    assert windows["weekly"]["used_percentage"] == 100
+    assert windows["monthly"]["resets_at"].startswith("2026-11-22")
+    assert route.calls[0].request.headers["Authorization"] == "Bearer k"
+    assert info.details["source"] == "zen-go-usage"
+
+
+@respx.mock
+async def test_opencode_go_usage_reports_a_rejected_key(ctx):
+    respx.get(opencode.USAGE_URL).mock(return_value=httpx.Response(401, json={"error": "Unauthorized"}))
+    info = await make(opencode.OpenCodeGoAdapter, ctx, key="k").fetch_balance()
+    assert info.status == "error"
+    assert "401" in (info.message or "")
+
+
+async def test_opencode_usage_parser_skips_broken_windows():
+    windows = opencode.parse_usage(
+        {"usage": {"rolling": {"percent": "12"}, "weekly": {"percent": None}, "monthly": "nonsense"}}
+    )
+    assert [w["key"] for w in windows] == ["rolling"]
+    assert windows[0]["used_percentage"] == 12
+    assert windows[0]["resets_at"] is None
+    assert opencode.parse_usage({"unexpected": True}) == []
+
+
+@respx.mock
+async def test_opencode_go_test_connection_reads_usage(ctx):
+    respx.get(opencode.GO_MODELS).mock(return_value=httpx.Response(200, json={"data": [{"id": "glm-5.3"}]}))
+    respx.get(opencode.USAGE_URL).mock(
+        return_value=httpx.Response(200, json={"usage": {"monthly": {"status": "ok", "percent": 12}}})
+    )
+    message = await make(opencode.OpenCodeGoAdapter, ctx, key="k").test_connection()
+    assert "1 Go usage window(s)" in message

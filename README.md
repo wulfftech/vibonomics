@@ -80,7 +80,7 @@ A key adds the live model list, whatever balance the provider exposes, and the a
 | Type | Live prices without a key | Balance |
 |---|---|---|
 | OpenRouter | yes (public list, per-endpoint discounts, `:free`) | key spend and limits with a normal key; account credits need a management key |
-| OpenCode Console / Go | yes (public list; models.dev prices) | none exposed; Go rates meter included usage |
+| OpenCode Console / Go | yes (public list; models.dev prices) | Go plan usage windows with the workspace key (rolling, weekly, monthly); Console credits are console-only |
 | Anthropic | yes (pricing page) | no prepaid balance; an org Admin key reports 30-day spend; a Claude Code login token adds subscription usage |
 | OpenAI | yes (pricing page) | no balance; an org Admin key reports 30-day spend |
 | Google Gemini | yes (pricing page, promos, free-tier flags) | none (AI Studio only) |
@@ -175,13 +175,23 @@ overage) are the only money-based figure.
 
 - **Live windows.** In **Settings â†’ Claude**, copy the generated command into Claude Code's status line
   (or the JSON snippet into `~/.claude/settings.json`). Claude Code already receives these numbers; the
-  command forwards each update to Vibonomics. The command carries an ingest token, can only submit usage
-  snapshots, and the token can be rotated on that page.
+  command forwards each update to Vibonomics. The same snapshot carries the session's estimated cost,
+  context-window use and cache hit ratio, which is what the card shows between window resets. The command
+  carries an ingest token, can only submit usage snapshots, and the token can be rotated on that page.
 - **Usage credits.** Add your Claude Code login token under **Providers â†’ Anthropic â†’ Claude Code login
   token**. Vibonomics calls `api.anthropic.com/api/oauth/usage` read-only. Use the `accessToken` from
   `~/.claude/.credentials.json` after an interactive login; `claude setup-token` tokens lack the profile
   scope. Vibonomics never refreshes the token, so Claude Code's copy stays valid. The endpoint is not
   documented for third parties and may change.
+- **Org seats.** Anthropic's Admin API has a daily Claude Code usage report
+  (`/v1/organizations/usage_report/claude_code`) with per-user tokens and estimated cost. It reports Team
+  and Enterprise seats only, so it returns nothing for an individual Pro/Max plan; Vibonomics leaves it
+  uncalled. The status line covers those plans.
+
+OpenCode Go is the other subscription with usable numbers. Its workspace key reads
+`opencode.ai/zen/go/v1/usage`, which returns the rolling, weekly and monthly percentages of the plan's
+included allowance. OpenCode documents no usage API, so the card labels the figures as unofficial. Console
+(pay-as-you-go) credits stay console-only: that endpoint wants a browser session cookie, not an API key.
 
 ## Configuration
 

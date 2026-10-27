@@ -1,31 +1,15 @@
 import { Badge, Card, Group, Progress, Stack, Text, Tooltip } from '@mantine/core';
-import { resetLabel, usageColor, type ClaudeUsage } from '../../lib/claudeUsage';
-import { money, relativeTime } from '../../lib/format';
+import { resetLabel, type ClaudeUsage } from '../../lib/claudeUsage';
+import { money, percent, relativeTime } from '../../lib/format';
 import { providerTextColor } from '../../lib/providerColors';
 import { tone } from '../../lib/tone';
 import { ProviderDot } from '../ProviderDot';
+import { UsageWindows } from '../UsageWindows';
 
 export function SubscriptionDetails({ usage }: { usage: ClaudeUsage }) {
   return (
     <Stack gap={8}>
-      {usage.windows.map((window) => (
-        <Stack key={window.key} gap={2}>
-          <Group justify="space-between" wrap="nowrap" gap="xs">
-            <Text size="xs" truncate="end">
-              {window.label}
-            </Text>
-            <Text size="xs" fw={600} c={usageColor(window.used_percentage)}>
-              {window.used_percentage.toFixed(window.used_percentage < 10 ? 1 : 0)}%
-            </Text>
-          </Group>
-          <Progress value={Math.min(100, window.used_percentage)} size={4} color={usageColor(window.used_percentage)} />
-          {window.resets_at && (
-            <Text size="xs" c="dimmed">
-              resets {resetLabel(window.resets_at)}
-            </Text>
-          )}
-        </Stack>
-      ))}
+      <UsageWindows windows={usage.windows} />
       {usage.extra && (
         <Stack gap={2}>
           <Group justify="space-between" wrap="nowrap" gap="xs">
@@ -53,6 +37,25 @@ export function SubscriptionDetails({ usage }: { usage: ClaudeUsage }) {
           Gateway spend: {money(usage.spendLimit.used_usd)} of {money(usage.spendLimit.limit_usd)}
           {usage.spendLimit.resets_at ? ` · resets ${resetLabel(usage.spendLimit.resets_at)}` : ''}
         </Text>
+      )}
+      {usage.session && (
+        <Group gap="md" wrap="wrap">
+          {usage.session.cost_usd !== null && usage.session.cost_usd !== undefined && (
+            <Text size="xs" c="dimmed">
+              Session {money(usage.session.cost_usd)}
+            </Text>
+          )}
+          {usage.session.context_used_percentage !== null && usage.session.context_used_percentage !== undefined && (
+            <Text size="xs" c="dimmed">
+              {Math.round(usage.session.context_used_percentage)}% context
+            </Text>
+          )}
+          {usage.session.cache_hit_ratio !== null && usage.session.cache_hit_ratio !== undefined && (
+            <Text size="xs" c="dimmed">
+              {percent(usage.session.cache_hit_ratio)} cache hits
+            </Text>
+          )}
+        </Group>
       )}
       {usage.error && (
         <Tooltip label={usage.error} multiline maw={340} withArrow>

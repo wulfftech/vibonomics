@@ -54,6 +54,20 @@ class SpendLimitOut(BaseModel):
     period: str = "monthly"
 
 
+class SessionStatsOut(BaseModel):
+    """What the status line says about the session that sent it (cost so far, context pressure)."""
+
+    cost_usd: float | None = None
+    duration_ms: int | None = None
+    lines_added: int | None = None
+    lines_removed: int | None = None
+    context_used_percentage: float | None = None
+    context_input_tokens: int | None = None
+    context_output_tokens: int | None = None
+    context_size: float | None = None
+    cache_hit_ratio: float | None = None
+
+
 class SnapshotOut(BaseModel):
     source: str
     received_at: datetime
@@ -61,6 +75,7 @@ class SnapshotOut(BaseModel):
     windows: list[WindowOut] = Field(default_factory=list)
     extra_usage: ExtraUsageOut | None = None
     spend_limit: SpendLimitOut | None = None
+    session: SessionStatsOut | None = None
     model: str | None = None
     version: str | None = None
 
@@ -114,6 +129,7 @@ def claude_subscription(request: Request, session: Session = Depends(get_session
             windows=[WindowOut(**w) for w in payload.get("windows") or []],
             extra_usage=ExtraUsageOut(**payload["extra_usage"]) if payload.get("extra_usage") else None,
             spend_limit=SpendLimitOut(**payload["spend_limit"]) if payload.get("spend_limit") else None,
+            session=SessionStatsOut(**payload["session"]) if payload.get("session") else None,
             model=payload.get("model"),
             version=payload.get("version"),
         )

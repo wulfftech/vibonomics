@@ -6,7 +6,9 @@ import type { BalanceOut, ProviderOut } from '../../api/types';
 import { money, relativeTime } from '../../lib/format';
 import { tone } from '../../lib/tone';
 import { providerTextColor } from '../../lib/providerColors';
+import { balanceWindows } from '../../lib/usageWindows';
 import { ProviderDot } from '../ProviderDot';
+import { UsageWindows } from '../UsageWindows';
 import { claudeUsage } from '../../lib/claudeUsage';
 import { ClaudeSubscriptionCard } from './ClaudeSubscriptionCard';
 
@@ -48,15 +50,17 @@ function BalanceBody({ provider }: { provider: ProviderOut }) {
     case 'ok': {
       const account = accountLine(balance);
       const key = keyLine(balance);
+      const windows = balanceWindows(balance);
       const hint = typeof balance.details?.credits_hint === 'string' ? balance.details.credits_hint : null;
       return (
-        <Stack gap={0}>
+        <Stack gap={windows.length > 0 ? 6 : 0}>
           {account !== null ? (
             <Text size="sm" fw={600}>
               {account}
             </Text>
           ) : (
-            key === null && (
+            key === null &&
+            windows.length === 0 && (
               <Text size="sm" c="dimmed">
                 No figures returned
               </Text>
@@ -71,6 +75,7 @@ function BalanceBody({ provider }: { provider: ProviderOut }) {
               {key}
             </Text>
           )}
+          {windows.length > 0 && <UsageWindows windows={windows} />}
           {account === null && hint !== null && (
             <Text size="xs" c="dimmed">
               {hint}

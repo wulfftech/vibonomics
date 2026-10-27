@@ -3,14 +3,20 @@
 Both expose public model lists but no pricing API. models.dev (run by the same team) carries accurate
 per-model prices; the console docs pages are parsed only to pick up discounts, which are published as
 strikethrough prices and "50% off" notes.
+
+A Go plan does report usage: ``/zen/go/v1/usage`` answers with rolling, weekly and monthly windows as a
+percentage of the plan's included allowance. OpenCode documents no usage API, so this is the endpoint the
+console itself calls; parsing is defensive and the UI labels it as unofficial. Console credit balance has
+no equivalent: that lives behind the console's session cookie, not an API key.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
-from ..http import FetchError, get_text
+from ..http import FetchError, get_json, get_text
 from .base import BalanceInfo, ChatTarget, ModelOffer, ProviderAdapter, ProviderSpec
 from .common import modelsdev_offers, openai_model_ids, parse_markdown_tables
 from .pricing_pages import PagePrice, apply_page_prices, find_column, parse_price_cell
@@ -23,7 +29,11 @@ ZEN_MODELS = "https://opencode.ai/inference/v1/models"
 GO_MODELS = "https://opencode.ai/inference/go/v1/models"
 ZEN_DOCS = "https://opencode.ai/v2/docs/console/models/"
 GO_DOCS = "https://opencode.ai/v2/docs/console/go/"
+USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 MARKDOWN = {"Accept": "text/markdown"}
+
+# Window keys the usage endpoint reports for a Go plan, in the order the console shows them.
+GO_WINDOWS = (("rolling", "5-hour session"), ("weekly", "Weekly"), ("monthly", "Monthly"))
 
 
 def parse_pricing(markdown: str) -> list[PagePrice]:
@@ -66,6 +76,46 @@ def parse_pricing(markdown: str) -> list[PagePrice]:
                 ),
             )
     return list(rows.values())
+
+
+def _reset_at(value: Any) -> str | None:
+    """The endpoint sends ISO timestamps; anything else is dropped rather than shown to the operator."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).isoformat()
+    except ValueError:
+        return None
+
+
+def parse_usage(payload: Any) -> list[dict[str, Any]]:
+    """The Go usage endpoint's reply → per-window percentages and reset times.
+
+    The response is documented nowhere, so every field is optional: a window that is missing or
+    carries a non-numeric percent is skipped rather than rendered as a wrong figure.
+    """
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return []
+    windows: list[dict[str, Any]] = []
+    for key, label in GO_WINDOWS:
+        node = usage.get(key)
+        if not isinstance(node, dict):
+            continue
+        try:
+            percent = float(node.get("percent"))
+        except (TypeError, ValueError):
+            continue
+        windows.append(
+            {
+                "key": key,
+                "label": label,
+                "used_percentage": round(max(0.0, min(percent, 100.0)), 2),
+                "resets_at": _reset_at(node.get("resetsAt")),
+                "status": str(node.get("status") or "") or ("limit" if percent >= 100 else "ok"),
+            }
+        )
+    return windows
 
 
 def _junk(model_id: str) -> bool:
@@ -122,8 +172,39 @@ class _OpenCodeBase(ProviderAdapter):
         return offers
 
     async def fetch_balance(self) -> BalanceInfo:
+        if not self.subscription:
+            return BalanceInfo(
+                status="unsupported",
+                message="Console credits are visible only in the OpenCode console. OpenCode Go usage is reported on "
+                "the Go provider card.",
+            )
+        if not self.cfg.api_key:
+            return BalanceInfo(
+                status="needs_key",
+                message="An API key from the Go workspace is what the usage endpoint reads.",
+            )
+        try:
+            data = await get_json(
+                USAGE_URL,
+                headers={**self.auth_headers(), "Accept": "application/json"},
+                timeout=30,
+                retries=1,
+            )
+        except FetchError as exc:
+            return BalanceInfo(status="error", message=f"Usage request failed: {str(exc)[:300]}")
+        windows = parse_usage(data)
+        if not windows:
+            return BalanceInfo(
+                status="error",
+                message="The usage endpoint answered without any window; its response shape may have changed.",
+            )
         return BalanceInfo(
-            status="unsupported", message="OpenCode shows the balance only in its console; there is no balance API."
+            status="ok",
+            details={
+                "usage_windows": windows,
+                "source": "zen-go-usage",
+                "undocumented": "OpenCode documents no usage API; this is the endpoint its own console uses.",
+            },
         )
 
     async def test_connection(self) -> str:
@@ -132,6 +213,22 @@ class _OpenCodeBase(ProviderAdapter):
         ids = await openai_model_ids(self.models_url, {})
         if not self.cfg.api_key:
             return f"Public catalogue reachable ({len(ids)} models); no API key set."
+        if self.subscription:
+            try:
+                windows = parse_usage(
+                    await get_json(
+                        USAGE_URL,
+                        headers={**self.auth_headers(), "Accept": "application/json"},
+                        timeout=30,
+                        retries=1,
+                    )
+                )
+            except FetchError as exc:
+                raise FetchError(f"The usage endpoint rejected this key: {str(exc)[:200]}") from exc
+            return (
+                f"Key accepted ({len(ids)} models in the catalogue; {len(windows)} Go usage window(s) read). "
+                "That usage call is the key check OpenCode offers."
+            )
         return (
             f"Key stored. The public catalogue lists {len(ids)} models; OpenCode has no key-check endpoint, so a "
             "test run or balance refresh is what would reject a bad key."
@@ -188,13 +285,15 @@ class OpenCodeGoAdapter(_OpenCodeBase):
     spec = ProviderSpec(
         type="opencode-go",
         name="OpenCode Go",
-        description="OpenCode Go subscription catalogue ($10/month). Per-token rates meter included usage rather "
-        "than bill per request. Public model list; a key adds test runs.",
+        description="OpenCode Go subscription catalogue ($10/month, or Go Plus at $40). Per-token rates meter "
+        "included usage rather than bill per request. Public model list; a key adds test runs and the plan's "
+        "rolling, weekly and monthly usage windows.",
         homepage="https://opencode.ai",
         default_base_url=GO_API,
         modelsdev_ids=("opencode-go",),
         keys_url="https://opencode.ai/console",
         billing_url="https://opencode.ai/console",
-        balance="none",
-        balance_note="Go usage limits are shown only in the OpenCode console (per-model 5-hour/weekly/monthly caps).",
+        balance="key",
+        balance_note="Go plans report rolling, weekly and monthly usage windows to the workspace's API key. There "
+        "is no dollar balance; extra usage is charged to Console credits.",
     )

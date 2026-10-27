@@ -110,6 +110,20 @@ def _num(value: object) -> float | None:
     return round(number, 2) if number == number else None
 
 
+def _money(value: object) -> float | None:
+    """Per-session cost is often a fraction of a cent, so it keeps four decimals."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return round(number, 4) if number == number else None
+
+
+def _int(value: object) -> int | None:
+    number = _num(value)
+    return None if number is None else int(number)
+
+
 def _extra_usage(node: object) -> dict[str, object] | None:
     """Usage credits (extra usage), in major currency units."""
     if not isinstance(node, dict) or not node.get("is_enabled"):
@@ -123,6 +137,34 @@ def _extra_usage(node: object) -> dict[str, object] | None:
         "currency": str(node.get("currency") or "USD"),
         "monthly": True,
     }
+
+
+def _session(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Session-level numbers from the status line: spend so far, elapsed time and context pressure.
+
+    Claude Code drops the rate-limit windows when they reset, so these fields are what keep the card
+    useful between resets. Every field is optional.
+    """
+    cost = payload.get("cost") if isinstance(payload.get("cost"), dict) else {}
+    context = payload.get("context_window") if isinstance(payload.get("context_window"), dict) else {}
+    cache = payload.get("prompt_cache") if isinstance(payload.get("prompt_cache"), dict) else {}
+    used = _usage(context.get("used_percentage"))
+    tokens = _num(context.get("total_input_tokens"))
+    output = _num(context.get("total_output_tokens"))
+    session = {
+        "cost_usd": _money(cost.get("total_cost_usd")),
+        "duration_ms": _int(cost.get("total_duration_ms")),
+        "lines_added": _int(cost.get("total_lines_added")),
+        "lines_removed": _int(cost.get("total_lines_removed")),
+        "context_used_percentage": used,
+        "context_input_tokens": None if tokens is None else int(tokens),
+        "context_output_tokens": None if output is None else int(output),
+        "context_size": _num(context.get("context_window_size")),
+        "cache_hit_ratio": _num(cache.get("hit_ratio")),
+    }
+    if all(value is None for value in session.values()):
+        return None
+    return session
 
 
 def normalize_statusline(payload: dict[str, Any]) -> dict[str, Any]:
@@ -149,6 +191,7 @@ def normalize_statusline(payload: dict[str, Any]) -> dict[str, Any]:
         "model": model.get("display_name") or model.get("id"),
         "session_id": payload.get("session_id"),
         "version": payload.get("version"),
+        "session": _session(payload),
         "received_at": utcnow().isoformat(),
     }
 
@@ -173,6 +216,7 @@ def normalize_usage(payload: dict[str, Any]) -> dict[str, Any]:
         "model": None,
         "session_id": None,
         "version": None,
+        "session": None,
         "received_at": utcnow().isoformat(),
     }
 

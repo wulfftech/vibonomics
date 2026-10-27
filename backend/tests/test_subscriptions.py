@@ -45,6 +45,25 @@ USAGE = {
 }
 
 
+SESSIONS = {
+    "cost": {
+        "total_cost_usd": 0.01234,
+        "total_duration_ms": 45000,
+        "total_api_duration_ms": 2300,
+        "total_lines_added": 156,
+        "total_lines_removed": 23,
+    },
+    "context_window": {
+        "total_input_tokens": 15500,
+        "total_output_tokens": 1200,
+        "context_window_size": 200000,
+        "used_percentage": 8,
+        "remaining_percentage": 92,
+    },
+    "prompt_cache": {"hit_ratio": 0.91},
+}
+
+
 def test_normalize_statusline():
     data = normalize_statusline(STATUSLINE)
     assert [w["key"] for w in data["windows"]] == ["five_hour", "seven_day", "spend_limit"]
@@ -54,6 +73,21 @@ def test_normalize_statusline():
     assert data["spend_limit"]["used_usd"] == 314.12
     assert data["source"] == "claude-code"
     assert data["model"] == "Opus"
+    # Older Claude Code versions send no cost or context data.
+    assert data["session"] is None
+
+
+def test_normalize_statusline_session_stats():
+    data = normalize_statusline({**STATUSLINE, **SESSIONS})
+    session = data["session"]
+    assert session is not None
+    assert session["cost_usd"] == 0.0123
+    assert session["duration_ms"] == 45000
+    assert session["lines_added"] == 156
+    assert session["context_used_percentage"] == 8.0
+    assert session["context_input_tokens"] == 15500
+    assert session["context_size"] == 200000
+    assert session["cache_hit_ratio"] == 0.91
 
 
 def test_normalize_usage_credits_and_model_windows():
@@ -91,7 +125,7 @@ def test_ingest_and_read_back():
 
     response = client.post(
         f"/api/subscription/ingest/claude?token={config['ingest_token']}",
-        json=STATUSLINE,
+        json={**STATUSLINE, **SESSIONS},
     )
     assert response.status_code == 202
     assert response.json()["windows"] == 3
@@ -100,6 +134,8 @@ def test_ingest_and_read_back():
     assert latest is not None
     assert [w["key"] for w in latest["windows"]] == ["five_hour", "seven_day", "spend_limit"]
     assert latest["spend_limit"]["limit_usd"] == 500
+    assert latest["session"]["cost_usd"] == 0.0123
+    assert latest["session"]["context_used_percentage"] == 8.0
 
 
 def test_ingest_rejects_bad_token_and_payload():

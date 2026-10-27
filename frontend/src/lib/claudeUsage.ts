@@ -1,10 +1,18 @@
-import type { ExtraUsage, ProviderOut, SpendLimit, SubscriptionSnapshot, SubscriptionWindow } from '../api/types';
+import type {
+  ExtraUsage,
+  ProviderOut,
+  SessionStats,
+  SpendLimit,
+  SubscriptionSnapshot,
+  SubscriptionWindow,
+} from '../api/types';
 import { parseDate, relativeTime } from './format';
 
 export interface ClaudeUsage {
   windows: SubscriptionWindow[];
   extra: ExtraUsage | null;
   spendLimit: SpendLimit | null;
+  session: SessionStats | null;
   plan: string | null;
   live: boolean;
   updatedAt: string | null;
@@ -71,6 +79,7 @@ export function claudeUsage(snapshot: SubscriptionSnapshot | null, providers: Pr
     windows,
     extra,
     spendLimit,
+    session: snapshot?.session ?? null,
     plan,
     live: snapshot !== null && liveWindows.length > 0,
     updatedAt,
