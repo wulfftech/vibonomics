@@ -190,3 +190,42 @@ async def test_judge_failure_is_reported_without_losing_checks(monkeypatch):
         assert result.judge_score is None
         assert result.score == 100
         assert run.summary["targets"][f"{provider_id}|{MODEL_ID}"]["assessment"] is None
+
+
+def _agentic_task(task_id: str):
+    from vibonomics.evals.suites import SUITES
+
+    return next(t for suite in SUITES.values() for t in suite.tasks if t.id == task_id)
+
+
+def _local_sandbox():
+    from vibonomics.settings_store import AppSettings
+
+    settings = AppSettings()
+    settings.evals.sandbox_mode = "local"
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_a_test_module_that_fails_to_import_scores_none_of_its_tests():
+    task = _agentic_task("agentic-report")
+    note, score = await runner._grade_agentic(task, dict(task.workspace), _local_sandbox())
+    assert score == 0.0
+    assert note.startswith(f"0/{task.test_count()} tests passed")
+    note, score = await runner._grade_agentic(task, {**task.workspace, **task.reference}, _local_sandbox())
+    assert score == 100.0
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_sandbox_is_not_a_pass(monkeypatch):
+    from vibonomics.evals import sandbox_client
+    from vibonomics.sandbox.executor import ExecResult
+
+    async def unavailable(*args, **kwargs):
+        return ExecResult(None, "", "Sandbox unavailable: ConnectError: connection refused", False, 0)
+
+    monkeypatch.setattr(sandbox_client, "run_code", unavailable)
+    task = _agentic_task("agentic-fix-mean")
+    note, score = await runner._grade_agentic(task, dict(task.workspace), _local_sandbox())
+    assert score is None
+    assert note == "Tests were not executed (Sandbox unavailable: ConnectError: connection refused)."
