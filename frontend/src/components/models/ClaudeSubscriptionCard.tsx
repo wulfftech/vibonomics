@@ -7,6 +7,18 @@ import { ProviderDot } from '../ProviderDot';
 import { UsageWindows } from '../UsageWindows';
 
 export function SubscriptionDetails({ usage }: { usage: ClaudeUsage }) {
+  const sessionBits = [
+    usage.session?.cost_usd !== null && usage.session?.cost_usd !== undefined
+      ? `Session ${money(usage.session.cost_usd)}`
+      : null,
+    usage.session?.context_used_percentage !== null && usage.session?.context_used_percentage !== undefined
+      ? `${Math.round(usage.session.context_used_percentage)}% context`
+      : null,
+    usage.session?.cache_hit_ratio !== null && usage.session?.cache_hit_ratio !== undefined
+      ? `${percent(usage.session.cache_hit_ratio)} cached`
+      : null,
+  ].filter((bit): bit is string => bit !== null);
+
   return (
     <Stack gap={8}>
       <UsageWindows windows={usage.windows} />
@@ -38,24 +50,10 @@ export function SubscriptionDetails({ usage }: { usage: ClaudeUsage }) {
           {usage.spendLimit.resets_at ? ` · resets ${resetLabel(usage.spendLimit.resets_at)}` : ''}
         </Text>
       )}
-      {usage.session && (
-        <Group gap="md" wrap="wrap">
-          {usage.session.cost_usd !== null && usage.session.cost_usd !== undefined && (
-            <Text size="xs" c="dimmed">
-              Session {money(usage.session.cost_usd)}
-            </Text>
-          )}
-          {usage.session.context_used_percentage !== null && usage.session.context_used_percentage !== undefined && (
-            <Text size="xs" c="dimmed">
-              {Math.round(usage.session.context_used_percentage)}% context
-            </Text>
-          )}
-          {usage.session.cache_hit_ratio !== null && usage.session.cache_hit_ratio !== undefined && (
-            <Text size="xs" c="dimmed">
-              {percent(usage.session.cache_hit_ratio)} cache hits
-            </Text>
-          )}
-        </Group>
+      {sessionBits.length > 0 && (
+        <Text size="xs" c="dimmed">
+          {sessionBits.join(' · ')}
+        </Text>
       )}
       {usage.error && (
         <Tooltip label={usage.error} multiline maw={340} withArrow>
