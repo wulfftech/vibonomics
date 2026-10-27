@@ -35,18 +35,29 @@ acknowledgement within a few days. There is no bounty.
 ## Threat model for the sandbox
 
 The sandbox exists because Vibonomics runs code written by a language model. It is a separate container
-on an internal-only Docker network, with no volumes, a read-only root filesystem, a tmpfs for `/tmp`,
-no Linux capabilities, a non-root user, and limits on memory, CPU and process count. It has no
-provider keys and cannot reach the app's database. It also has no route to the internet, so a test
-cannot exfiltrate anything it reads.
+with a read-only root filesystem, a tmpfs for `/tmp`, no Linux capabilities, a non-root user, and limits
+on memory, CPU and process count. It has no provider keys and cannot reach the app's database.
+
+In the default compose layout it has no network at all: the app reaches it through a Unix socket on a
+small in-memory volume they share, which is the only thing mounted. Code under test cannot call the
+app's API, the host or the internet, so it cannot use a stored key or exfiltrate anything it reads.
+
+The TCP layout (`docker/compose.sandbox-tcp.yml`) puts the sandbox on an internal Docker network with the
+app instead, still with no route to the internet. Because the two now share a network, the app refuses
+every request that arrives from it (`VIBONOMICS_SANDBOX_GUARD`, on by default). The guard compares the
+local address a connection arrived on, which a client cannot forge, so `X-Forwarded-For` and similar
+headers do not get round it. It turns itself off, with a warning in the log, when the sidecar's network
+also carries other traffic (loopback, or the interface of the default route), because refusing it there
+would lock everyone out. `docker/check-sandbox-isolation.sh` checks both layouts.
 
 What it does not do: it is not a hardened multi-tenant sandbox. A container escape or a kernel bug
 would matter, and the local `Local` sandbox mode runs model-written code in the app container with no
 isolation beyond the executor's limits. Do not use **Local** on a host you do not trust, and do not
 share one instance with people you do not trust.
 
-Set `VIBONOMICS_SANDBOX_TOKEN` so only the app can call the sidecar, and keep the sidecar on the internal
-network. Both are the defaults in `docker-compose.yml`.
+Prefer the default socket layout. If you use the TCP layout, keep the guard on, keep the sidecar on its
+own internal network, and set `VIBONOMICS_SANDBOX_TOKEN` so only the app can call the sidecar (it is
+empty by default).
 
 ## What is out of scope
 
@@ -62,6 +73,7 @@ network. Both are the defaults in `docker-compose.yml`.
 
 - Set `VIBONOMICS_PASSWORD`, or put the instance behind a reverse proxy that authenticates.
 - Set `VIBONOMICS_SECRET_KEY` from a secret store rather than relying on the generated file.
-- Keep `VIBONOMICS_SANDBOX_URL` pointed at the sidecar, with `VIBONOMICS_SANDBOX_TOKEN` set.
+- Keep the compose default for the sandbox (no network, reached through its socket). With the TCP
+  layout, keep `VIBONOMICS_SANDBOX_GUARD` on and set `VIBONOMICS_SANDBOX_TOKEN`.
 - Back up the config directory, and treat a copy of it as a copy of your keys.
 - If you enable Artificial Analysis, keep that instance private (see the README on its terms).
