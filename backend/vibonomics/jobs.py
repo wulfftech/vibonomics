@@ -20,6 +20,7 @@ from .db import session_scope
 from .orm import Balance, BenchmarkScore, Model, ModelAlias, PriceHistory, ProviderConfig, RefreshRun
 from .provider_service import build_adapter
 from .providers.base import BalanceInfo, FetchContext, ModelOffer
+from .scoring import source_in_use
 from .settings_store import AppSettings, load_settings
 
 log = logging.getLogger(__name__)
@@ -304,10 +305,7 @@ async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
 
     async def one(source_id: str) -> None:
         cls = SOURCES[source_id]
-        src_settings = settings.benchmark_source(source_id, cls.spec.default_enabled)
-        if not src_settings.enabled:
-            return
-        if cls.spec.terms_warning and not settings.benchmarks.aa_terms_acknowledged:
+        if not source_in_use(settings, source_id):
             return
         key = settings.benchmark_key(source_id)
         if cls.spec.requires_key and not key:

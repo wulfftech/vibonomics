@@ -111,6 +111,14 @@ def own_test_scores(session: Session) -> dict[tuple[int, str], dict[str, Any]]:
     return result
 
 
+def source_in_use(settings: AppSettings, source_id: str) -> bool:
+    """Whether a benchmark source's data may be fetched and used: enabled, with its terms acknowledged."""
+    spec = SOURCES[source_id].spec
+    if not settings.benchmark_source(source_id, spec.default_enabled).enabled:
+        return False
+    return not spec.terms_warning or settings.benchmarks.aa_terms_acknowledged
+
+
 def compute_scores(
     session: Session, settings: AppSettings, own_tests: dict[tuple[int, str], dict[str, Any]] | None = None
 ) -> dict[str, ModelScores]:
@@ -119,7 +127,14 @@ def compute_scores(
         "coding": settings.scoring.coding_weight,
         "agentic": settings.scoring.agentic_weight,
     }
-    metric_specs = {(sid, m.id): (cls.spec, m) for sid, cls in SOURCES.items() for m in cls.spec.metrics}
+    # Rows of a source switched off (or whose terms were withdrawn) stay in the table until its next
+    # refresh; they must stop counting now.
+    metric_specs = {
+        (sid, m.id): (cls.spec, m)
+        for sid, cls in SOURCES.items()
+        if source_in_use(settings, sid)
+        for m in cls.spec.metrics
+    }
 
     # Best value per (canonical, source, metric) across efforts.
     best: dict[tuple[str, str, str], BenchmarkScore] = {}
