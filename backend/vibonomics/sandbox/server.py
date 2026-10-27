@@ -1,8 +1,9 @@
 """Sandbox sidecar: a tiny HTTP service that executes model-written code.
 
-Run it as a separate container on an internal-only network with no secrets mounted:
-
-    docker compose up            # the "sandbox" service; VIBONOMICS_SANDBOX_URL=http://sandbox:2290
+Run it as a separate container with no secrets mounted. The compose default gives it no network at all
+and serves it on a Unix socket in a volume shared with the app (``VIBONOMICS_SANDBOX_SOCKET`` here,
+``VIBONOMICS_SANDBOX_URL=unix:///…`` in the app). Without a socket it listens on TCP port
+``VIBONOMICS_SANDBOX_PORT`` (2290), for an internal-only network.
 
 It only ever touches a fresh temp directory, so it works with a read-only root filesystem plus a
 tmpfs at ``/tmp``.
@@ -14,6 +15,7 @@ import asyncio
 import hmac
 import logging
 import os
+import sys
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -75,14 +77,43 @@ def create_app() -> FastAPI:
     return app
 
 
+def _socket_path() -> str | None:
+    return os.environ.get("VIBONOMICS_SANDBOX_SOCKET") or None
+
+
+def _port() -> int:
+    return int(os.environ.get("VIBONOMICS_SANDBOX_PORT", "2290"))
+
+
+def check() -> int:
+    """Container healthcheck: GET /health over whichever transport the sidecar listens on."""
+    import httpx
+
+    socket_path = _socket_path()
+    transport = httpx.HTTPTransport(uds=socket_path) if socket_path else None
+    url = "http://sandbox/health" if socket_path else f"http://127.0.0.1:{_port()}/health"
+    try:
+        with httpx.Client(transport=transport, timeout=3) as client:
+            client.get(url).raise_for_status()
+    except httpx.HTTPError as exc:
+        print(f"sandbox unhealthy: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> None:
     import uvicorn
 
+    if "--check" in sys.argv[2:]:
+        sys.exit(check())
     logging.basicConfig(level="INFO")
-    port = int(os.environ.get("VIBONOMICS_SANDBOX_PORT", "2290"))
     if os.name == "posix" and os.geteuid() == 0:
         try:  # the compose service drops privileges; this keeps a manual `docker run` safer too
             os.setuid(int(os.environ.get("VIBONOMICS_SANDBOX_UID", "65534")))
         except (OSError, ValueError):
             log.warning("Could not drop privileges; the sandbox is running as root")
-    uvicorn.run(create_app(), host="0.0.0.0", port=port, log_level="info")
+    socket_path = _socket_path()
+    if socket_path:
+        uvicorn.run(create_app(), uds=socket_path, log_level="info")
+    else:
+        uvicorn.run(create_app(), host="0.0.0.0", port=_port(), log_level="info")

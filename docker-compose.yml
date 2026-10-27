@@ -11,6 +11,8 @@ services:
       - "${VIBONOMICS_PORT:-2289}:2289"
     volumes:
       - "${VIBONOMICS_CONFIG:-./config}:/config"
+      # The sandbox's socket: with no network, this is the only way in or out of the sandbox.
+      - sandbox-socket:/run/vibonomics-sandbox:ro
     # Everything in .env reaches the app (provider keys, password, secret key), so keys can be
     # supplied by environment instead of the Settings page. The file is optional.
     env_file:
@@ -26,17 +28,15 @@ services:
       VIBONOMICS_SECRET_KEY: "${VIBONOMICS_SECRET_KEY:-}"
       VIBONOMICS_URL_BASE: "${VIBONOMICS_URL_BASE:-}"
       VIBONOMICS_LOG_LEVEL: "${VIBONOMICS_LOG_LEVEL:-info}"
-      VIBONOMICS_SANDBOX_URL: "http://sandbox:2290"
+      VIBONOMICS_SANDBOX_URL: "unix:///run/vibonomics-sandbox/sandbox.sock"
       VIBONOMICS_SANDBOX_TOKEN: "${VIBONOMICS_SANDBOX_TOKEN:-}"
     depends_on:
       - sandbox
-    networks:
-      - default
-      - sandboxnet
     restart: unless-stopped
 
-  # Executes model-written code during tests. Isolated: no secrets, no /config, no internet,
-  # read-only filesystem, non-root, capped CPU/memory/processes.
+  # Executes model-written code during tests. Isolated: no network at all (the app reaches it through
+  # a Unix socket on a shared in-memory volume), no secrets, no /config, read-only filesystem,
+  # non-root, capped CPU/memory/processes.
   sandbox:
     build:
       context: .
@@ -45,8 +45,11 @@ services:
     container_name: vibonomics-sandbox
     command: ["python", "-m", "vibonomics", "sandbox"]
     environment:
-      VIBONOMICS_SANDBOX_PORT: "2290"
+      VIBONOMICS_SANDBOX_SOCKET: /run/vibonomics-sandbox/sandbox.sock
       VIBONOMICS_SANDBOX_TOKEN: "${VIBONOMICS_SANDBOX_TOKEN:-}"
+    volumes:
+      - sandbox-socket:/run/vibonomics-sandbox
+    network_mode: none
     user: "65534:65534"
     read_only: true
     tmpfs:
@@ -59,19 +62,17 @@ services:
     mem_limit: 1g
     cpus: 2
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2290/health', timeout=3)"
+      test: ["CMD", "python", "-m", "vibonomics", "sandbox", "--check"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-    networks:
-      - sandboxnet
     restart: unless-stopped
 
-networks:
-  sandboxnet:
-    internal: true
+volumes:
+  # In memory, and writable only by the sandbox's user, which creates the socket in it.
+  sandbox-socket:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=65534,gid=65534,mode=0755"

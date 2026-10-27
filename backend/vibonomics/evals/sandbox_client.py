@@ -22,6 +22,15 @@ def mode_for(settings: AppSettings) -> str:
     return effective_sandbox_mode(settings)
 
 
+def sidecar_transport(url: str) -> tuple[httpx.AsyncHTTPTransport | None, str]:
+    """The transport and base URL for the sidecar. ``unix:///path`` is a sidecar with no network,
+    reached through its socket on a shared volume; anything else is plain HTTP."""
+    if url.startswith("unix:"):
+        path = "/" + url.removeprefix("unix:").lstrip("/")
+        return httpx.AsyncHTTPTransport(uds=path), "http://sandbox"
+    return None, url
+
+
 async def run_code(
     files: dict[str, str],
     command: list[str],
@@ -42,10 +51,12 @@ async def run_code(
         token = os.environ.get("VIBONOMICS_SANDBOX_TOKEN")
         if token:
             headers["X-Sandbox-Token"] = token
+        transport, base = sidecar_transport(url)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout + 20, connect=10)) as client:
+            limits = httpx.Timeout(timeout + 20, connect=10)
+            async with httpx.AsyncClient(timeout=limits, transport=transport) as client:
                 response = await client.post(
-                    f"{url}/run",
+                    f"{base}/run",
                     json={"files": files, "command": command, "timeout": timeout, "cwd": cwd},
                     headers=headers,
                 )

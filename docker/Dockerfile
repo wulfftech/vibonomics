@@ -45,7 +45,7 @@ COPY backend/vibonomics /app/backend/vibonomics
 COPY docker/entrypoint.sh /usr/local/bin/vibonomics-entrypoint
 
 RUN chmod +x /usr/local/bin/vibonomics-entrypoint \
- && mkdir -p /config \
+ && mkdir -p /config /run/vibonomics-sandbox \
  && chown -R vibonomics:vibonomics /config /app
 
 WORKDIR /app
