@@ -93,10 +93,13 @@ def _spend(node: object) -> dict[str, float | str | None] | None:
         return None
     used = _num(node.get("used_usd"))
     limit = _num(node.get("limit_usd"))
+    percent = _num(node.get("used_percentage"))
+    if percent is None and used is not None and limit:
+        percent = round(used / limit * 100, 2)
     return {
         "used_usd": used,
         "limit_usd": limit,
-        "used_percentage": _num(node.get("used_percentage")),
+        "used_percentage": percent,
         "resets_at": _iso(node.get("resets_at")),
         "period": str(node.get("period") or "monthly"),
     }
@@ -172,7 +175,7 @@ def normalize_statusline(payload: dict[str, Any]) -> dict[str, Any]:
     limits = payload.get("rate_limits") if isinstance(payload.get("rate_limits"), dict) else {}
     windows = [w for key, label in _WINDOWS if (w := _window(key, label, limits.get(key))) is not None]
     spend = _spend(limits.get("spend_limit"))
-    if spend is not None:
+    if spend is not None and spend["used_percentage"] is not None:
         windows.append(
             {
                 "key": "spend_limit",

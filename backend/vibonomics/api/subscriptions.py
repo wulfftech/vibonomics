@@ -126,7 +126,8 @@ def claude_subscription(request: Request, session: Session = Depends(get_session
             source=str(payload.get("source") or "claude-code"),
             received_at=received_at,
             plan=payload.get("plan"),
-            windows=[WindowOut(**w) for w in payload.get("windows") or []],
+            # Snapshots stored before spend-limit windows needed a percentage can hold one without it.
+            windows=[WindowOut(**w) for w in payload.get("windows") or [] if w.get("used_percentage") is not None],
             extra_usage=ExtraUsageOut(**payload["extra_usage"]) if payload.get("extra_usage") else None,
             spend_limit=SpendLimitOut(**payload["spend_limit"]) if payload.get("spend_limit") else None,
             session=SessionStatsOut(**payload["session"]) if payload.get("session") else None,
