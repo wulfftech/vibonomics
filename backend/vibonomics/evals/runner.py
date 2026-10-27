@@ -620,8 +620,8 @@ async def _grade_agentic(task: TaskDef, workspace: dict[str, str], settings: App
         return f"All {total} tests passed.", (100.0 if total else None)
     # Count from unittest's own summary: a test module that fails to import runs as one error, so
     # subtracting failures from the declared test count would credit every test in it as passed.
-    ran = _summary_count(result.stderr, r"Ran (\d+) tests? in ")
-    failures = _summary_count(result.stderr, r"failures=(\d+)")
+    ran = _summary_count(result.stderr, r"(?m)^Ran (\d+) tests? in ")
+    failures = _summary_count(result.stderr, r"(?<!expected )failures=(\d+)")
     errors = _summary_count(result.stderr, r"errors=(\d+)")
     skipped = _summary_count(result.stderr, r"skipped=(\d+)")
     passed = min(total, max(0, ran - failures - errors - skipped))
