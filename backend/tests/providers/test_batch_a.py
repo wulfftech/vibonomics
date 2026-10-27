@@ -16,7 +16,8 @@ import respx
 from vibonomics.catalog.modelsdev import ModelsDevCatalog
 from vibonomics.http import FetchError
 from vibonomics.providers import anthropic, deepseek, google, mistral, openai, opencode, xai
-from vibonomics.providers.base import FetchContext, ResolvedProvider
+from vibonomics.providers.base import FetchContext, ModelOffer, Price, ResolvedProvider
+from vibonomics.providers.pricing_pages import apply_page_prices
 from vibonomics.settings_store import AppSettings
 
 FIX = Path(__file__).parent / "fixtures" / "batch_a"
@@ -150,6 +151,17 @@ async def test_openai_prices_from_page(ctx):
     assert (long_context["input"], long_context["output"]) == (20.0, 75.0)
     # "(<272K context length)" in the page is stripped so the id matches the catalogue.
     assert offers["gpt-5.5"].price.input == 5.0
+
+
+@pytest.mark.parametrize("ids", [["gpt-4o"], ["gpt-4o", "gpt-4o-2024-05-13"], ["gpt-4o-2024-05-13", "gpt-4o"]])
+def test_a_dated_row_never_reprices_the_undated_model(ids):
+    offers = {i: ModelOffer(model_id=i, name=i, price=Price(input=1, output=1)) for i in ids}
+    apply_page_prices(list(offers.values()), openai.parse_pricing(text("openai_pricing.md")), "page")
+    base = offers["gpt-4o"].price
+    assert (base.input, base.output, base.cache_read) == (2.5, 10.0, 1.25)
+    if "gpt-4o-2024-05-13" in offers:
+        dated = offers["gpt-4o-2024-05-13"].price
+        assert (dated.input, dated.output) == (5.0, 15.0)
 
 
 @respx.mock
