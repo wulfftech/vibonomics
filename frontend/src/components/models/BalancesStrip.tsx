@@ -32,7 +32,9 @@ function accountLine(balance: BalanceOut): string | null {
     return `${money(balance.account_balance)} left`;
   }
   if (balance.account_used !== null && balance.account_used !== undefined) {
-    return `Spent ${money(balance.account_used)}`;
+    // Providers that report spend name the window (Anthropic: "this month"); others just say "Spent".
+    const period = typeof balance.details?.spend_period === 'string' ? ` ${balance.details.spend_period}` : '';
+    return `Spent ${money(balance.account_used)}${period}`;
   }
   return null;
 }
@@ -52,6 +54,7 @@ function BalanceBody({ provider }: { provider: ProviderOut }) {
       const key = keyLine(balance);
       const windows = balanceWindows(balance);
       const hint = typeof balance.details?.credits_hint === 'string' ? balance.details.credits_hint : null;
+      const trailing = typeof balance.details?.last_30_days === 'number' ? balance.details.last_30_days : null;
       return (
         <Stack gap={windows.length > 0 ? 6 : 0}>
           {account !== null ? (
@@ -65,6 +68,11 @@ function BalanceBody({ provider }: { provider: ProviderOut }) {
                 No figures returned
               </Text>
             )
+          )}
+          {trailing !== null && trailing !== balance.account_used && (
+            <Text size="xs" c="dimmed">
+              Last 30 days {money(trailing)}
+            </Text>
           )}
           {key !== null && (
             <Text

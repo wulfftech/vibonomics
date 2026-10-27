@@ -81,7 +81,7 @@ A key adds the live model list, whatever balance the provider exposes, and the a
 |---|---|---|
 | OpenRouter | yes (public list, per-endpoint discounts, `:free`) | key spend and limits with a normal key; account credits need a management key |
 | OpenCode Console / Go | yes (public list; models.dev prices) | Go plan usage windows with the workspace key (rolling, weekly, monthly); Console credits are console-only |
-| Anthropic | yes (pricing page) | no prepaid balance; an org Admin key reports 30-day spend; a Claude Code login token adds subscription usage |
+| Anthropic | yes (pricing page) | no prepaid balance or credit-balance API; an org Admin key reports month-to-date and 30-day API spend; a Claude Code login token adds subscription usage |
 | OpenAI | yes (pricing page) | no balance; an org Admin key reports 30-day spend |
 | Google Gemini | yes (pricing page, promos, free-tier flags) | none (AI Studio only) |
 | DeepSeek | yes (pricing page, peak and off-peak) | account balance |

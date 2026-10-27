@@ -135,14 +135,12 @@ class AnthropicAdapter(ProviderAdapter):
             return None, "The usage endpoint returned an unexpected response."
         return normalize_usage(data), None
 
-    async def _admin_spend(self) -> float:
-        now = datetime.now(UTC)
-        start = (now - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00Z")
+    async def _cost_report(self, start: datetime, now: datetime) -> float:
         data = await get_json(
             f"{API}/v1/organizations/cost_report",
-            headers={**self._headers(), "x-api-key": self.cfg.mgmt_key, "anthropic-version": API_VERSION},
+            headers=self._admin_headers(),
             params={
-                "starting_at": start,
+                "starting_at": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "ending_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "bucket_width": "1d",
                 "limit": 31,
@@ -159,6 +157,23 @@ class AnthropicAdapter(ProviderAdapter):
                     continue
         return round(total_cents / 100, 2)
 
+    def _admin_headers(self) -> dict[str, str]:
+        return {**self._headers(), "x-api-key": self.cfg.mgmt_key or "", "anthropic-version": API_VERSION}
+
+    async def _admin_spend(self) -> dict[str, float]:
+        """API spend for the calendar month and the trailing 30 days, in USD.
+
+        The Console's "this month" figure is the one people budget against. Anthropic exposes no
+        credit-balance endpoint (the Admin API has usage and cost reports only), so spend is the closest
+        honest number to a monthly credit figure.
+        """
+        now = datetime.now(UTC)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_to_date = await self._cost_report(month_start, now)
+        thirty_start = now - timedelta(days=30)
+        last_30_days = month_to_date if thirty_start <= month_start else await self._cost_report(thirty_start, now)
+        return {"month_to_date": month_to_date, "last_30_days": last_30_days}
+
     async def fetch_balance(self) -> BalanceInfo:
         details: dict[str, Any] = {}
         notes: list[str] = []
@@ -169,18 +184,19 @@ class AnthropicAdapter(ProviderAdapter):
         if subscription_error:
             details["subscription_error"] = subscription_error
 
-        admin_spend: float | None = None
+        admin_spend: dict[str, float] | None = None
         if self.cfg.mgmt_key:
             try:
                 admin_spend = await self._admin_spend()
-                notes.append(f"Admin API spend over 30 days: ${admin_spend:.2f}.")
+                details.update(admin_spend)
+                details["spend_period"] = "this month"
             except FetchError as exc:
                 details["admin_error"] = str(exc)[:300]
 
         if subscription is not None or admin_spend is not None:
             return BalanceInfo(
                 status="ok",
-                account_used=admin_spend,
+                account_used=None if admin_spend is None else admin_spend["month_to_date"],
                 message=" ".join(notes) or None,
                 details=details,
             )

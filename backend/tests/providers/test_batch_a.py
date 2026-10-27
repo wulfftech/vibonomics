@@ -73,12 +73,18 @@ async def test_anthropic_keeps_catalogue_prices_when_page_fails(ctx):
 
 @respx.mock
 async def test_anthropic_admin_spend(ctx):
-    respx.get(f"{anthropic.API}/v1/organizations/cost_report").mock(
+    route = respx.get(f"{anthropic.API}/v1/organizations/cost_report").mock(
         return_value=httpx.Response(200, json={"data": [{"results": [{"amount": "1000"}, {"amount": "234.5"}]}]})
     )
     info = await make(anthropic.AnthropicAdapter, ctx, key="sk-ant-x", mgmt="sk-ant-admin01-x").fetch_balance()
     assert info.status == "ok"
+    # The headline is the calendar month, the figure the Console's billing page budgets against.
     assert info.account_used == 12.35
+    assert info.details["month_to_date"] == 12.35
+    assert info.details["last_30_days"] == 12.35
+    assert info.details["spend_period"] == "this month"
+    starts = [call.request.url.params["starting_at"] for call in route.calls]
+    assert starts[0].endswith("-01T00:00:00Z")
 
 
 async def test_anthropic_balances_without_admin_key(ctx):
