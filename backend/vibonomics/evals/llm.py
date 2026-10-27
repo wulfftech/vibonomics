@@ -222,7 +222,9 @@ class LLMClient:
                 if self._token_param == "max_tokens" and "max_completion_tokens" in body:
                     # Newer OpenAI reasoning models renamed the parameter.
                     self._token_param = "max_completion_tokens"
-                    payload = {**payload, "max_completion_tokens": payload.pop("max_tokens", self.max_tokens)}
+                    tokens = payload.get("max_tokens", self.max_tokens)
+                    payload = {k: v for k, v in payload.items() if k != "max_tokens"}
+                    payload["max_completion_tokens"] = tokens
                     continue
                 if "temperature" in body and "temperature" in payload:
                     payload = {k: v for k, v in payload.items() if k != "temperature"}

@@ -82,6 +82,26 @@ async def test_openai_retries_on_server_error():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_openai_switches_to_max_completion_tokens():
+    def reply(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "max_tokens" in body:
+            message = "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
+            return httpx.Response(400, json={"error": {"message": message}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+
+    route = respx.post("https://example.test/v1/chat/completions").mock(side_effect=reply)
+    client = LLMClient(ChatTarget(wire="openai", base_url="https://example.test/v1", model="m", headers={}))
+    first = await client.chat([{"role": "user", "content": "hi"}])
+    second = await client.chat([{"role": "user", "content": "again"}])
+    await client.aclose()
+    assert (first.text, second.text) == ("ok", "ok")
+    assert route.call_count == 3
+    assert json.loads(route.calls[1].request.content)["max_completion_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_openai_error_is_reported():
     respx.post("https://example.test/v1/chat/completions").mock(
         return_value=httpx.Response(401, json={"error": {"message": "bad key"}})
