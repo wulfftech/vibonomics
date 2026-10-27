@@ -84,3 +84,7 @@ jobs:
             sleep 2
           done
           docker rm -f sandbox-health
+      - name: Sandbox isolation (socket and TCP layouts)
+        run: |
+          docker tag vibonomics:ci vibonomics:local
+          docker/check-sandbox-isolation.sh

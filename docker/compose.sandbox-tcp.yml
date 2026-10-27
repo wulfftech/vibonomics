@@ -1,0 +1,29 @@
+# Reach the sandbox over TCP on an internal Docker network instead of through a Unix socket.
+#
+# Use it when your Docker host cannot share a Unix socket between containers. Select it in .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker/compose.sandbox-tcp.yml
+#
+# (on Windows, separate the files with ";"). Needs Docker Compose 2.24 or later for !reset.
+#
+# The sandbox still has no route to the internet, but it now shares a network with the app. Keep
+# VIBONOMICS_SANDBOX_GUARD on, so the app refuses every request that arrives from that network.
+services:
+  vibonomics:
+    environment:
+      VIBONOMICS_SANDBOX_URL: "http://sandbox:2290"
+    networks:
+      - default
+      - sandboxnet
+
+  sandbox:
+    environment:
+      VIBONOMICS_SANDBOX_SOCKET: ""
+      VIBONOMICS_SANDBOX_PORT: "2290"
+    network_mode: !reset null
+    networks:
+      - sandboxnet
+
+networks:
+  sandboxnet:
+    internal: true

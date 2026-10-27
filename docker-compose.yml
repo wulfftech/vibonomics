@@ -30,13 +30,17 @@ services:
       VIBONOMICS_LOG_LEVEL: "${VIBONOMICS_LOG_LEVEL:-info}"
       VIBONOMICS_SANDBOX_URL: "unix:///run/vibonomics-sandbox/sandbox.sock"
       VIBONOMICS_SANDBOX_TOKEN: "${VIBONOMICS_SANDBOX_TOKEN:-}"
+      # Refuse every request that arrives from the sandbox's network. Only the TCP layout
+      # (docker/compose.sandbox-tcp.yml) has one; set it to "off" to allow such requests.
+      VIBONOMICS_SANDBOX_GUARD: "${VIBONOMICS_SANDBOX_GUARD:-on}"
     depends_on:
       - sandbox
     restart: unless-stopped
 
   # Executes model-written code during tests. Isolated: no network at all (the app reaches it through
   # a Unix socket on a shared in-memory volume), no secrets, no /config, read-only filesystem,
-  # non-root, capped CPU/memory/processes.
+  # non-root, capped CPU/memory/processes. To use TCP on an internal network instead, add
+  # docker/compose.sandbox-tcp.yml (see .env.example).
   sandbox:
     build:
       context: .

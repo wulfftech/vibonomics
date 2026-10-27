@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
-from . import __version__, events, scheduler
+from . import __version__, events, sandbox_guard, scheduler
 from .api import auth, benchmarks, evals, models, providers, refresh, settings, subscriptions, system
 from .config import get_config
 from .db import init_db, session_scope
@@ -39,6 +39,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         seed_providers(s)
         app_settings = load_settings(s)
     runner.recover_interrupted()
+    if not await sandbox_guard.refresh():
+        spawn(sandbox_guard.keep_trying())
     scheduler.start(app_settings)
     if app_settings.refresh.refresh_on_startup:
         spawn(_startup_refresh())
@@ -77,6 +79,8 @@ def _api_app() -> FastAPI:
 
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
+        if sandbox_guard.refuses(request.scope):
+            return JSONResponse({"detail": "Requests from the sandbox network are refused"}, status_code=403)
         path = _route_path(request)
         open_path = path.startswith("/api/auth/") or path.startswith("/api/subscription/ingest/")
         if path.startswith("/api/") and not open_path and not auth.is_authenticated(request):

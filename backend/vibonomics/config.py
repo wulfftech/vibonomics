@@ -35,6 +35,7 @@ class AppConfig:
     port: int
     url_base: str
     sandbox_url: str | None
+    sandbox_guard: bool
     secret_key: str | None
     password: str | None
     log_level: str
@@ -62,6 +63,7 @@ def get_config() -> AppConfig:
         port=int(_env("VIBONOMICS_PORT", "2289") or "2289"),
         url_base=f"/{url_base}" if url_base else "",
         sandbox_url=_env("VIBONOMICS_SANDBOX_URL"),
+        sandbox_guard=(_env("VIBONOMICS_SANDBOX_GUARD", "on") or "on").lower() not in {"off", "false", "0", "no"},
         secret_key=_env("VIBONOMICS_SECRET_KEY"),
         password=_env("VIBONOMICS_PASSWORD"),
         log_level=(_env("VIBONOMICS_LOG_LEVEL", "info") or "info").lower(),

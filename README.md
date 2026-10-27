@@ -160,8 +160,19 @@ not offered as judges, and free models are labelled because they rate-limit ofte
 judge still completes, scored by the deterministic checks, and says so.
 
 **Sandbox.** Model-written code never runs beside your keys. The compose file starts `vibonomics-sandbox`
-on an internal-only network with no volumes, a read-only filesystem, no capabilities, a non-root user
-and limits on CPU, memory and processes. Set the mode in **Settings → Testing**:
+with no network at all, a read-only filesystem, no capabilities, a non-root user and limits on CPU, memory
+and processes. The app reaches it through a Unix socket on a small in-memory volume they share, so code
+under test cannot call the app, the host or the internet.
+
+If your Docker host cannot share a Unix socket between containers, add the TCP layout in `.env`:
+`COMPOSE_FILE=docker-compose.yml:docker/compose.sandbox-tcp.yml` (separate the files with `;` on Windows).
+The sandbox then sits on an internal network with the app, still with no route to the internet, and the
+app refuses every request that arrives from that network (`VIBONOMICS_SANDBOX_GUARD`). The guard works
+from the local address a connection arrives on, so a forwarded header cannot get round it, and it turns
+itself off with a warning if the sandbox's network also carries other traffic. To check either layout,
+run `docker/check-sandbox-isolation.sh` (it starts and stops the stack).
+
+Set the mode in **Settings → Testing**:
 
 - **Auto** (default) uses the sidecar when `VIBONOMICS_SANDBOX_URL` is set, otherwise disables execution.
 - **Local** runs code inside the app container. Development only.
@@ -226,7 +237,9 @@ Environment variables for the app and the compose stack:
 | `VIBONOMICS_URL_BASE` | empty | serve under a sub-path such as `/vibonomics` |
 | `VIBONOMICS_PASSWORD` | empty | password gate on the UI (signed cookie session) |
 | `VIBONOMICS_SECRET_KEY` | generated file | encrypts stored provider keys and signs sessions |
-| `VIBONOMICS_SANDBOX_URL` | empty | sidecar base URL, e.g. `http://sandbox:2290` |
+| `VIBONOMICS_SANDBOX_URL` | empty | sidecar address: `unix:///run/vibonomics-sandbox/sandbox.sock` (compose default) or `http://sandbox:2290` |
+| `VIBONOMICS_SANDBOX_SOCKET` | empty | on the sidecar: serve on this Unix socket instead of TCP port `VIBONOMICS_SANDBOX_PORT` (`2290`) |
+| `VIBONOMICS_SANDBOX_GUARD` | `on` | refuse requests that reach the app from a TCP sidecar's network |
 | `VIBONOMICS_SANDBOX_TOKEN` | empty | shared token between app and sidecar |
 | `VIBONOMICS_STATIC_DIR` | packaged UI | override the built frontend location |
 | `VIBONOMICS_LOG_LEVEL` | `info` | `debug`, `info`, `warning` |
