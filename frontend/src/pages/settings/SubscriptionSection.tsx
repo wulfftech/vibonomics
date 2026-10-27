@@ -125,8 +125,10 @@ export function SubscriptionSection() {
             2. Add the status line to it
           </Text>
           <Text size="sm" c="dimmed">
-            Add this key to the object in that file, keeping any settings already there. Replacing the whole file with
-            this snippet deletes your other Claude Code settings.
+            Add this key <strong>inside</strong> the file&apos;s existing outermost <Code>{'{ … }'}</Code>, alongside
+            keys such as <Code>model</Code> — not as a second <Code>{'{ … }'}</Code> block. A file with two top-level
+            objects is not valid JSON, and Claude Code then ignores every setting in it, not just this one. Keep the
+            settings that are already there.
           </Text>
           <Code block style={{ whiteSpace: 'pre-wrap' }}>
             {settingsJson}
@@ -150,7 +152,8 @@ export function SubscriptionSection() {
             if it leaks. The endpoint only accepts usage snapshots, never model requests. The command needs a POSIX
             shell: macOS and Linux have one, and on Windows Claude Code runs it through Git Bash (a Claude Code
             requirement), so it works as-is; without Git Bash the equivalent is a <Code>curl</Code> POST with the same
-            headers and <Code>--data-binary @-</Code>.
+            headers and <Code>--data-binary @-</Code>. If nothing appears, check that the file parses (for example{' '}
+            <Code>python -m json.tool settings.json</Code>) and that <Code>statusLine</Code> sits at the top level.
           </Text>
           <Group gap="xs">
             <Button
