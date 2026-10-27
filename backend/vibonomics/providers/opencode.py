@@ -127,10 +127,15 @@ class _OpenCodeBase(ProviderAdapter):
         )
 
     async def test_connection(self) -> str:
+        # The inference base URL has no /models route (that 404 is what a bad key also looks like), so
+        # the check uses the provider's public catalogue endpoint and says plainly what it proved.
+        ids = await openai_model_ids(self.models_url, {})
         if not self.cfg.api_key:
-            return "No API key set; the public model list and pricing still load."
-        await openai_model_ids(f"{self.base_url}/models", self.auth_headers())
-        return "Key accepted."
+            return f"Public catalogue reachable ({len(ids)} models); no API key set."
+        return (
+            f"Key stored. The public catalogue lists {len(ids)} models; OpenCode has no key-check endpoint, so a "
+            "test run or balance refresh is what would reject a bad key."
+        )
 
     def chat_target(self, model_id: str) -> ChatTarget:
         endpoint = self._endpoint_for(model_id) or {}

@@ -304,6 +304,17 @@ async def test_opencode_go_is_metered_subscription(ctx):
     assert offers["glm-5.3"].pricing_source == "opencode go metered rates"
 
 
+async def test_opencode_test_connection_never_calls_the_inference_models_route(ctx):
+    import respx as _respx
+
+    with _respx.mock as mock:
+        _respx.get(opencode.ZEN_MODELS).mock(return_value=httpx.Response(200, json={"data": [{"id": "glm-5.3"}]}))
+        message = await make(opencode.OpenCodeAdapter, ctx, key="k").test_connection()
+    # The inference base has no /models route; asking it is a 404 even with a good key.
+    assert "/inference/openai/v1/models" not in str([call.request.url for call in mock.calls])
+    assert "Key stored" in message and "1 models" in message
+
+
 async def test_opencode_no_balance_api(ctx):
     info = await make(opencode.OpenCodeAdapter, ctx).fetch_balance()
     assert info.status == "unsupported"
