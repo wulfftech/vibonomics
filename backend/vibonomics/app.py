@@ -50,6 +50,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await close_client()
 
 
+def _route_path(request: Request) -> str:
+    """The request path below this app's mount point.
+
+    Under ``VIBONOMICS_URL_BASE`` this app is mounted, and Starlette keeps the prefix in the path (and
+    in ``request.url``) while recording it in ``root_path``. Matching on the raw path would miss every
+    ``/api`` route there.
+    """
+    path: str = request.scope["path"]
+    root: str = request.scope.get("root_path", "")
+    if root and path.startswith(f"{root}/"):
+        return path[len(root) :]
+    return path
+
+
 def _api_app() -> FastAPI:
     app = FastAPI(
         title="Vibonomics",
@@ -63,7 +77,7 @@ def _api_app() -> FastAPI:
 
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
-        path = request.url.path
+        path = _route_path(request)
         open_path = path.startswith("/api/auth/") or path.startswith("/api/subscription/ingest/")
         if path.startswith("/api/") and not open_path and not auth.is_authenticated(request):
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
