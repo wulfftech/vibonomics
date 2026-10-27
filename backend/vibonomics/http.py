@@ -54,7 +54,7 @@ async def get_json(
     try:
         return resp.json()
     except json.JSONDecodeError as exc:
-        raise FetchError(f"{url}: response was not JSON") from exc
+        raise FetchError(f"{_redact(url)}: response was not JSON") from exc
 
 
 async def get_text(
@@ -96,15 +96,30 @@ async def request(
             if attempt < retries:
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue
-            raise FetchError(f"{method} {_redact(url)}: {type(exc).__name__}: {exc}") from exc
+            detail = scrub_secrets(f"{type(exc).__name__}: {exc}", headers, params)
+            raise FetchError(f"{method} {_redact(url)}: {detail}") from exc
         if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
             await asyncio.sleep(2.0 * (attempt + 1))
             continue
         if resp.status_code >= 400:
-            body = resp.text[:300].replace("\n", " ")
+            body = scrub_secrets(resp.text[:300].replace("\n", " "), headers, params)
             raise FetchError(f"{method} {_redact(url)}: HTTP {resp.status_code} {body}")
         return resp
-    raise FetchError(f"{method} {_redact(url)}: {last_exc}")
+    raise FetchError(f"{method} {_redact(url)}: {scrub_secrets(str(last_exc), headers, params)}")
+
+
+def scrub_secrets(text: str, *sources: dict[str, Any] | None) -> str:
+    """Blank out header and query values (keys, tokens) wherever they appear in ``text``.
+
+    httpx quotes a header value it refuses in full, e.g. ``Illegal header value b'Bearer sk-…\\n'``
+    for a key pasted with a trailing newline, and some APIs echo the key in their error body.
+    """
+    for source in sources:
+        for value in (source or {}).values():
+            for part in str(value).split():
+                if len(part) >= 8:
+                    text = text.replace(part, "…")
+    return text
 
 
 def _redact(url: str) -> str:

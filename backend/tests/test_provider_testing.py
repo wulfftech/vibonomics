@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -144,3 +146,49 @@ def test_refresh_unknown_provider_is_404(monkeypatch):
 def test_refresh_batch_rejects_an_empty_list(monkeypatch):
     client = _client(monkeypatch)
     assert client.post("/api/providers/refresh", json={"provider_ids": []}).status_code == 422
+def test_a_key_with_a_stray_newline_never_reaches_the_message(monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from vibonomics import http
+    from vibonomics.catalog.modelsdev import ModelsDevCatalog
+
+    class Ok(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"data": []}')
+
+        def log_message(self, *args):
+            pass
+
+    async def no_wait(_seconds):
+        return None
+
+    async def empty_catalog():
+        return ModelsDevCatalog({})
+
+    monkeypatch.setattr(http.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(api, "load_catalog", empty_catalog)
+    server = HTTPServer(("127.0.0.1", 0), Ok)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    secret = "sk-live-0123456789abcdef"
+    try:
+        # Trimmed where keys are resolved, so the request goes out and succeeds.
+        app = FastAPI()
+        app.include_router(api.router)
+        result = TestClient(app).post(
+            "/api/providers/test",
+            json={"type": "custom-openai", "base_url": base_url, "api_key": f"{secret}\n"},
+        )
+        assert result.json()["ok"] is True, result.json()
+
+        # And a header httpx refuses is not quoted back in the error.
+        with pytest.raises(http.FetchError) as caught:
+            asyncio.run(http.get_json(f"{base_url}/models", headers={"Authorization": f"Bearer {secret}\r\n"}))
+        assert secret not in str(caught.value)
+        assert "Illegal header value" in str(caught.value)
+    finally:
+        server.shutdown()
