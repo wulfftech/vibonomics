@@ -59,7 +59,7 @@ supported way to run it: the sandbox sidecar is part of the stack.
 Then open `http://localhost:2289`.
 
 The first start loads public catalogues; OpenRouter and the OpenCode Console show models without a
-key. Add keys under **Settings â†’ Providers**, press **Test** in the provider form (it tests what you
+key. Add keys under **Settings → Providers**, press **Test** in the provider form (it tests what you
 typed, before saving), then **Save**. The provider form links to where each key is issued.
 
 What lives where:
@@ -105,7 +105,7 @@ Compose passes everything in `.env` to the app, so keys can live there instead o
 
 Every metric is converted to a percentile inside its own leaderboard, which makes Elo ratings, pass
 rates and indices comparable. Available percentiles form an intelligence, coding and agentic subtotal,
-and those form a weighted composite. The weights are in **Settings â†’ Scoring**.
+and those form a weighted composite. The weights are in **Settings → Scoring**.
 
 | Source | Default | Licence | What it contributes |
 |---|---|---|---|
@@ -124,7 +124,7 @@ app, and none is committed to the repository. Leave it off on a shared or public
 not legal advice.
 
 Attribution for every enabled source appears in the table footer and in each model's detail view. The
-matching between a source's model name and a canonical model is reviewed in **Settings â†’ Benchmarks â†’
+matching between a source's model name and a canonical model is reviewed in **Settings → Benchmarks →
 Review unmatched**; corrections are stored as aliases.
 
 ## Cost, value and the numbers you see
@@ -135,8 +135,8 @@ Review unmatched**; corrections are stored as aliases.
 - **$/task** comes from the measured average when you have run Vibonomics's tests, then from a benchmark
   that reports its own cost per task, then from the profile's token counts. The column marks which one
   it is.
-- **Value** is composite score per $/task, shown as a 0â€“100 index on a log scale. Free models use the
-  stand-in price in **Settings â†’ Scoring** (default $0.01 per 1M) so they get a finite value. Set it to
+- **Value** is composite score per $/task, shown as a 0–100 index on a log scale. Free models use the
+  stand-in price in **Settings → Scoring** (default $0.01 per 1M) so they get a finite value. Set it to
   0 to restore the older behaviour, where any free model sorted first.
 - **Discount column** shows the percentage; the blended price shows the list price in brackets.
 
@@ -161,7 +161,7 @@ judge still completes, scored by the deterministic checks, and says so.
 
 **Sandbox.** Model-written code never runs beside your keys. The compose file starts `vibonomics-sandbox`
 on an internal-only network with no volumes, a read-only filesystem, no capabilities, a non-root user
-and limits on CPU, memory and processes. Set the mode in **Settings â†’ Testing**:
+and limits on CPU, memory and processes. Set the mode in **Settings → Testing**:
 
 - **Auto** (default) uses the sidecar when `VIBONOMICS_SANDBOX_URL` is set, otherwise disables execution.
 - **Local** runs code inside the app container. Development only.
@@ -173,12 +173,24 @@ Pro and Max subscriptions have no dollar balance. Usage is a rolling five-hour w
 window, and Claude Code cloud sessions count against the same windows; usage credits (optional
 overage) are the only money-based figure.
 
-- **Live windows.** In **Settings â†’ Claude**, copy the generated command into Claude Code's status line
-  (or the JSON snippet into `~/.claude/settings.json`). Claude Code already receives these numbers; the
-  command forwards each update to Vibonomics. The same snapshot carries the session's estimated cost,
-  context-window use and cache hit ratio, which is what the card shows between window resets. The command
-  carries an ingest token, can only submit usage snapshots, and the token can be rotated on that page.
-- **Usage credits.** Add your Claude Code login token under **Providers â†’ Anthropic â†’ Claude Code login
+- **Live windows.** A status line is a Claude Code setting, not a Vibonomics one: Claude Code runs the
+  command you configure every time it redraws its footer, with the session's JSON on stdin, and prints
+  whatever the command returns. That JSON carries the rate-limit windows. In **Settings → Claude**, copy
+  the generated `statusLine` snippet into your user settings file and merge the key into whatever is
+  already there:
+
+  | OS | File |
+  |---|---|
+  | Windows | `C:\Users\<you>\.claude\settings.json` |
+  | macOS | `/Users/<you>/.claude/settings.json` |
+  | Linux | `/home/<you>/.claude/settings.json` |
+
+  `/statusline` in a session also writes it, if you would rather describe the command than edit JSON. The
+  same snapshot carries the session's estimated cost, context-window use and cache hit ratio, which is what
+  the card shows between window resets. The command needs a POSIX shell (Git Bash on Windows, which Claude
+  Code requires anyway), carries an ingest token, can only submit usage snapshots, and the token can be
+  rotated on that page.
+- **Usage credits.** Add your Claude Code login token under **Providers → Anthropic → Claude Code login
   token**. Vibonomics calls `api.anthropic.com/api/oauth/usage` read-only. Use the `accessToken` from
   `~/.claude/.credentials.json` after an interactive login; `claude setup-token` tokens lack the profile
   scope. Vibonomics never refreshes the token, so Claude Code's copy stays valid. The endpoint is not

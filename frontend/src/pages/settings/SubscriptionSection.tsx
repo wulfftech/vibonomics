@@ -99,29 +99,58 @@ export function SubscriptionSection() {
         <Stack gap="md">
           <Title order={4}>Live updates from Claude Code</Title>
           <Text size="sm" c="dimmed">
-            Claude Code passes the rate-limit windows to its status-line command. Point that command at Vibonomics once
-            and the card on the Models page stays current.
+            A status line is a Claude Code setting, not a Vibonomics one: Claude Code runs a command you configure every
+            time it redraws its footer and shows whatever that command prints. The same JSON it feeds the command
+            contains the rate-limit windows. Point the command at Vibonomics and the card on the Models page stays
+            current, while the footer shows a short confirmation.
           </Text>
+
           <Text size="sm" fw={500}>
-            1. Add this as your status line command
+            1. Find your settings file
           </Text>
-          <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-            {data.statusline_command}
+          <Text size="sm" c="dimmed">
+            <Code>statusLine</Code> lives in Claude Code&apos;s user settings, <Code>settings.json</Code> inside the{' '}
+            <Code>.claude</Code> folder in your home directory. Create the file if it does not exist yet.
+          </Text>
+          <Code block>
+            {`Windows  C:\\Users\\<you>\\.claude\\settings.json\nmacOS    /Users/<you>/.claude/settings.json\nLinux    /home/<you>/.claude/settings.json`}
           </Code>
-          <CopyCode value={data.statusline_command} label="the status line command" />
+          <Text size="xs" c="dimmed">
+            Claude Code itself can write it for you: run <Code>/statusline</Code> in a session and describe what you
+            want, for example &ldquo;run this command&rdquo; with the command below. Project settings in a
+            repository&apos;s <Code>.claude/settings.json</Code> also work, but the user file applies everywhere.
+          </Text>
+
           <Text size="sm" fw={500}>
-            2. Or paste this into ~/.claude/settings.json
+            2. Add the status line to it
+          </Text>
+          <Text size="sm" c="dimmed">
+            Add this key to the object in that file, keeping any settings already there. Replacing the whole file with
+            this snippet deletes your other Claude Code settings.
           </Text>
           <Code block style={{ whiteSpace: 'pre-wrap' }}>
             {settingsJson}
           </Code>
           <CopyCode value={settingsJson} label="the settings snippet" />
+
+          <Text size="sm" fw={500}>
+            3. Or set the command directly
+          </Text>
+          <Text size="sm" c="dimmed">
+            The snippet&apos;s <Code>command</Code> value on its own, if you keep your settings in another way:
+          </Text>
+          <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+            {data.statusline_command}
+          </Code>
+          <CopyCode value={data.statusline_command} label="the status line command" />
+
           <Text size="xs" c="dimmed">
             This replaces any existing status line. To keep yours, run it first and the Vibonomics command after it,
-            separated by <Code>;</Code>. The command includes an ingest token, so treat it as a secret; rotate it below
-            if it leaks. The endpoint only accepts usage snapshots, never model requests. On Windows the command needs a
-            POSIX shell (Git Bash or WSL); the equivalent is a <Code>curl</Code> POST with the same headers and
-            <Code>--data-binary @-</Code>.
+            separated by <Code>;</Code>. The command carries an ingest token, so treat it as a secret; rotate it below
+            if it leaks. The endpoint only accepts usage snapshots, never model requests. The command needs a POSIX
+            shell: macOS and Linux have one, and on Windows Claude Code runs it through Git Bash (a Claude Code
+            requirement), so it works as-is; without Git Bash the equivalent is a <Code>curl</Code> POST with the same
+            headers and <Code>--data-binary @-</Code>.
           </Text>
           <Group gap="xs">
             <Button
