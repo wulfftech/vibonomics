@@ -2,20 +2,28 @@
 
 This runs model-written code. It is only the *second* line of defence: production deployments
 should use the sidecar service (``vibonomics.sandbox.server``) on an internal-only network with no
-secrets and a read-only filesystem. The limits here (fresh temp dir, scrubbed environment, process
-group kill on timeout, POSIX rlimits) still apply in both cases.
+secrets and a read-only filesystem. The limits here (fresh temp dir, scrubbed environment, output
+written to size-capped files, process group kill when the run ends, POSIX rlimits) still apply in both
+cases.
+
+Two things the executor cannot bound on its own. A process that starts its own session leaves the
+process group, so the group kill does not reach it. And there is no per-run process count: the
+sidecar's ``pids_limit`` caps that, and its ``init`` reaps the processes a run orphans.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 MAX_OUTPUT = 20_000
 MAX_FILE_BYTES = 1_000_000
@@ -62,8 +70,13 @@ def write_files(root: Path, files: dict[str, str]) -> None:
         target.write_bytes(data)
 
 
-def _limits() -> object | None:
-    """POSIX resource limits applied in the child process."""
+def _limits() -> Callable[[], None] | None:
+    """POSIX resource limits applied in the child process.
+
+    RLIMIT_FSIZE also caps the stdout and stderr files. There is deliberately no RLIMIT_NPROC: it counts
+    every process and thread the user owns, across the host, so a low value fails ordinary code whenever
+    that user is busy and a high one does not bound a run.
+    """
     if os.name != "posix":
         return None
 
@@ -75,7 +88,6 @@ def _limits() -> object | None:
             (resource.RLIMIT_AS, 1_500 * 1024 * 1024),
             (resource.RLIMIT_FSIZE, 10 * 1024 * 1024),
             (resource.RLIMIT_NOFILE, 256),
-            (resource.RLIMIT_NPROC, 64),
             (resource.RLIMIT_CORE, 0),
         ]
         for kind, value in limits:
@@ -87,18 +99,51 @@ def _limits() -> object | None:
     return apply
 
 
-def _truncate(text: str) -> str:
-    if len(text) <= MAX_OUTPUT:
-        return text
+def _kill(process: subprocess.Popen[bytes]) -> None:
+    """Kill the child and everything it started in its process group, then reap the child."""
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # nothing left in the group that we can signal
+    else:
+        process.kill()
+    process.wait()
+
+
+def _read_output(stream: IO[bytes]) -> str:
+    """Decode what the child wrote, keeping only the start and the end when there is too much."""
+    size = stream.seek(0, os.SEEK_END)
+    stream.seek(0)
+    if size <= MAX_OUTPUT:
+        return stream.read(MAX_OUTPUT).decode("utf-8", errors="replace")
     half = MAX_OUTPUT // 2
-    return f"{text[:half]}\n…[{len(text) - MAX_OUTPUT} characters truncated]…\n{text[-half:]}"
+    head = stream.read(half).decode("utf-8", errors="replace")
+    stream.seek(size - half)
+    tail = stream.read(half).decode("utf-8", errors="replace")
+    return f"{head}\n…[{size - 2 * half} bytes truncated]…\n{tail}"
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
 
 
 def run(files: dict[str, str], command: list[str], timeout: float = 30.0, *, cwd: str | None = None) -> ExecResult:
+    """Run ``command`` in a fresh workspace holding ``files``.
+
+    Never raises for anything the files, command or cwd contain: a workspace that cannot be written or a
+    command that cannot start comes back as a result with ``exit_code=None`` and the reason in stderr.
+    """
     timeout = max(1.0, min(float(timeout), 120.0))
-    root = Path(tempfile.mkdtemp(prefix="vibonomics-run-"))
     started = time.monotonic()
     try:
+        scratch = Path(tempfile.mkdtemp(prefix="vibonomics-run-"))
+    except OSError as exc:
+        return ExecResult(None, "", f"{type(exc).__name__}: {exc}", False, _elapsed_ms(started))
+    try:
+        # The workspace holds only the model's files; the output files sit beside it.
+        root = scratch / "workspace"
+        root.mkdir()
         write_files(root, files)
         workdir = root / safe_relative_path(cwd) if cwd else root
         workdir.mkdir(parents=True, exist_ok=True)
@@ -117,33 +162,40 @@ def run(files: dict[str, str], command: list[str], timeout: float = 30.0, *, cwd
             "PYTHONIOENCODING": "utf-8",
             "NO_COLOR": "1",
         }
-        try:
-            completed = subprocess.run(
+        # Files rather than pipes: RLIMIT_FSIZE caps what the child can write, and only a bounded head and
+        # tail is read back, so a test that prints in a loop cannot grow this process.
+        with (
+            tempfile.TemporaryFile(dir=scratch, buffering=0) as stdout,
+            tempfile.TemporaryFile(dir=scratch, buffering=0) as stderr,
+        ):
+            process = subprocess.Popen(
                 argv,
                 cwd=str(workdir),
                 env=env,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
                 start_new_session=os.name == "posix",
                 preexec_fn=_limits(),
             )
+            timed_out = False
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            finally:
+                # Also on a normal exit: anything the run left behind would otherwise outlive it.
+                _kill(process)
+            duration_ms = _elapsed_ms(started)
             return ExecResult(
-                exit_code=completed.returncode,
-                stdout=_truncate(completed.stdout.decode("utf-8", errors="replace")),
-                stderr=_truncate(completed.stderr.decode("utf-8", errors="replace")),
-                timed_out=False,
-                duration_ms=int((time.monotonic() - started) * 1000),
+                exit_code=None if timed_out else process.returncode,
+                stdout=_read_output(stdout),
+                stderr=_read_output(stderr),
+                timed_out=timed_out,
+                duration_ms=duration_ms,
             )
-        except subprocess.TimeoutExpired as exc:
-            return ExecResult(
-                exit_code=None,
-                stdout=_truncate((exc.stdout or b"").decode("utf-8", errors="replace")),
-                stderr=_truncate((exc.stderr or b"").decode("utf-8", errors="replace")),
-                timed_out=True,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-        except (OSError, ValueError) as exc:
-            return ExecResult(None, "", f"{type(exc).__name__}: {exc}", False, int((time.monotonic() - started) * 1000))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # An unsafe or oversized file, a file where a directory is needed, a NUL in a path, a missing command.
+        return ExecResult(None, "", f"{type(exc).__name__}: {exc}", False, _elapsed_ms(started))
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)

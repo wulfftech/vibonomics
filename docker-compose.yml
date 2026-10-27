@@ -48,6 +48,9 @@ services:
     image: vibonomics:local
     container_name: vibonomics-sandbox
     command: ["python", "-m", "vibonomics", "sandbox"]
+    # An init as PID 1 reaps processes a test orphans; without it they stay as zombies under the
+    # server and count against pids_limit until the container restarts.
+    init: true
     environment:
       VIBONOMICS_SANDBOX_SOCKET: /run/vibonomics-sandbox/sandbox.sock
       VIBONOMICS_SANDBOX_TOKEN: "${VIBONOMICS_SANDBOX_TOKEN:-}"
