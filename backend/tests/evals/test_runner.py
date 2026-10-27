@@ -247,6 +247,8 @@ async def test_an_unavailable_sandbox_is_not_a_pass(monkeypatch):
     note, score = await runner._grade_agentic(task, dict(task.workspace), _local_sandbox())
     assert score is None
     assert note == "Tests were not executed (Sandbox unavailable: ConnectError: connection refused)."
+
+
 class RateLimitedToolsClient(FakeClient):
     """The model under test hits a provider rate limit on the tool-use task."""
 
