@@ -109,6 +109,31 @@ def test_normalize_usage_without_credits():
     assert data["windows"][0]["resets_at"] is None
 
 
+def test_normalize_usage_accepts_windows_at_the_top_level():
+    """Some versions of the undocumented endpoint drop the rate_limits wrapper."""
+    data = normalize_usage(
+        {
+            "five_hour": {"utilization": 0.4, "resets_at": "2026-10-25T18:00:00Z"},
+            "seven_day": {"utilization": 0.8, "resets_at": None},
+        }
+    )
+    assert [(w["key"], w["used_percentage"]) for w in data["windows"]] == [("five_hour", 40.0), ("seven_day", 80.0)]
+
+
+def test_normalize_usage_accepts_a_limits_array():
+    """The shape other usage monitors read: a list of group/kind/percent entries, percent already 0-100."""
+    data = normalize_usage(
+        {
+            "limits": [
+                {"group": "session", "percent": 42, "resets_at": "2026-10-28T00:00:00Z"},
+                {"group": "weekly", "kind": "weekly_all", "percent": 12.5, "resets_at": None},
+                {"group": "monthly", "percent": 99},
+            ]
+        }
+    )
+    assert [(w["key"], w["used_percentage"]) for w in data["windows"]] == [("five_hour", 42.0), ("seven_day", 12.5)]
+
+
 def _client() -> TestClient:
     init_db()
     app = FastAPI()

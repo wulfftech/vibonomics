@@ -196,9 +196,60 @@ def normalize_statusline(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _window_source(payload: dict[str, Any]) -> dict[str, Any]:
+    """Where this version of the endpoint keeps its window objects.
+
+    The endpoint is undocumented and has been seen in two shapes: the windows nested under
+    ``rate_limits``, and the same keys at the top level. Either is accepted.
+    """
+    nested = payload.get("rate_limits")
+    if isinstance(nested, dict) and any(isinstance(nested.get(key), dict) for key, _label in _WINDOWS):
+        return nested
+    if any(isinstance(payload.get(key), dict) for key, _label in _WINDOWS):
+        return payload
+    return nested if isinstance(nested, dict) else {}
+
+
+def _percent_window(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """A ``limits`` array entry, whose ``percent`` is already 0-100 (not a 0-1 fraction)."""
+    try:
+        percent = float(entry.get("percent"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(percent) or percent < 0:
+        return None
+    return {"used_percentage": round(min(percent, 100.0), 2), "resets_at": _iso(entry.get("resets_at"))}
+
+
+def _array_windows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Older clients read a ``limits`` list (``group``/``kind``/``percent``) instead of keyed objects."""
+    entries = payload.get("limits")
+    if not isinstance(entries, list):
+        return []
+    windows: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        group = str(entry.get("group") or entry.get("kind") or "")
+        if "session" in group:
+            key, label = "five_hour", "5-hour session"
+        elif "weekly" in group:
+            key, label = "seven_day", "Weekly"
+        else:
+            continue
+        measured = _percent_window(entry)
+        if measured is not None:
+            windows.append({"key": key, "label": label, **measured})
+    return windows
+
+
 def normalize_usage(payload: dict[str, Any]) -> dict[str, Any]:
-    """The claude.ai usage endpoint's response → displayable windows and credit spend."""
-    limits = payload.get("rate_limits") if isinstance(payload.get("rate_limits"), dict) else {}
+    """Claude Code's usage endpoint → displayable windows and credit spend.
+
+    Undocumented, so parsing tolerates every shape seen in the wild: windows under ``rate_limits``,
+    the same keys at the top level, or a ``limits`` array of ``group``/``kind``/``percent`` entries.
+    """
+    limits = _window_source(payload)
     windows = [w for key, label in _WINDOWS if (w := _window(key, label, limits.get(key))) is not None]
     for entry in limits.get("model_scoped") or []:
         if not isinstance(entry, dict):
@@ -207,10 +258,12 @@ def normalize_usage(payload: dict[str, Any]) -> dict[str, Any]:
         window = _window(f"model:{name}", f"Weekly · {name}", entry)
         if window is not None:
             windows.append(window)
+    seen = {window["key"] for window in windows}
+    windows.extend(window for window in _array_windows(payload) if window["key"] not in seen)
     return {
         "windows": windows,
         "spend_limit": None,
-        "extra_usage": _extra_usage(limits.get("extra_usage")),
+        "extra_usage": _extra_usage(limits.get("extra_usage") or payload.get("extra_usage")),
         "plan": payload.get("subscription_type"),
         "source": "claude-usage-api",
         "model": None,
