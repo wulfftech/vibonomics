@@ -1,6 +1,7 @@
 import { ActionIcon, Anchor, Badge, Group, Stack, Text, Tooltip } from '@mantine/core';
-import { ExternalLink } from 'lucide-react';
+import { ExternalLink, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router';
+import { useRefreshProvider } from '../../api/providers';
 import type { BalanceOut, ProviderOut } from '../../api/types';
 import { money, relativeTime } from '../../lib/format';
 import { tone } from '../../lib/tone';
@@ -150,5 +151,46 @@ export function BalanceAge({ provider, label = 'updated' }: { provider: Provider
     <Text size="xs" c="dimmed">
       {label} {relativeTime(fetchedAt)}
     </Text>
+  );
+}
+
+/**
+ * The card's footer: when the figures were last fetched, and a button that refreshes just this card's
+ * providers. A card that stands for two providers (OpenCode) passes both, so one click updates all of it.
+ */
+export function BalanceFooter({ providers, label = 'updated' }: { providers: ProviderOut[]; label?: string }) {
+  const refresh = useRefreshProvider();
+  const newest = providers.reduce<ProviderOut | null>((best, provider) => {
+    const stamp = provider.balance?.fetched_at;
+    if (!stamp) {
+      return best;
+    }
+    const bestStamp = best?.balance?.fetched_at;
+    return !bestStamp || new Date(stamp) > new Date(bestStamp) ? provider : best;
+  }, null);
+  const names = providers.map((provider) => provider.name).join(' and ');
+  return (
+    <Group justify="space-between" wrap="nowrap" gap="xs">
+      <Text size="xs" c="dimmed" truncate="end">
+        {newest?.balance?.fetched_at ? `${label} ${relativeTime(newest.balance.fetched_at)}` : 'never refreshed'}
+      </Text>
+      <Tooltip label={`Refresh ${names}`} withArrow>
+        <ActionIcon
+          variant="subtle"
+          color="gray"
+          size="sm"
+          aria-label={`Refresh ${names}`}
+          loading={refresh.isPending}
+          disabled={providers.length === 0}
+          onClick={() => {
+            for (const provider of providers) {
+              refresh.mutate(provider.id);
+            }
+          }}
+        >
+          <RefreshCw size={14} />
+        </ActionIcon>
+      </Tooltip>
+    </Group>
   );
 }

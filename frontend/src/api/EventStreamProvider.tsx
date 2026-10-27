@@ -91,6 +91,8 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
           invalidateForRefresh(client, kind);
           const label = KIND_LABELS[kind] ?? kind;
           const wasRequested = requested.current.delete(kind);
+          // A single-provider refresh is quiet unless it fails; the card shows its own spinner.
+          const single = data.provider !== undefined;
           if (status === 'failed') {
             notifications.show({ message: `${label} refresh failed${message ? `: ${message}` : ''}`, color: 'red' });
           } else if (status === 'partial') {
@@ -98,7 +100,7 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
               message: `${label} refresh partly failed${message ? `: ${message}` : ''}`,
               color: 'yellow',
             });
-          } else if (wasRequested) {
+          } else if (wasRequested && !single) {
             notifications.show({ message: `${label} refreshed`, color: 'green' });
           }
           break;

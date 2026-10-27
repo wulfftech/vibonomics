@@ -64,7 +64,12 @@ export function useTestProviderDraft() {
 }
 
 export function useRefreshProvider() {
+  const client = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.post('/api/providers/{provider_id}/refresh', { path: { provider_id: id } }),
+    onSuccess: () => {
+      // The refresh runs in the background; the event stream invalidates when it finishes.
+      void client.invalidateQueries({ queryKey: keys.refreshStatus });
+    },
   });
 }

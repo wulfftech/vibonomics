@@ -101,3 +101,24 @@ def test_override_is_non_destructive():
     assert overridden.api_key == "new"
     assert overridden.options == {"a": "1", "b": "2"}
     # The dataclass mutates in place; the caller builds it fresh per request.
+
+
+def test_refresh_targets_one_provider(monkeypatch):
+    """The card's refresh button must not re-fetch every provider."""
+    provider_id = _seed()
+    calls: list[tuple[str, set[int] | None]] = []
+
+    async def fake_run_job(kind, trigger="manual", provider_ids=None):
+        calls.append((kind, provider_ids))
+
+    monkeypatch.setattr(api, "run_job", fake_run_job)
+    client = _client(monkeypatch)
+
+    response = client.post(f"/api/providers/{provider_id}/refresh")
+    assert response.status_code == 202
+    assert calls == [("models", {provider_id}), ("balances", {provider_id})]
+
+
+def test_refresh_unknown_provider_is_404(monkeypatch):
+    client = _client(monkeypatch)
+    assert client.post("/api/providers/999999/refresh").status_code == 404

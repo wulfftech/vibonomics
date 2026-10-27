@@ -7,7 +7,7 @@ import { claudeUsage } from '../../lib/claudeUsage';
 import { providerTextColor } from '../../lib/providerColors';
 import { ProviderDot } from '../ProviderDot';
 import { AnthropicCard } from './AnthropicCard';
-import { BalanceAge, BalanceBody } from './BalanceBody';
+import { BalanceFooter, BalanceBody } from './BalanceBody';
 import { OpenCodeCard } from './OpenCodeCard';
 
 /** A provider that stands alone on the strip: one vendor, one card. */
@@ -31,7 +31,7 @@ function ProviderCard({ provider }: { provider: ProviderOut }) {
           )}
         </Group>
         <BalanceBody provider={provider} />
-        <BalanceAge provider={provider} />
+        <BalanceFooter providers={[provider]} />
       </Stack>
     </Card>
   );

@@ -4,7 +4,7 @@ import type { ClaudeUsage } from '../../lib/claudeUsage';
 import { relativeTime } from '../../lib/format';
 import { providerTextColor } from '../../lib/providerColors';
 import { ProviderDot } from '../ProviderDot';
-import { BalanceAge, BalanceBody } from './BalanceBody';
+import { BalanceFooter, BalanceBody } from './BalanceBody';
 import { SubscriptionDetails } from './SubscriptionDetails';
 
 /**
@@ -63,7 +63,7 @@ export function AnthropicCard({ provider, usage }: { provider: ProviderOut | nul
             {usage.model ? ` · ${usage.model}` : ''}
           </Text>
         )}
-        {provider !== null && <BalanceAge provider={provider} label="API spend updated" />}
+        {provider !== null && <BalanceFooter providers={[provider]} label="API spend updated" />}
       </Stack>
     </Card>
   );

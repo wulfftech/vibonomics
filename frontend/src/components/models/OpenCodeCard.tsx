@@ -3,22 +3,7 @@ import { ExternalLink } from 'lucide-react';
 import type { ProviderOut } from '../../api/types';
 import { providerColor, providerTextColor } from '../../lib/providerColors';
 import { ProviderDot } from '../ProviderDot';
-import { BalanceAge, BalanceBody } from './BalanceBody';
-
-/** The Freshest balance timestamp among the providers on one card. */
-function newestBalance(providers: ProviderOut[]): ProviderOut | null {
-  return providers.reduce<ProviderOut | null>((best, provider) => {
-    const stamp = provider.balance?.fetched_at;
-    if (!stamp) {
-      return best;
-    }
-    const bestStamp = best?.balance?.fetched_at;
-    if (!bestStamp) {
-      return provider;
-    }
-    return new Date(stamp) > new Date(bestStamp) ? provider : best;
-  }, null);
-}
+import { BalanceBody, BalanceFooter } from './BalanceBody';
 
 /**
  * One card for both OpenCode products. They share a vendor and an account but bill differently: Go is
@@ -37,7 +22,6 @@ export function OpenCodeCard({
   }
   const members = [goProvider, consoleProvider].filter((provider): provider is ProviderOut => provider !== null);
   const failed = members.filter((provider) => provider.last_refresh_status === 'error');
-  const newest = newestBalance(members);
   const consoleCredits = consoleProvider?.billing_url ?? goProvider?.billing_url ?? null;
 
   return (
@@ -97,7 +81,7 @@ export function OpenCodeCard({
             <BalanceBody provider={consoleProvider} />
           ))}
 
-        {newest !== null && <BalanceAge provider={newest} />}
+        <BalanceFooter providers={members} />
       </Stack>
     </Card>
   );

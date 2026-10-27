@@ -48,8 +48,9 @@ def is_running(kind: str) -> bool:
     return _locks[kind].locked()
 
 
-async def run_job(kind: str, trigger: str = "manual") -> None:
-    jobs: dict[str, Callable[[int], Awaitable[dict[str, Any]]]] = {
+async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | None = None) -> None:
+    """Run one refresh kind. ``provider_ids`` narrows models/balances to those providers."""
+    jobs: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
         "models": _refresh_models,
         "balances": _refresh_balances,
         "benchmarks": _refresh_benchmarks,
@@ -63,7 +64,10 @@ async def run_job(kind: str, trigger: str = "manual") -> None:
         events.publish("refresh.started", {"kind": kind, "run_id": run_id})
         status, message, stats = "ok", None, {}
         try:
-            stats = await job(run_id)
+            if provider_ids is not None and kind in ("models", "balances"):
+                stats = await job(run_id, provider_ids)
+            else:
+                stats = await job(run_id)
             failed = stats.get("failed", 0)
             if failed:
                 status = "partial" if stats.get("ok", 0) else "failed"
@@ -72,7 +76,17 @@ async def run_job(kind: str, trigger: str = "manual") -> None:
             log.exception("Refresh %s failed", kind)
             status, message = "failed", f"{type(exc).__name__}: {exc}"
         await asyncio.to_thread(_finish_run, run_id, status, message, stats)
-        events.publish("refresh.finished", {"kind": kind, "run_id": run_id, "status": status, "message": message})
+        events.publish(
+            "refresh.finished",
+            {
+                "kind": kind,
+                "run_id": run_id,
+                "status": status,
+                "message": message,
+                # Present only for a single-provider refresh, so the UI can stay quiet about it.
+                **({"provider": next(iter(provider_ids))} if provider_ids and len(provider_ids) == 1 else {}),
+            },
+        )
 
 
 def _start_run(kind: str, trigger: str) -> int:
@@ -100,8 +114,10 @@ def _load_providers_and_settings() -> tuple[list[ProviderConfig], AppSettings]:
 # -- models & prices -------------------------------------------------------------------------
 
 
-async def _refresh_models(run_id: int) -> dict[str, Any]:
+async def _refresh_models(run_id: int, provider_ids: set[int] | None = None) -> dict[str, Any]:
     providers, settings = await asyncio.to_thread(_load_providers_and_settings)
+    if provider_ids is not None:
+        providers = [p for p in providers if p.id in provider_ids]
     catalog = await load_catalog(force=True)
     ctx = FetchContext(catalog=catalog, settings=settings)
     stats: dict[str, Any] = {"ok": 0, "failed": 0, "errors": [], "models": 0}
@@ -228,8 +244,10 @@ def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
 # -- balances --------------------------------------------------------------------------------
 
 
-async def _refresh_balances(run_id: int) -> dict[str, Any]:
+async def _refresh_balances(run_id: int, provider_ids: set[int] | None = None) -> dict[str, Any]:
     providers, settings = await asyncio.to_thread(_load_providers_and_settings)
+    if provider_ids is not None:
+        providers = [p for p in providers if p.id in provider_ids]
     catalog = await load_catalog()
     ctx = FetchContext(catalog=catalog, settings=settings)
     stats: dict[str, Any] = {"ok": 0, "failed": 0, "errors": []}
@@ -238,6 +256,7 @@ async def _refresh_balances(run_id: int) -> dict[str, Any]:
         adapter = build_adapter(cfg, ctx)
         if adapter is None:
             return
+        events.publish("refresh.progress", {"kind": "balances", "provider": cfg.name})
         try:
             info = await asyncio.wait_for(adapter.fetch_balance(), 60)
         except Exception as exc:

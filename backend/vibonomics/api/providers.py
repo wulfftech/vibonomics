@@ -330,12 +330,15 @@ async def _run_test(resolved: ResolvedProvider, settings: Any) -> TestResult:
 
 
 @router.post("/{provider_id}/refresh", status_code=202)
-async def refresh_provider(provider_id: int) -> dict[str, str]:
-    """Refresh everything after a provider is added or its key changes."""
-    spawn(_refresh_after_change())
+async def refresh_provider(provider_id: int, session: Session = Depends(get_session)) -> dict[str, str]:
+    """Refresh one provider's models and balance, leaving the other providers alone."""
+    if session.get(ProviderConfig, provider_id) is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    spawn(_refresh_one(provider_id))
     return {"status": "started"}
 
 
-async def _refresh_after_change() -> None:
-    await run_job("models", "provider")
-    await run_job("balances", "provider")
+async def _refresh_one(provider_id: int) -> None:
+    # Models first so the balance request sees the provider's current catalogue.
+    await run_job("models", "provider", {provider_id})
+    await run_job("balances", "provider", {provider_id})
