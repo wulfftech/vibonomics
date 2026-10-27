@@ -15,16 +15,17 @@ import {
   Table,
   Text,
   Title,
+  Tooltip,
   UnstyledButton,
 } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
-import { ChevronDown, ChevronRight, CircleAlert, Square, Trash } from 'lucide-react';
+import { ChevronDown, ChevronRight, CircleAlert, Info, Square, Trash } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 import { isActiveRun, useCancelRun, useDeleteRun, useJudges, useRun, useRuns, useSuites } from '../api/evals';
 import type { EvalResultOut, EvalRunOut } from '../api/types';
 import { compactCount, dateTime, DASH, duration, integer, money, relativeTime } from '../lib/format';
-import { statusColor, statusLabel } from '../lib/status';
+import { isGraded, statusColor, statusLabel } from '../lib/status';
 import { ScoreNumber } from './models/cells';
 import { EmptyState, ErrorState, LoadingState } from './DataState';
 import { TranscriptViewer } from './TranscriptViewer';
@@ -87,6 +88,8 @@ function TargetSummaryCard({ name, provider, summary }: { name: string; provider
   const score = summary ? num(summary.score) : null;
   const passed = summary ? num(summary.passed) : null;
   const tasks = summary ? num(summary.tasks) : null;
+  const errored = summary ? (num(summary.errors) ?? 0) : 0;
+  const ungraded = summary ? (num(summary.ungraded) ?? 0) : 0;
   const cost = summary ? num(summary.cost ?? summary.cost_usd) : null;
   const tokens = summary ? num(summary.tokens) : null;
   const assessment = summary && typeof summary.assessment === 'string' ? summary.assessment : null;
@@ -110,6 +113,21 @@ function TargetSummaryCard({ name, provider, summary }: { name: string; provider
           {passed !== null && tasks !== null ? `${passed}/${tasks} passed` : DASH} · {money(cost)} ·{' '}
           {tokens !== null ? `${compactCount(tokens)} tokens` : DASH}
         </Text>
+        {(errored > 0 || ungraded > 0) && (
+          <Tooltip
+            multiline
+            maw={320}
+            withArrow
+            label="These tasks have no grade, so they are left out of the score rather than averaged in as zero. Expand a row to see why."
+          >
+            <Text size="xs" c="dimmed" style={{ cursor: 'help' }}>
+              {[errored > 0 ? `${errored} errored` : null, ungraded > 0 ? `${ungraded} ungraded` : null]
+                .filter(Boolean)
+                .join(' · ')}{' '}
+              — not scored
+            </Text>
+          </Tooltip>
+        )}
         {assessment && (
           <Spoiler maxHeight={60} showLabel="More" hideLabel="Less">
             <Text size="xs" style={{ whiteSpace: 'pre-wrap' }}>
@@ -162,7 +180,8 @@ function ResultRow({
           </Badge>
         </Table.Td>
         <Table.Td>
-          <ScoreNumber value={result.score} bold />
+          {/* The API stores 0.0 for error/ungraded rows; a dash is honest, a zero is not. */}
+          <ScoreNumber value={isGraded(result.status) ? result.score : null} bold />
         </Table.Td>
         <Table.Td>
           <ScoreNumber value={result.check_score} />
@@ -292,6 +311,7 @@ function RunDetail({
   const judge = judges.data?.find((j) => j.provider_id === run.judge_provider_id && j.model_id === run.judge_model_id);
   const summaries = isObject(run.summary.targets) ? run.summary.targets : {};
   const judgeError = typeof run.summary.judge_error === 'string' ? run.summary.judge_error : null;
+  const summaryNote = typeof run.summary.note === 'string' ? run.summary.note : null;
   const names = new Map(run.targets.map((t) => [`${t.provider_id}|${t.model_id}`, `${t.name} · ${t.provider_name}`]));
   const showModel = run.targets.length > 1;
   const columns = showModel ? 11 : 10;
@@ -357,6 +377,16 @@ function RunDetail({
           Scores below use deterministic checks only. Choose a different judge and run again for quality grading and the
           written assessment.
         </Alert>
+      )}
+      {summaryNote && !judgeError && (
+        <Alert color="blue" icon={<Info size={16} />} title="About these scores">
+          {summaryNote}
+        </Alert>
+      )}
+      {summaryNote && judgeError && (
+        <Text size="xs" c="dimmed">
+          {summaryNote}
+        </Text>
       )}
 
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="sm">

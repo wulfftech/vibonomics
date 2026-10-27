@@ -1,3 +1,14 @@
+/** Statuses that carry a real grade. Mirrors `GRADED_STATUSES` in `backend/vibonomics/scoring.py`. */
+const GRADED_STATUSES = new Set(['passed', 'partial', 'failed']);
+
+/**
+ * Whether a result's `score` is a grade rather than the placeholder the API stores for rows it left out of
+ * every average. `error` and `ungraded` rows keep `score: 0`, so showing that number would read as a zero.
+ */
+export function isGraded(status: string | null | undefined): boolean {
+  return GRADED_STATUSES.has((status ?? '').toLowerCase());
+}
+
 /** Badge colours for the status strings the API uses (refreshes, balances, runs, results). */
 export function statusColor(status: string | null | undefined): string {
   switch ((status ?? '').toLowerCase()) {
