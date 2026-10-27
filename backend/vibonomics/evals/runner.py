@@ -612,13 +612,19 @@ async def _grade_agentic(task: TaskDef, workspace: dict[str, str], settings: App
         return "Tests were not executed (sandbox unavailable).", None
     if result.timed_out:
         return f"Tests timed out after {task.test_timeout:.0f}s.", 0.0
+    if result.exit_code is None:
+        # The sandbox failed (sidecar down, rejected the request, could not start the process).
+        reason = result.stderr.strip()[:200] or "no output"
+        return f"Tests were not executed ({reason}).", None
     if result.exit_code == 0:
         return f"All {total} tests passed.", (100.0 if total else None)
-    text = f"{result.stdout}\n{result.stderr}"
-    failures = _count(text, "failures")
-    errors = _count(text, "errors")
-    skipped = _count(text, "skipped")
-    passed = max(0, total - failures - errors - skipped) if total else 0
+    # Count from unittest's own summary: a test module that fails to import runs as one error, so
+    # subtracting failures from the declared test count would credit every test in it as passed.
+    ran = _summary_count(result.stderr, r"Ran (\d+) tests? in ")
+    failures = _summary_count(result.stderr, r"failures=(\d+)")
+    errors = _summary_count(result.stderr, r"errors=(\d+)")
+    skipped = _summary_count(result.stderr, r"skipped=(\d+)")
+    passed = min(total, max(0, ran - failures - errors - skipped))
     score = round(100.0 * passed / total, 1) if total else 0.0
     note = f"{passed}/{total} tests passed"
     if failures or errors:
@@ -628,9 +634,10 @@ async def _grade_agentic(task: TaskDef, workspace: dict[str, str], settings: App
     return note, score
 
 
-def _count(text: str, name: str) -> int:
-    match = re.search(rf"{name}=(\d+)", text)
-    return int(match.group(1)) if match else 0
+def _summary_count(text: str, pattern: str) -> int:
+    """The last match wins: the summary is printed after anything the code under test wrote."""
+    matches = re.findall(pattern, text)
+    return int(matches[-1]) if matches else 0
 
 
 def _workspace_note(workspace: dict[str, str]) -> str:
