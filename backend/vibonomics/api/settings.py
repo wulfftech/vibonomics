@@ -119,6 +119,7 @@ def _out(session: Session, settings: AppSettings) -> SettingsOut:
     public = settings.model_copy(deep=True)
     for s in public.benchmarks.sources.values():
         s.api_key_enc = None
+    public.subscriptions.claude_ingest_token_enc = None
     return SettingsOut(
         settings=public,
         sources=sources,
@@ -150,6 +151,9 @@ def put_settings(body: SettingsIn, session: Session = Depends(get_session)) -> S
             value = body.benchmark_keys[sid]
             incoming.api_key_enc = crypto.encrypt(value.strip()) if value and value.strip() else None
         new.benchmarks.sources[sid] = incoming
+    # The ingest token belongs to the subscription endpoints. The UI never sends it back, so taking it
+    # from the body would wipe it and cut off the status line already configured with it.
+    new.subscriptions = current.subscriptions.model_copy(deep=True)
     if not new.scoring.profiles:
         new.scoring.profiles = AppSettings().scoring.profiles
     if new.scoring.default_profile not in {p.id for p in new.scoring.profiles}:

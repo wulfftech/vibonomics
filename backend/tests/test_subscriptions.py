@@ -183,3 +183,26 @@ def test_clear_snapshot():
     assert client.get("/api/subscription/claude").json()["snapshot"] is not None
     assert client.delete("/api/subscription/claude").status_code == 204
     assert client.get("/api/subscription/claude").json()["snapshot"] is None
+
+
+def test_saving_settings_keeps_the_ingest_token():
+    from vibonomics.api import settings as settings_api
+
+    init_db()
+    app = FastAPI()
+    app.include_router(api.router)
+    app.include_router(settings_api.router)
+    client = TestClient(app)
+    token = client.get("/api/subscription/claude").json()["ingest_token"]
+
+    settings = client.get("/api/settings").json()["settings"]
+    assert settings["subscriptions"]["claude_ingest_token_enc"] is None
+    # What the Settings page sends: its own sections, nothing about subscriptions.
+    body = {key: settings[key] for key in ("general", "refresh", "highlight", "scoring", "benchmarks", "evals")}
+    assert client.put("/api/settings", json={"settings": body}).status_code == 200
+    # A stale or forged value in the body is ignored as well.
+    body["subscriptions"] = {"claude_ingest_token_enc": "stale"}
+    assert client.put("/api/settings", json={"settings": body}).status_code == 200
+
+    assert client.get("/api/subscription/claude").json()["ingest_token"] == token
+    assert client.post(f"/api/subscription/ingest/claude?token={token}", json=STATUSLINE).status_code == 202
