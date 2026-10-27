@@ -232,6 +232,11 @@ Behind a reverse proxy, set `VIBONOMICS_URL_BASE` to the sub-path and forward `X
 `X-Forwarded-For`. The app reads both. Put your proxy's own authentication in front of it if you want
 more than `VIBONOMICS_PASSWORD`; Vibonomics has no user accounts.
 
+Proxy authentication and the status line do not mix. The ingest endpoint is exempt from Vibonomics' own
+login guard because its caller has no browser session, but a proxy authenticator in front of it will still
+answer that caller with a redirect to a login portal, and the snapshot is lost. Point the status line at an
+address that reaches the app without passing the proxy — a LAN address and port is the simple choice.
+
 ## Development
 
 Backend, Python 3.12 or 3.13:
