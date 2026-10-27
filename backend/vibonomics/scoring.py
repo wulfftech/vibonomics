@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .benchmarks.base import SourceSpec
 from .benchmarks.registry import SOURCES
 from .orm import BenchmarkScore, EvalResult, EvalRun
 from .settings_store import AppSettings
@@ -111,9 +112,12 @@ def own_test_scores(session: Session) -> dict[tuple[int, str], dict[str, Any]]:
     return result
 
 
-def source_in_use(settings: AppSettings, source_id: str) -> bool:
-    """Whether a benchmark source's data may be fetched and used: enabled, with its terms acknowledged."""
-    spec = SOURCES[source_id].spec
+def source_in_use(settings: AppSettings, source_id: str, spec: SourceSpec) -> bool:
+    """Whether a benchmark source's data may be fetched and used: enabled, with its terms acknowledged.
+
+    The spec comes from the caller's registry rather than being looked up here: a caller that swapped
+    ``SOURCES`` for its own mapping would otherwise get a ``KeyError`` from this module's copy.
+    """
     if not settings.benchmark_source(source_id, spec.default_enabled).enabled:
         return False
     return not spec.terms_warning or settings.benchmarks.aa_terms_acknowledged
@@ -132,7 +136,7 @@ def compute_scores(
     metric_specs = {
         (sid, m.id): (cls.spec, m)
         for sid, cls in SOURCES.items()
-        if source_in_use(settings, sid)
+        if source_in_use(settings, sid, cls.spec)
         for m in cls.spec.metrics
     }
 

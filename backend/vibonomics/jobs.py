@@ -305,7 +305,7 @@ async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
 
     async def one(source_id: str) -> None:
         cls = SOURCES[source_id]
-        if not source_in_use(settings, source_id):
+        if not source_in_use(settings, source_id, cls.spec):
             return
         key = settings.benchmark_key(source_id)
         if cls.spec.requires_key and not key:
