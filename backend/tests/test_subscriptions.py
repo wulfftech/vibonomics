@@ -206,3 +206,28 @@ def test_saving_settings_keeps_the_ingest_token():
 
     assert client.get("/api/subscription/claude").json()["ingest_token"] == token
     assert client.post(f"/api/subscription/ingest/claude?token={token}", json=STATUSLINE).status_code == 202
+
+
+def test_spend_limit_without_a_percentage():
+    limits = {"five_hour": {"used_percentage": 10}, "spend_limit": {"used_usd": 12.5, "limit_usd": 100}}
+    data = normalize_statusline({"rate_limits": limits})
+    assert data["spend_limit"]["used_percentage"] == 12.5
+    assert data["windows"][-1] == {
+        "key": "spend_limit",
+        "label": "Gateway spend limit",
+        "used_percentage": 12.5,
+        "resets_at": None,
+    }
+
+    # Nothing to derive it from: keep the spend block, but no window without a percentage.
+    data = normalize_statusline({"rate_limits": {"spend_limit": {"used_usd": 12.5}}})
+    assert data["spend_limit"]["used_usd"] == 12.5
+    assert data["windows"] == []
+
+    client = _client()
+    token = client.get("/api/subscription/claude").json()["ingest_token"]
+    body = {"rate_limits": {"spend_limit": {"used_usd": 3}}}
+    assert client.post(f"/api/subscription/ingest/claude?token={token}", json=body).status_code == 202
+    response = client.get("/api/subscription/claude")
+    assert response.status_code == 200
+    assert response.json()["snapshot"]["spend_limit"]["used_usd"] == 3
