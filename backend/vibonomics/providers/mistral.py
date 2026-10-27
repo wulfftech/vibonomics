@@ -18,7 +18,6 @@ PRICING_URL = "https://docs.mistral.ai/inference/pricing.md"
 _IN = re.compile(r"input\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 _OUT = re.compile(r"output\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 _CACHE = re.compile(r"cached\s+input\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
-_API_NAME = re.compile(r"`([^`]+)`")
 
 
 def parse_pricing(markdown: str) -> list[PagePrice]:
@@ -36,8 +35,9 @@ def parse_pricing(markdown: str) -> list[PagePrice]:
             price_text = row.get(headers[i_price], "")
             if "/m tokens" not in price_text.lower() and "/1m" not in price_text.lower():
                 continue  # OCR/audio/embedding rows are priced differently
-            match = _API_NAME.search(row.get(headers[i_name] or 0, ""))
-            model_id = match.group(1) if match else None
+            # Cells arrive with markdown stripped, so the API name column holds the bare id.
+            api_names = row.get(headers[i_name], "").replace(",", " ").split() if i_name is not None else []
+            model_id = api_names[0] if api_names else None
             inp, out = _IN.search(price_text), _OUT.search(price_text)
             cache = _CACHE.search(price_text)
             if not inp or not out:

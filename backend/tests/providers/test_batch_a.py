@@ -274,6 +274,16 @@ async def test_mistral_prices(ctx):
     assert large.price.input > 0
 
 
+def test_mistral_reads_the_api_name_column():
+    rows = {row.name: row for row in mistral.parse_pricing(text("mistral_pricing.md"))}
+    assert rows["Mistral Small 4"].model_id == "mistral-small-2603"
+    assert rows["Mistral Large 3"].model_id == "mistral-large-2512"
+    # A table without the column still parses (by display name) instead of raising.
+    page = "| Model | Price |\n| --- | --- |\n| Mistral Small 4 | Input $0.1 /M tokens, Output $0.3 /M tokens |\n"
+    [row] = mistral.parse_pricing(page)
+    assert (row.name, row.model_id, row.input, row.output) == ("Mistral Small 4", None, 0.1, 0.3)
+
+
 async def test_mistral_has_no_balance_api(ctx):
     assert (await make(mistral.MistralAdapter, ctx).fetch_balance()).status == "unsupported"
 
