@@ -5,7 +5,7 @@ import { Link } from 'react-router';
 import { useProviders } from '../../api/providers';
 import { useClaudeSubscription, useClearClaudeSnapshot, useRotateClaudeToken } from '../../api/subscription';
 import { ErrorState, LoadingState } from '../../components/DataState';
-import { SubscriptionDetails } from '../../components/models/ClaudeSubscriptionCard';
+import { SubscriptionDetails } from '../../components/models/SubscriptionDetails';
 import { claudeUsage } from '../../lib/claudeUsage';
 import { relativeTime } from '../../lib/format';
 

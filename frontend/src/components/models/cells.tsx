@@ -5,6 +5,7 @@ import { DASH, discountLabel, money } from '../../lib/format';
 import type { EnrichedModel } from '../../lib/modelTable';
 import { discountTooltip, modelSubline, scoreColor, taskCostExplanation } from '../../lib/modelText';
 import { blendedColor, profileFormula } from '../../lib/pricing';
+import { providerColor } from '../../lib/providerColors';
 import { tone } from '../../lib/tone';
 
 export function ScoreNumber({ value, bold = false }: { value: number | null | undefined; bold?: boolean }) {
@@ -66,7 +67,7 @@ export function ModelBadges({ row }: { row: ModelRow }) {
   );
 }
 
-export function ModelNameCell({ row }: { row: ModelRow }) {
+export function ModelNameCell({ row, alsoOnGo = false }: { row: ModelRow; alsoOnGo?: boolean }) {
   return (
     <Stack gap={0} miw={0}>
       <Group gap={6} wrap="nowrap" miw={0}>
@@ -74,6 +75,18 @@ export function ModelNameCell({ row }: { row: ModelRow }) {
           {row.name}
         </Text>
         <ModelBadges row={row} />
+        {alsoOnGo && (
+          <Tooltip
+            label="OpenCode Go lists this model too. It carries the same per-token rate, but the Go plan meters it against your subscription allowance instead of billing it."
+            multiline
+            maw={320}
+            withArrow
+          >
+            <Badge size="xs" color={providerColor('opencode-go')} variant="light">
+              also on Go
+            </Badge>
+          </Tooltip>
+        )}
       </Group>
       <Text size="xs" c="dimmed" truncate="end">
         {modelSubline(row) || DASH}

@@ -6,6 +6,7 @@ import {
   effectiveSort,
   enrichModels,
   filterModels,
+  foldOpenCodeOffers,
   sortModels,
   type ModelFilters,
 } from './modelTable';
@@ -175,5 +176,59 @@ describe('grouping', () => {
     const groups = display.filter((d) => d.kind === 'group');
     expect(groups).toHaveLength(1);
     expect(display.filter((d) => d.kind === 'model')).toHaveLength(2);
+  });
+});
+
+describe('folding the OpenCode Go offer', () => {
+  const consoleRow = row({
+    id: 20,
+    name: 'Kimi K3',
+    provider_id: 2,
+    provider_type: 'opencode',
+    provider_name: 'OpenCode Console',
+  });
+  const goRow = row({
+    id: 21,
+    name: 'Kimi K3',
+    provider_id: 4,
+    provider_type: 'opencode-go',
+    provider_name: 'OpenCode Go',
+  });
+  const goOnly = row({
+    id: 22,
+    name: 'MiMo V2.5',
+    provider_id: 4,
+    provider_type: 'opencode-go',
+    provider_name: 'OpenCode Go',
+  });
+  const consoleOnly = row({ id: 23, name: 'Nova Pro', provider_id: 2, provider_type: 'opencode' });
+  const openRouter = row({ id: 24, name: 'Kimi K3', provider_id: 1, provider_name: 'OpenRouter' });
+
+  it('keeps one row per model and marks the Console row', () => {
+    const folded = foldOpenCodeOffers(enrichModels([consoleRow, goRow, goOnly, consoleOnly, openRouter], profile));
+    expect(folded.map((model) => model.row.id).sort()).toEqual([20, 22, 23, 24]);
+    expect(folded.find((model) => model.row.id === 20)?.alsoOnGo).toBe(true);
+    expect(folded.filter((model) => model.alsoOnGo)).toHaveLength(1);
+  });
+
+  it('leaves a model that only one of the two lists alone', () => {
+    const folded = foldOpenCodeOffers(enrichModels([goOnly, consoleOnly], profile));
+    expect(folded).toHaveLength(2);
+    expect(folded.some((model) => model.alsoOnGo)).toBe(false);
+  });
+
+  it('does nothing when only one OpenCode provider is in view', () => {
+    const onlyGo = foldOpenCodeOffers(enrichModels([goRow, goOnly], profile));
+    expect(onlyGo.map((model) => model.row.id)).toEqual([21, 22]);
+
+    const onlyConsole = foldOpenCodeOffers(enrichModels([consoleRow, openRouter], profile));
+    expect(onlyConsole.map((model) => model.row.id)).toEqual([20, 24]);
+  });
+
+  it('keeps the Go row when only it can be tested', () => {
+    const untestableConsole = { ...consoleRow, testable: false };
+    const folded = foldOpenCodeOffers(enrichModels([untestableConsole, goRow], profile));
+    expect(folded.map((model) => model.row.id)).toEqual([21]);
+    expect(folded[0].alsoOnGo).toBe(false);
   });
 });

@@ -205,7 +205,7 @@ const ModelTr = memo(function ModelTr({
         )}
       </Table.Td>
       <Table.Td>
-        <ModelNameCell row={row} />
+        <ModelNameCell row={row} alsoOnGo={model.alsoOnGo} />
       </Table.Td>
       <Table.Td>
         <Group gap={6} wrap="nowrap" miw={0}>

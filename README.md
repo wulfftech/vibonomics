@@ -173,6 +173,10 @@ Pro and Max subscriptions have no dollar balance. Usage is a rolling five-hour w
 window, and Claude Code cloud sessions count against the same windows; usage credits (optional
 overage) are the only money-based figure.
 
+The Models page shows one **Anthropic (Claude)** card for the whole account: the Admin API's
+month-to-date spend, then the subscription's plan windows and session figures when Claude Code is
+posting them. The two used to be separate cards, which read as if the subscription were another vendor.
+
 - **Live windows.** A status line is a Claude Code setting, not a Vibonomics one: Claude Code runs the
   command you configure every time it redraws its footer, with the session's JSON on stdin, and prints
   whatever the command returns. That JSON carries the rate-limit windows. In **Settings → Claude**, copy
@@ -204,6 +208,12 @@ OpenCode Go is the other subscription with usable numbers. Its workspace key rea
 `opencode.ai/zen/go/v1/usage`, which returns the rolling, weekly and monthly percentages of the plan's
 included allowance. OpenCode documents no usage API, so the card labels the figures as unofficial. Console
 (pay-as-you-go) credits stay console-only: that endpoint wants a browser session cookie, not an API key.
+
+Console and Go are one vendor with two billing models, so they share a card on the Models page: the Go
+plan's windows sit above a line saying Console credit is only visible in the console. They stay two
+providers underneath, because their catalogues differ (Go covers a subset of Console's models) and each
+needs its own key. Where both list the same model at the same per-token rate, the table shows one row
+marked **also on Go** rather than the same model twice.
 
 ## Configuration
 

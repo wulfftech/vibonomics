@@ -1,150 +1,49 @@
-import { ActionIcon, Anchor, Badge, Card, Group, SimpleGrid, Stack, Text, Tooltip } from '@mantine/core';
-import { ExternalLink } from 'lucide-react';
+import { Anchor, Badge, Card, Group, SimpleGrid, Stack, Text, Tooltip } from '@mantine/core';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useClaudeSubscription } from '../../api/subscription';
-import type { BalanceOut, ProviderOut } from '../../api/types';
-import { money, relativeTime } from '../../lib/format';
-import { tone } from '../../lib/tone';
-import { providerTextColor } from '../../lib/providerColors';
-import { balanceWindows } from '../../lib/usageWindows';
-import { ProviderDot } from '../ProviderDot';
-import { UsageWindows } from '../UsageWindows';
+import type { ProviderOut } from '../../api/types';
 import { claudeUsage } from '../../lib/claudeUsage';
-import { ClaudeSubscriptionCard } from './ClaudeSubscriptionCard';
+import { providerTextColor } from '../../lib/providerColors';
+import { ProviderDot } from '../ProviderDot';
+import { AnthropicCard } from './AnthropicCard';
+import { BalanceAge, BalanceBody } from './BalanceBody';
+import { OpenCodeCard } from './OpenCodeCard';
 
-function keyLine(balance: BalanceOut): string | null {
-  const usage = balance.key_usage ?? null;
-  const limit = balance.key_limit ?? null;
-  if (usage !== null && limit !== null) {
-    return `Key: ${money(usage)} of ${money(limit)} limit`;
-  }
-  if (usage !== null) {
-    return `Key spend: ${money(usage)}`;
-  }
-  if (balance.key_remaining !== null && balance.key_remaining !== undefined) {
-    return `Key: ${money(balance.key_remaining)} left`;
-  }
-  return null;
-}
-
-function accountLine(balance: BalanceOut): string | null {
-  if (balance.account_balance !== null && balance.account_balance !== undefined) {
-    return `${money(balance.account_balance)} left`;
-  }
-  if (balance.account_used !== null && balance.account_used !== undefined) {
-    // Providers that report spend name the window (Anthropic: "this month"); others just say "Spent".
-    const period = typeof balance.details?.spend_period === 'string' ? ` ${balance.details.spend_period}` : '';
-    return `Spent ${money(balance.account_used)}${period}`;
-  }
-  return null;
-}
-
-function BalanceBody({ provider }: { provider: ProviderOut }) {
-  const balance = provider.balance;
-  if (balance === null) {
-    return (
-      <Text size="sm" c="dimmed">
-        No balance yet
-      </Text>
-    );
-  }
-  switch (balance.status) {
-    case 'ok': {
-      const account = accountLine(balance);
-      const key = keyLine(balance);
-      const windows = balanceWindows(balance);
-      const hint = typeof balance.details?.credits_hint === 'string' ? balance.details.credits_hint : null;
-      const trailing = typeof balance.details?.last_30_days === 'number' ? balance.details.last_30_days : null;
-      return (
-        <Stack gap={windows.length > 0 ? 6 : 0}>
-          {account !== null ? (
-            <Text size="sm" fw={600}>
-              {account}
+/** A provider that stands alone on the strip: one vendor, one card. */
+function ProviderCard({ provider }: { provider: ProviderOut }) {
+  return (
+    <Card withBorder padding="sm">
+      <Stack gap={4}>
+        <Group justify="space-between" wrap="nowrap" gap="xs">
+          <Group gap={6} wrap="nowrap" miw={0}>
+            <ProviderDot type={provider.type} />
+            <Text size="sm" fw={500} truncate="end" style={{ color: providerTextColor(provider.type) }}>
+              {provider.name}
             </Text>
-          ) : (
-            key === null &&
-            windows.length === 0 && (
-              <Text size="sm" c="dimmed">
-                No figures returned
-              </Text>
-            )
-          )}
-          {trailing !== null && trailing !== balance.account_used && (
-            <Text size="xs" c="dimmed">
-              Last 30 days {money(trailing)}
-            </Text>
-          )}
-          {key !== null && (
-            <Text
-              size={account === null ? 'sm' : 'xs'}
-              fw={account === null ? 600 : undefined}
-              c={account === null ? undefined : 'dimmed'}
-            >
-              {key}
-            </Text>
-          )}
-          {windows.length > 0 && <UsageWindows windows={windows} />}
-          {account === null && hint !== null && (
-            <Text size="xs" c="dimmed">
-              {hint}
-            </Text>
-          )}
-          {balance.message && (
-            <Text size="xs" style={{ color: tone('yellow') }} lineClamp={1} title={balance.message}>
-              {balance.message}
-            </Text>
-          )}
-        </Stack>
-      );
-    }
-    case 'unsupported':
-      return (
-        <Group gap={4} wrap="nowrap">
-          <Text size="sm" c="dimmed">
-            Balance not exposed by API
-          </Text>
-          {provider.billing_url && (
-            <Tooltip label="Open the billing page">
-              <ActionIcon
-                component="a"
-                href={provider.billing_url}
-                target="_blank"
-                rel="noreferrer"
-                variant="subtle"
-                color="gray"
-                size="sm"
-                aria-label={`Open the ${provider.name} billing page`}
-              >
-                <ExternalLink size={14} />
-              </ActionIcon>
+          </Group>
+          {provider.last_refresh_status === 'error' && (
+            <Tooltip label={provider.last_refresh_message ?? 'The last model refresh failed'} multiline maw={320}>
+              <Badge color="red" variant="light" size="xs">
+                Refresh failed
+              </Badge>
             </Tooltip>
           )}
         </Group>
-      );
-    case 'needs_key':
-      return (
-        <Anchor component={Link} to="/settings/providers" size="sm">
-          Add a key
-        </Anchor>
-      );
-    case 'error':
-      return (
-        <Tooltip label={balance.message ?? 'The balance request failed'} multiline maw={320}>
-          <Badge color="red" variant="light" size="sm">
-            Error
-          </Badge>
-        </Tooltip>
-      );
-    default:
-      return (
-        <Text size="sm" c="dimmed">
-          {balance.status}
-        </Text>
-      );
-  }
+        <BalanceBody provider={provider} />
+        <BalanceAge provider={provider} />
+      </Stack>
+    </Card>
+  );
 }
 
-/** One compact card per enabled provider with what its API says about credit and key spend. */
+/**
+ * One compact card per vendor with what its APIs say about credit, spend and plan usage.
+ *
+ * Anthropic and OpenCode each get a single card even when they arrive as two provider rows, because
+ * the operator thinks of them as one account: Anthropic's Admin API spend belongs beside the Claude
+ * subscription's plan windows, and Console credit belongs beside the Go plan's windows.
+ */
 export function BalancesStrip({ providers }: { providers: ProviderOut[] }) {
   const enabled = providers.filter((provider) => provider.enabled);
   const claude = useClaudeSubscription();
@@ -159,36 +58,37 @@ export function BalancesStrip({ providers }: { providers: ProviderOut[] }) {
       </Text>
     );
   }
+
+  const cards: ReactNode[] = [];
+  const merged = new Set<string>();
+  if (usage !== null && !enabled.some((provider) => provider.type === 'anthropic')) {
+    cards.push(<AnthropicCard key="claude" provider={null} usage={usage} />);
+  }
+  for (const provider of enabled) {
+    if (provider.type === 'anthropic' && !merged.has('anthropic')) {
+      merged.add('anthropic');
+      cards.push(<AnthropicCard key="anthropic" provider={provider} usage={usage} />);
+      continue;
+    }
+    if (provider.type === 'opencode' || provider.type === 'opencode-go') {
+      // Both OpenCode rows belong to the one card; the second must not fall through as its own.
+      if (!merged.has('opencode')) {
+        merged.add('opencode');
+        cards.push(
+          <OpenCodeCard
+            key="opencode"
+            consoleProvider={enabled.find((entry) => entry.type === 'opencode') ?? null}
+            goProvider={enabled.find((entry) => entry.type === 'opencode-go') ?? null}
+          />,
+        );
+      }
+      continue;
+    }
+    cards.push(<ProviderCard key={provider.id} provider={provider} />);
+  }
   return (
     <SimpleGrid cols={{ base: 1, xs: 2, md: 3, lg: 4, xl: 5 }} spacing="sm">
-      <ClaudeSubscriptionCard usage={usage} />
-      {enabled.map((provider) => (
-        <Card key={provider.id} withBorder padding="sm">
-          <Stack gap={4}>
-            <Group justify="space-between" wrap="nowrap" gap="xs">
-              <Group gap={6} wrap="nowrap" miw={0}>
-                <ProviderDot type={provider.type} />
-                <Text size="sm" fw={500} truncate="end" style={{ color: providerTextColor(provider.type) }}>
-                  {provider.name}
-                </Text>
-              </Group>
-              {provider.last_refresh_status === 'error' && (
-                <Tooltip label={provider.last_refresh_message ?? 'The last model refresh failed'} multiline maw={320}>
-                  <Badge color="red" variant="light" size="xs">
-                    Refresh failed
-                  </Badge>
-                </Tooltip>
-              )}
-            </Group>
-            <BalanceBody provider={provider} />
-            {provider.balance?.fetched_at && (
-              <Text size="xs" c="dimmed">
-                updated {relativeTime(provider.balance.fetched_at)}
-              </Text>
-            )}
-          </Stack>
-        </Card>
-      ))}
+      {cards}
     </SimpleGrid>
   );
 }

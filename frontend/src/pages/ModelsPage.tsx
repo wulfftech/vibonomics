@@ -23,6 +23,7 @@ import {
   effectiveSort,
   enrichModels,
   filterModels,
+  foldOpenCodeOffers,
   GROUP_OPTIONS,
   QUICK_FILTERS,
   SORT_KEYS,
@@ -131,12 +132,14 @@ export function ModelsPage() {
     () => filterModels(enriched, { ...DEFAULT_FILTERS, search, chips, providers: providerFilter, minContext }),
     [enriched, search, chips, providerFilter, minContext],
   );
+  // Fold the Go copy of a model into its Console row while both providers are in view.
+  const folded = useMemo(() => foldOpenCodeOffers(filtered), [filtered]);
   const bestValue = chips.includes('best');
   const sort = useMemo(
     () => effectiveSort({ ...DEFAULT_FILTERS, chips: bestValue ? ['best'] : [], sort: filters.sort }),
     [bestValue, filters.sort],
   );
-  const sorted = useMemo(() => sortModels(filtered, sort), [filtered, sort]);
+  const sorted = useMemo(() => sortModels(folded, sort), [folded, sort]);
   const displayRows = useMemo(() => buildDisplayRows(sorted, groupBy, collapsed), [sorted, groupBy, collapsed]);
 
   const providerOptions = useMemo(() => {
@@ -152,7 +155,7 @@ export function ModelsPage() {
     return [...seen].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label));
   }, [providers.data, data]);
 
-  const testableVisible = useMemo(() => filtered.filter((m) => m.row.testable).map((m) => m.row.id), [filtered]);
+  const testableVisible = useMemo(() => folded.filter((m) => m.row.testable).map((m) => m.row.id), [folded]);
   const selectedVisible = testableVisible.filter((id) => selected.has(id)).length;
 
   const onSort = useCallback(

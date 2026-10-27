@@ -34,6 +34,8 @@ export interface EnrichedModel {
   priceBand: PriceBand;
   valueTier: ValueTier;
   haystack: string;
+  /** This row stands in for an OpenCode Go offer of the same model that was folded away. */
+  alsoOnGo: boolean;
 }
 
 export function listPrices(row: ModelRow): Prices | null {
@@ -95,7 +97,70 @@ export function enrichModels(rows: ModelRow[], profile: UsageProfile, options: E
     valueIndex: index(entry.value),
     priceBand: priceBand(entry.blended, entry.row.is_free),
     valueTier: tiers[i],
+    alsoOnGo: false,
   }));
+}
+
+/**
+ * OpenCode lists some models twice: once for Console (pay-as-you-go) and once for Go (the monthly
+ * subscription). Both rows carry the same per-token rate, so showing both doubles the model and
+ * invites a comparison that means nothing. Fold the Go offer into the Console row and mark it.
+ *
+ * The survivor is the row that can actually be tested; on a tie, or when only one side has a price,
+ * the Console row wins. Filtering to just one of the two providers leaves the rows alone, because a
+ * fold would otherwise hide the only offer the operator asked to see.
+ */
+export function foldOpenCodeOffers(models: EnrichedModel[]): EnrichedModel[] {
+  const consoleByModel = new Map<string, EnrichedModel>();
+  for (const model of models) {
+    if (model.row.provider_type === 'opencode') {
+      consoleByModel.set(model.row.model_id, model);
+    }
+  }
+  if (consoleByModel.size === 0) {
+    return models;
+  }
+  const goByModel = new Map<string, EnrichedModel>();
+  for (const model of models) {
+    if (model.row.provider_type === 'opencode-go') {
+      goByModel.set(model.row.model_id, model);
+    }
+  }
+  if (goByModel.size === 0) {
+    return models;
+  }
+
+  const hidden = new Set<number>();
+  const foldedInto = new Map<number, true>();
+  for (const [modelId, consoleRow] of consoleByModel) {
+    const goRow = goByModel.get(modelId);
+    if (goRow === undefined) {
+      continue;
+    }
+    if (preferredOffer(consoleRow, goRow) === 'console') {
+      hidden.add(goRow.row.id);
+      foldedInto.set(consoleRow.row.id, true);
+    } else {
+      hidden.add(consoleRow.row.id);
+    }
+  }
+  if (hidden.size === 0) {
+    return models;
+  }
+  return models
+    .filter((model) => !hidden.has(model.row.id))
+    .map((model) => (foldedInto.has(model.row.id) ? { ...model, alsoOnGo: true } : model));
+}
+
+/** Which of the two offers of one model the table keeps. */
+function preferredOffer(consoleRow: EnrichedModel, goRow: EnrichedModel): 'console' | 'go' {
+  if (consoleRow.row.testable !== goRow.row.testable) {
+    return consoleRow.row.testable ? 'console' : 'go';
+  }
+  if ((consoleRow.blended !== null) !== (goRow.blended !== null)) {
+    return consoleRow.blended !== null ? 'console' : 'go';
+  }
+  return 'console';
 }
 
 // -- filtering -------------------------------------------------------------------------------
