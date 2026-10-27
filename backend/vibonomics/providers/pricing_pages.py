@@ -129,7 +129,21 @@ def _offer_index(offers: list[ModelOffer]) -> dict[str, ModelOffer]:
     return index
 
 
+def _exact_key(value: str) -> str:
+    """A model id as written, with case and separators folded; unlike normalize_model_key, dates count."""
+    return re.sub(r"[\s._-]+", "-", value.lower().strip().split("/")[-1]).strip("-")
+
+
+def _exact_offer(offers: list[ModelOffer], row: PagePrice) -> ModelOffer | None:
+    wanted = {_exact_key(value) for value in (row.model_id, row.name) if value}
+    return next((offer for offer in offers if _exact_key(offer.model_id) in wanted), None)
+
+
 def match_offer(offers: list[ModelOffer], row: PagePrice) -> ModelOffer | None:
+    return _exact_offer(offers, row) or _loose_offer(offers, row)
+
+
+def _loose_offer(offers: list[ModelOffer], row: PagePrice) -> ModelOffer | None:
     if row.model_id:
         key = normalize_model_key(row.model_id)
         for offer in offers:
@@ -146,11 +160,13 @@ def match_offer(offers: list[ModelOffer], row: PagePrice) -> ModelOffer | None:
 def apply_page_prices(offers: list[ModelOffer], rows: list[PagePrice], source: str) -> int:
     """Overlay page prices onto matching offers. Returns how many offers were updated."""
     applied = 0
-    for row in rows:
-        if not row.known():
-            continue
-        offer = match_offer(offers, row)
-        if offer is None:
+    matches = [(row, _exact_offer(offers, row)) for row in rows if row.known()]
+    named = {id(offer) for _row, offer in matches if offer is not None}
+    for row, exact in matches:
+        offer = exact or _loose_offer(offers, row)
+        # A loose match drops dates and versions, so "gpt-4o-2024-05-13" finds "gpt-4o". It must never
+        # replace the price of an offer the page also lists under its own name.
+        if offer is None or (exact is None and id(offer) in named):
             continue
         offer.price = Price(input=row.input, output=row.output, cache_read=row.cache_read, cache_write=row.cache_write)
         offer.pricing_source = source
