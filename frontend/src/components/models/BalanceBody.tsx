@@ -182,11 +182,7 @@ export function BalanceFooter({ providers, label = 'updated' }: { providers: Pro
           aria-label={`Refresh ${names}`}
           loading={refresh.isPending}
           disabled={providers.length === 0}
-          onClick={() => {
-            for (const provider of providers) {
-              refresh.mutate(provider.id);
-            }
-          }}
+          onClick={() => refresh.mutate(providers.map((provider) => provider.id))}
         >
           <RefreshCw size={14} />
         </ActionIcon>

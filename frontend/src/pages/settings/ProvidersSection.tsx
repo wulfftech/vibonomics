@@ -130,7 +130,7 @@ function ProviderForm({
 
   const afterSave = (saved: ProviderOut) => {
     markRequested(['models', 'balances']);
-    refresh.mutate(saved.id);
+    refresh.mutate([saved.id]);
     notifications.show({ message: 'Saved. Refreshing…', color: 'green' });
     onClose();
   };

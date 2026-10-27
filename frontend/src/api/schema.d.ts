@@ -199,6 +199,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/providers/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refresh Providers
+         * @description Refresh the given providers' models and balances, leaving the others alone.
+         *
+         *     One request for the whole set: the refresh jobs are serialised per kind, so two concurrent
+         *     single-provider calls would silently drop the second.
+         */
+        post: operations["refresh_providers_api_providers_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/providers/{provider_id}/refresh": {
         parameters: {
             query?: never;
@@ -210,7 +233,7 @@ export interface paths {
         put?: never;
         /**
          * Refresh Provider
-         * @description Refresh everything after a provider is added or its key changes.
+         * @description Refresh one provider's models and balance, leaving the other providers alone.
          */
         post: operations["refresh_provider_api_providers__provider_id__refresh_post"];
         delete?: never;
@@ -1076,6 +1099,14 @@ export interface components {
             balance_note: string;
         };
         /**
+         * ProviderRefreshIn
+         * @description Providers to refresh. A card that shows two providers sends both in one request.
+         */
+        ProviderRefreshIn: {
+            /** Provider Ids */
+            provider_ids: number[];
+        };
+        /**
          * ProviderTestOverride
          * @description Values from an unsaved form; only the fields present replace the stored ones.
          */
@@ -1935,6 +1966,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TestResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    refresh_providers_api_providers_refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderRefreshIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
                 };
             };
             /** @description Validation Error */

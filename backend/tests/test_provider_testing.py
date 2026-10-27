@@ -119,6 +119,28 @@ def test_refresh_targets_one_provider(monkeypatch):
     assert calls == [("models", {provider_id}), ("balances", {provider_id})]
 
 
+def test_refresh_batch_covers_every_id_in_one_run(monkeypatch):
+    """A card showing two providers sends both ids once; two calls would drop one on the job lock."""
+    first, second = _seed(), _seed()
+    calls: list[tuple[str, set[int] | None]] = []
+
+    async def fake_run_job(kind, trigger="manual", provider_ids=None):
+        calls.append((kind, provider_ids))
+
+    monkeypatch.setattr(api, "run_job", fake_run_job)
+    client = _client(monkeypatch)
+
+    response = client.post("/api/providers/refresh", json={"provider_ids": [first, second]})
+    assert response.status_code == 202
+    assert calls == [("models", {first, second}), ("balances", {first, second})]
+
+
 def test_refresh_unknown_provider_is_404(monkeypatch):
     client = _client(monkeypatch)
     assert client.post("/api/providers/999999/refresh").status_code == 404
+    assert client.post("/api/providers/refresh", json={"provider_ids": [999999]}).status_code == 404
+
+
+def test_refresh_batch_rejects_an_empty_list(monkeypatch):
+    client = _client(monkeypatch)
+    assert client.post("/api/providers/refresh", json={"provider_ids": []}).status_code == 422

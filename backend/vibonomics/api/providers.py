@@ -132,6 +132,12 @@ class ProviderTestOverride(BaseModel):
     options: dict[str, Any] | None = None
 
 
+class ProviderRefreshIn(BaseModel):
+    """Providers to refresh. A card that shows two providers sends both in one request."""
+
+    provider_ids: list[int] = Field(min_length=1)
+
+
 @router.get("/types", response_model=list[ProviderTypeOut])
 def provider_types() -> list[ProviderTypeOut]:
     return [
@@ -329,16 +335,32 @@ async def _run_test(resolved: ResolvedProvider, settings: Any) -> TestResult:
         return TestResult(ok=False, message=f"{type(exc).__name__}: {exc}"[:500])
 
 
+@router.post("/refresh", status_code=202)
+async def refresh_providers(body: ProviderRefreshIn, session: Session = Depends(get_session)) -> dict[str, str]:
+    """Refresh the given providers' models and balances, leaving the others alone.
+
+    One request for the whole set: the refresh jobs are serialised per kind, so two concurrent
+    single-provider calls would silently drop the second.
+    """
+    ids = set(body.provider_ids)
+    known = set(session.scalars(select(ProviderConfig.id).where(ProviderConfig.id.in_(ids))).all())
+    missing = sorted(ids - known)
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Provider not found: {missing[0]}")
+    spawn(_refresh_providers(ids))
+    return {"status": "started"}
+
+
 @router.post("/{provider_id}/refresh", status_code=202)
 async def refresh_provider(provider_id: int, session: Session = Depends(get_session)) -> dict[str, str]:
     """Refresh one provider's models and balance, leaving the other providers alone."""
     if session.get(ProviderConfig, provider_id) is None:
         raise HTTPException(status_code=404, detail="Provider not found")
-    spawn(_refresh_one(provider_id))
+    spawn(_refresh_providers({provider_id}))
     return {"status": "started"}
 
 
-async def _refresh_one(provider_id: int) -> None:
-    # Models first so the balance request sees the provider's current catalogue.
-    await run_job("models", "provider", {provider_id})
-    await run_job("balances", "provider", {provider_id})
+async def _refresh_providers(provider_ids: set[int]) -> None:
+    # Models first so the balance request sees the providers' current catalogues.
+    await run_job("models", "provider", provider_ids)
+    await run_job("balances", "provider", provider_ids)

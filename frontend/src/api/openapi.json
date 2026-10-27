@@ -448,13 +448,59 @@
         }
       }
     },
+    "/api/providers/refresh": {
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Refresh Providers",
+        "description": "Refresh the given providers' models and balances, leaving the others alone.\n\nOne request for the whole set: the refresh jobs are serialised per kind, so two concurrent\nsingle-provider calls would silently drop the second.",
+        "operationId": "refresh_providers_api_providers_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderRefreshIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Refresh Providers Api Providers Refresh Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/providers/{provider_id}/refresh": {
       "post": {
         "tags": [
           "providers"
         ],
         "summary": "Refresh Provider",
-        "description": "Refresh everything after a provider is added or its key changes.",
+        "description": "Refresh one provider's models and balance, leaving the other providers alone.",
         "operationId": "refresh_provider_api_providers__provider_id__refresh_post",
         "parameters": [
           {
@@ -3053,6 +3099,24 @@
           "balance_note"
         ],
         "title": "ProviderOut"
+      },
+      "ProviderRefreshIn": {
+        "properties": {
+          "provider_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Provider Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider_ids"
+        ],
+        "title": "ProviderRefreshIn",
+        "description": "Providers to refresh. A card that shows two providers sends both in one request."
       },
       "ProviderTestOverride": {
         "properties": {
