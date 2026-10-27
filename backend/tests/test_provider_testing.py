@@ -170,6 +170,8 @@ def test_a_key_with_a_stray_newline_never_reaches_the_message(monkeypatch):
         return ModelsDevCatalog({})
 
     monkeypatch.setattr(http.asyncio, "sleep", no_wait)
+    # The shared client belongs to the event loop that first used it; each phase below runs on its own.
+    monkeypatch.setattr(http, "_client", None)
     monkeypatch.setattr(api, "load_catalog", empty_catalog)
     server = HTTPServer(("127.0.0.1", 0), Ok)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -187,6 +189,7 @@ def test_a_key_with_a_stray_newline_never_reaches_the_message(monkeypatch):
 
         # And a header httpx refuses is not quoted back in the error.
         with pytest.raises(http.FetchError) as caught:
+            http._client = None
             asyncio.run(http.get_json(f"{base_url}/models", headers={"Authorization": f"Bearer {secret}\r\n"}))
         assert secret not in str(caught.value)
         assert "Illegal header value" in str(caught.value)
