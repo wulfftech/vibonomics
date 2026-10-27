@@ -81,7 +81,8 @@ export function claudeUsage(snapshot: SubscriptionSnapshot | null, providers: Pr
     spendLimit,
     session: snapshot?.session ?? null,
     plan,
-    live: snapshot !== null && liveWindows.length > 0,
+    // A snapshot means Claude Code is pushing, even before a session has produced plan windows.
+    live: snapshot !== null,
     updatedAt,
     error,
     model: snapshot?.model ?? null,

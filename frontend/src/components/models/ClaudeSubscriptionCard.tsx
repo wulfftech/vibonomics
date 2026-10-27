@@ -8,7 +8,7 @@ import { UsageWindows } from '../UsageWindows';
 
 export function SubscriptionDetails({ usage }: { usage: ClaudeUsage }) {
   const sessionBits = [
-    usage.session?.cost_usd !== null && usage.session?.cost_usd !== undefined
+    usage.session?.cost_usd !== null && usage.session?.cost_usd !== undefined && usage.session.cost_usd > 0
       ? `Session ${money(usage.session.cost_usd)}`
       : null,
     usage.session?.context_used_percentage !== null && usage.session?.context_used_percentage !== undefined
@@ -98,7 +98,7 @@ export function ClaudeSubscriptionCard({ usage }: { usage: ClaudeUsage | null })
         <SubscriptionDetails usage={usage} />
         {usage.windows.length === 0 && !usage.extra && !usage.error && (
           <Text size="xs" c="dimmed">
-            Connected — waiting for Claude Code to send usage.
+            Connected — no plan windows yet. They arrive with Claude Code&apos;s first response in a session.
           </Text>
         )}
         <Text size="xs" c="dimmed">
