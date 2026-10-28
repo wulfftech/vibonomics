@@ -30,7 +30,8 @@ IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 # Documentation addresses, never contacted: connecting a UDP socket only asks the kernel for a route.
 _DEFAULT_ROUTE_PROBES = {socket.AF_INET: "192.0.2.1", socket.AF_INET6: "2001:db8::1"}
 _RETRY_SECONDS = 5
-_RETRIES = 60
+_RETRY_CEILING = 60
+_WARN_AFTER = 300
 
 _refused: frozenset[IPAddress] = frozenset()
 _last_warning = 0.0
@@ -105,12 +106,27 @@ async def refresh() -> bool:
 
 
 async def keep_trying() -> None:
-    """For a sidecar that starts after the app: retry until its name resolves."""
-    for _ in range(_RETRIES):
-        await asyncio.sleep(_RETRY_SECONDS)
+    """For a sidecar that starts after the app: retry until its name resolves, however long that takes.
+
+    The delay doubles up to a minute. Nothing is refused until the name resolves, and a slow first build
+    can take longer than any fixed number of retries, so this never gives up; after five minutes it says
+    once that the guard is still off.
+    """
+    delay, waited, warned = _RETRY_SECONDS, 0, False
+    while True:
+        await asyncio.sleep(delay)
+        waited += delay
         if await refresh():
             return
-    log.warning("Sandbox guard off: the sidecar's name never resolved")
+        if waited >= _WARN_AFTER and not warned:
+            warned = True
+            log.warning(
+                "Sandbox guard still off: the sidecar's name has not resolved after %d s, so sandbox-originated "
+                "requests are not refused yet. Retrying every %d s.",
+                waited,
+                _RETRY_CEILING,
+            )
+        delay = min(delay * 2, _RETRY_CEILING)
 
 
 def refuses(scope: dict[str, Any]) -> bool:

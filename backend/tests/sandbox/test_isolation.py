@@ -102,6 +102,49 @@ def test_never_guards_loopback_or_a_socket():
     assert sandbox_guard.sandbox_facing_addresses("unix:///run/x/sandbox.sock") == set()
 
 
+@pytest.fixture
+def sidecar_down_for(monkeypatch):
+    """Run ``keep_trying`` with refresh failing ``misses`` times, then succeeding. Returns the sleeps."""
+
+    def run(misses: int) -> list[float]:
+        delays: list[float] = []
+        outcomes = iter([False] * misses + [True])
+
+        async def fake_sleep(delay):
+            delays.append(delay)
+
+        async def fake_refresh():
+            return next(outcomes)
+
+        monkeypatch.setattr(sandbox_guard.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(sandbox_guard, "refresh", fake_refresh)
+        asyncio.run(sandbox_guard.keep_trying())
+        return delays
+
+    return run
+
+
+def test_keeps_trying_past_the_old_five_minute_limit(sidecar_down_for):
+    delays = sidecar_down_for(100)  # the old loop gave up after 60 tries, at 300 s
+    assert len(delays) == 101
+    assert delays[:6] == [5, 10, 20, 40, 60, 60]
+    assert max(delays) == 60
+    assert sum(delays[:60]) > 300
+
+
+def test_says_once_that_the_guard_is_still_off(sidecar_down_for, caplog):
+    with caplog.at_level("WARNING", logger="vibonomics.sandbox_guard"):
+        sidecar_down_for(100)
+    assert sum("still off" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_stops_as_soon_as_the_sidecar_resolves(sidecar_down_for, caplog):
+    with caplog.at_level("WARNING", logger="vibonomics.sandbox_guard"):
+        delays = sidecar_down_for(2)
+    assert delays == [5, 10, 20]
+    assert not caplog.records
+
+
 def test_requests_arriving_on_the_sandbox_network_are_refused(monkeypatch):
     init_db()
     monkeypatch.setattr(sandbox_guard, "_refused", frozenset({APP_ON_SANDBOX_NET}))
