@@ -9,6 +9,7 @@ from vibonomics.catalog.modelsdev import ModelsDevCatalog
 from vibonomics.db import init_db, session_scope
 from vibonomics.evals import runner
 from vibonomics.evals.llm import ChatError, ChatReply, ToolCall
+from vibonomics.evals.suites import SUITES
 from vibonomics.evals.tasks_coding import MEAN_REFERENCE
 from vibonomics.orm import EvalResult, EvalRun, Model, ProviderConfig
 from vibonomics.scoring import own_test_scores
@@ -16,6 +17,7 @@ from vibonomics.settings_store import load_settings, save_settings
 
 MODEL_ID = "fake/agentic-model"
 QUICK_TASKS = ("instr-json", "tool-pick", "agentic-fix-mean")
+AGENTIC_IDS = sorted({t.id for suite in SUITES.values() for t in suite.tasks if t.kind == "agentic"})
 
 
 class FakeClient:
@@ -232,6 +234,99 @@ async def test_a_test_module_that_fails_to_import_scores_none_of_its_tests():
     assert note.startswith(f"0/{task.test_count()} tests passed")
     note, score = await runner._grade_agentic(task, {**task.workspace, **task.reference}, _local_sandbox())
     assert score == 100.0
+
+
+def _broken_mean_workspace(**extra: str) -> tuple:
+    task = _agentic_task("agentic-fix-mean")
+    return task, {**task.workspace, **extra}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(lambda calc: {"calc.py": "import os\nos._exit(0)\n" + calc}, id="exit-0-at-import"),
+        pytest.param(
+            lambda calc: {
+                "calc.py": "import os, sys\nsys.stderr.write('\\nRan 5 tests in 0.001s\\n\\nOK\\n')\nos._exit(0)\n"
+                + calc
+            },
+            id="forged-unittest-summary",
+        ),
+        pytest.param(
+            lambda calc: {
+                "calc.py": "import os, sys\n"
+                'sys.stderr.write(\'\\n@@VIBONOMICS-RESULT guess {"tests_run": 5, "failures": 0, '
+                '"errors": 0, "skipped": 0, "unexpected_successes": 0}\\n\')\n'
+                "os._exit(0)\n" + calc
+            },
+            id="forged-harness-line-without-the-nonce",
+        ),
+        pytest.param(lambda calc: {"unittest.py": "import sys\nsys.exit(0)\n"}, id="shadowed-unittest"),
+        pytest.param(lambda calc: {"json.py": "import sys\nsys.exit(0)\n"}, id="shadowed-json"),
+        pytest.param(lambda calc: {runner.HARNESS_PATH: "import sys\nsys.exit(0)\n"}, id="replaced-harness"),
+    ],
+)
+async def test_the_code_under_test_cannot_grade_itself(tamper):
+    task = _agentic_task("agentic-fix-mean")
+    honest_note, honest_score = await runner._grade_agentic(task, dict(task.workspace), _local_sandbox())
+    assert honest_score == 20.0, honest_note  # the untouched broken code: one of five tests passes
+    workspace = {**task.workspace, **tamper(task.workspace["calc.py"])}
+    note, score = await runner._grade_agentic(task, workspace, _local_sandbox())
+    assert score is not None
+    assert score <= 20.0, note
+    assert "All 5 tests passed" not in note
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_ends_without_the_harness_report_scores_zero_not_ungraded():
+    task = _agentic_task("agentic-fix-mean")
+    workspace = {**task.workspace, "calc.py": "import os\nos._exit(0)\n"}
+    note, score = await runner._grade_agentic(task, workspace, _local_sandbox())
+    assert score == 0.0
+    assert note.startswith("Tests ended without a result report (exit 0)")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra",
+    [{"tests": "x"}, {"big.txt": "x" * 1_100_000}, {f"part{i}.txt": "x" * 500_000 for i in range(5)}],
+    ids=["file-named-like-the-tests-folder", "file-over-a-megabyte", "workspace-over-the-total"],
+)
+async def test_a_workspace_that_cannot_be_laid_out_scores_zero_not_ungraded(extra):
+    task, workspace = _broken_mean_workspace(**extra)
+    note, score = await runner._grade_agentic(task, workspace, _local_sandbox())
+    assert score == 0.0, note
+    assert note.startswith("Tests could not run on the submitted files")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_id", AGENTIC_IDS)
+async def test_every_agentic_reference_scores_full_marks_and_the_bare_workspace_does_not(task_id):
+    task = _agentic_task(task_id)
+    assert task.test_command == ("python", "-m", "unittest", "discover", "-s", runner.TEST_DIR)
+    note, score = await runner._grade_agentic(task, {**task.workspace, **task.reference}, _local_sandbox())
+    assert (note, score) == (f"All {task.test_count()} tests passed.", 100.0)
+    _, bare = await runner._grade_agentic(task, dict(task.workspace), _local_sandbox())
+    assert bare is not None and bare < 100.0
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_too_large_for_the_sidecar_is_the_models_fault_not_an_outage(monkeypatch):
+    from types import SimpleNamespace
+
+    import httpx
+
+    from vibonomics.evals import sandbox_client
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(413, json={"detail": "Workspace too large"}))
+    monkeypatch.setattr(sandbox_client, "mode_for", lambda settings: "sidecar")
+    monkeypatch.setattr(sandbox_client, "sidecar_transport", lambda url: (transport, "http://sandbox"))
+    monkeypatch.setattr(sandbox_client, "get_config", lambda: SimpleNamespace(sandbox_url="unix:///nowhere"))
+    task = _agentic_task("agentic-fix-mean")
+    note, score = await runner._grade_agentic(task, dict(task.workspace), _local_sandbox())
+    assert score == 0.0
+    assert note.startswith("Tests could not run on the submitted files (Workspace too large)")
 
 
 @pytest.mark.asyncio

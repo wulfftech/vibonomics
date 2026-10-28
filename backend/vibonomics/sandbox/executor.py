@@ -14,6 +14,7 @@ the processes a run orphans.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import signal
@@ -28,6 +29,11 @@ from typing import IO
 
 MAX_OUTPUT = 20_000
 MAX_FILE_BYTES = 1_000_000
+MAX_WORKSPACE_BYTES = 2 * 1024 * 1024
+
+# ``ExecResult.error_kind`` when the files themselves could not be laid out. The caller can tell that
+# apart from a sandbox that is down: the first is the submitted work's fault, the second is nobody's.
+WORKSPACE_ERROR = "workspace"
 
 
 @dataclass
@@ -37,6 +43,7 @@ class ExecResult:
     stderr: str
     timed_out: bool
     duration_ms: int
+    error_kind: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -45,6 +52,7 @@ class ExecResult:
             "stderr": self.stderr,
             "timed_out": self.timed_out,
             "duration_ms": self.duration_ms,
+            "error_kind": self.error_kind,
         }
 
 
@@ -61,7 +69,20 @@ def safe_relative_path(name: str) -> Path:
     return path
 
 
+def workspace_size(files: dict[str, str]) -> int:
+    return sum(len(content.encode("utf-8", errors="replace")) for content in files.values())
+
+
+def blames_workspace(exc: BaseException) -> bool:
+    """Whether laying out the files failed because of what the files are, not because of this machine."""
+    if isinstance(exc, ValueError | FileExistsError | NotADirectoryError | IsADirectoryError):
+        return True  # includes UnsafePath and a NUL in a path
+    return isinstance(exc, OSError) and exc.errno in {errno.ENAMETOOLONG, errno.EINVAL, errno.ELOOP}
+
+
 def write_files(root: Path, files: dict[str, str]) -> None:
+    if (size := workspace_size(files)) > MAX_WORKSPACE_BYTES:
+        raise UnsafePath(f"workspace too large: {size} bytes")
     for name, content in files.items():
         target = root / safe_relative_path(name)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +154,8 @@ def run(files: dict[str, str], command: list[str], timeout: float = 30.0, *, cwd
     """Run ``command`` in a fresh workspace holding ``files``.
 
     Never raises for anything the files, command or cwd contain: a workspace that cannot be written or a
-    command that cannot start comes back as a result with ``exit_code=None`` and the reason in stderr.
+    command that cannot start comes back as a result with ``exit_code=None`` and the reason in stderr. When
+    the files are to blame, ``error_kind`` is ``"workspace"``.
     """
     timeout = max(1.0, min(float(timeout), 120.0))
     started = time.monotonic()
@@ -145,9 +167,16 @@ def run(files: dict[str, str], command: list[str], timeout: float = 30.0, *, cwd
         # The workspace holds only the model's files; the output files sit beside it.
         root = scratch / "workspace"
         root.mkdir()
-        write_files(root, files)
-        workdir = root / safe_relative_path(cwd) if cwd else root
-        workdir.mkdir(parents=True, exist_ok=True)
+        try:
+            write_files(root, files)
+            workdir = root / safe_relative_path(cwd) if cwd else root
+            workdir.mkdir(parents=True, exist_ok=True)
+        except (OSError, ValueError) as exc:
+            if not blames_workspace(exc):
+                raise
+            return ExecResult(
+                None, "", f"{type(exc).__name__}: {exc}", False, _elapsed_ms(started), error_kind=WORKSPACE_ERROR
+            )
         argv = list(command)
         if argv and argv[0] in {"python", "python3"}:
             argv[0] = sys.executable

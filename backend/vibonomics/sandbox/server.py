@@ -24,7 +24,7 @@ from . import executor
 
 log = logging.getLogger(__name__)
 
-MAX_REQUEST_BYTES = 2 * 1024 * 1024
+MAX_REQUEST_BYTES = executor.MAX_WORKSPACE_BYTES
 MAX_TIMEOUT = 120.0
 MAX_CONCURRENT = 2
 
@@ -44,6 +44,7 @@ class RunResponse(BaseModel):
     stderr: str
     timed_out: bool
     duration_ms: int
+    error_kind: str | None = None
 
 
 def _check_token(token: str | None) -> None:
@@ -65,8 +66,7 @@ def create_app() -> FastAPI:
     async def run(body: RunRequest, x_sandbox_token: str | None = Header(default=None)) -> RunResponse:
         global _semaphore
         _check_token(x_sandbox_token)
-        size = sum(len(v.encode("utf-8", errors="replace")) for v in body.files.values())
-        if size > MAX_REQUEST_BYTES:
+        if executor.workspace_size(body.files) > MAX_REQUEST_BYTES:
             raise HTTPException(status_code=413, detail="Workspace too large")
         if _semaphore is None:
             _semaphore = asyncio.Semaphore(MAX_CONCURRENT)

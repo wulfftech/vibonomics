@@ -58,3 +58,4 @@ def test_a_workspace_that_cannot_be_written_is_a_result_not_a_server_error(clien
     assert response.status_code == 200
     assert response.json()["exit_code"] is None
     assert "FileExistsError" in response.json()["stderr"]
+    assert response.json()["error_kind"] == "workspace"

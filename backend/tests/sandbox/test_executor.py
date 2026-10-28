@@ -142,19 +142,34 @@ def test_process_count_is_not_limited_per_user():
 
 
 @pytest.mark.parametrize(
-    ("files", "cwd", "command", "error"),
+    ("files", "cwd", "command", "error", "kind"),
     [
-        ({"../escape.txt": "x"}, None, ["python", "-c", "pass"], "UnsafePath: unsafe path"),
-        ({"big.txt": "x" * (executor.MAX_FILE_BYTES + 1)}, None, ["python", "-c", "pass"], "file too large"),
-        ({"tests": "x", "tests/test_a.py": "pass\n"}, None, ["python", "-c", "pass"], "FileExistsError"),
-        ({"a\x00b.py": "x"}, None, ["python", "-c", "pass"], "ValueError"),
-        ({"sub": "x"}, "sub", ["python", "-c", "pass"], "FileExistsError"),
-        ({}, "../up", ["python", "-c", "pass"], "UnsafePath: unsafe path"),
-        ({}, None, ["./no-such-command"], "FileNotFoundError"),
+        ({"../escape.txt": "x"}, None, ["python", "-c", "pass"], "UnsafePath: unsafe path", "workspace"),
+        (
+            {"big.txt": "x" * (executor.MAX_FILE_BYTES + 1)},
+            None,
+            ["python", "-c", "pass"],
+            "file too large",
+            "workspace",
+        ),
+        (
+            {f"part{i}.txt": "x" * (executor.MAX_FILE_BYTES // 2) for i in range(5)},
+            None,
+            ["python", "-c", "pass"],
+            "workspace too large",
+            "workspace",
+        ),
+        ({"tests": "x", "tests/test_a.py": "pass\n"}, None, ["python", "-c", "pass"], "FileExistsError", "workspace"),
+        ({"a\x00b.py": "x"}, None, ["python", "-c", "pass"], "ValueError", "workspace"),
+        ({"sub": "x"}, "sub", ["python", "-c", "pass"], "FileExistsError", "workspace"),
+        ({}, "../up", ["python", "-c", "pass"], "UnsafePath: unsafe path", "workspace"),
+        # Nothing about the files: the command is missing, so this is the sandbox's problem, not the work's.
+        ({}, None, ["./no-such-command"], "FileNotFoundError", None),
     ],
     ids=[
         "unsafe-path",
         "too-large",
+        "workspace-too-large",
         "file-named-like-a-folder",
         "nul-in-path",
         "cwd-is-a-file",
@@ -162,11 +177,12 @@ def test_process_count_is_not_limited_per_user():
         "no-command",
     ],
 )
-def test_a_run_that_cannot_start_is_reported_not_raised(files, cwd, command, error):
+def test_a_run_that_cannot_start_is_reported_not_raised(files, cwd, command, error, kind):
     result = executor.run(files, command, cwd=cwd)
     assert result.exit_code is None
     assert result.timed_out is False
     assert error in result.stderr
+    assert result.error_kind == kind
 
 
 def test_workspace_holds_only_the_given_files():

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import secrets
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -16,7 +19,7 @@ from ..events import publish
 from ..orm import EvalResult, EvalRun, Model, ProviderConfig
 from ..provider_service import build_adapter
 from ..providers.base import FetchContext
-from ..sandbox.executor import UnsafePath, safe_relative_path
+from ..sandbox.executor import WORKSPACE_ERROR, UnsafePath, safe_relative_path
 from ..scoring import GRADED_STATUSES
 from ..settings_store import AppSettings, load_settings
 from . import sandbox_client
@@ -24,8 +27,14 @@ from .graders import grade_answer, grade_tool_calls
 from .judge import Judge
 from .llm import ChatError, ChatReply, LLMClient, ToolCall, assistant_message, tool_call_payload
 from .suites import SUITES, TaskDef
+from .unittest_harness import MARKER as HARNESS_MARKER
 
 log = logging.getLogger(__name__)
+
+# Graded runs go through this script, not through ``python -m unittest``: see its docstring.
+HARNESS_PATH = ".vibonomics/unittest_harness.py"
+HARNESS_SOURCE = (Path(__file__).with_name("unittest_harness.py")).read_text(encoding="utf-8")
+TEST_DIR = "tests"
 
 _cancelled: set[int] = set()
 _tasks: dict[int, asyncio.Task[Any]] = {}
@@ -627,38 +636,52 @@ async def _grade_agentic(task: TaskDef, workspace: dict[str, str], settings: App
     # Pristine tests only: the model's edits to tests/ are discarded.
     pristine = {p: c for p, c in task.workspace.items() if p.startswith("tests/")}
     solution = {path: content for path, content in workspace.items() if not path.startswith("tests/")}
-    files = {**solution, **pristine, **task.hidden_tests}
-    result = await sandbox_client.run_code(files, list(task.test_command), task.test_timeout, settings)
+    nonce = secrets.token_hex(16)
+    # The harness goes in last so nothing the model wrote can replace it.
+    files = {**solution, **pristine, **task.hidden_tests, HARNESS_PATH: HARNESS_SOURCE}
+    command = ["python", "-P", HARNESS_PATH, nonce, TEST_DIR]
+    result = await sandbox_client.run_code(files, command, task.test_timeout, settings)
     if result is None:
         return "Tests were not executed (sandbox unavailable).", None
     if result.timed_out:
         return f"Tests timed out after {task.test_timeout:.0f}s.", 0.0
     if result.exit_code is None:
-        # The sandbox failed (sidecar down, rejected the request, could not start the process).
         reason = result.stderr.strip()[:200] or "no output"
+        if result.error_kind == WORKSPACE_ERROR:
+            # The model's own files cannot be laid out (a file where a directory belongs, one too large).
+            return f"Tests could not run on the submitted files ({reason}).", 0.0
+        # The sandbox failed (sidecar down, could not start the process): nobody's grade.
         return f"Tests were not executed ({reason}).", None
-    if result.exit_code == 0:
-        return f"All {total} tests passed.", (100.0 if total else None)
-    # Count from unittest's own summary: a test module that fails to import runs as one error, so
-    # subtracting failures from the declared test count would credit every test in it as passed.
-    ran = _summary_count(result.stderr, r"(?m)^Ran (\d+) tests? in ")
-    failures = _summary_count(result.stderr, r"(?<!expected )failures=(\d+)")
-    errors = _summary_count(result.stderr, r"errors=(\d+)")
-    skipped = _summary_count(result.stderr, r"skipped=(\d+)")
-    passed = min(total, max(0, ran - failures - errors - skipped))
-    score = round(100.0 * passed / total, 1) if total else 0.0
+    report = _harness_report(result.stderr, nonce)
+    if report is None:
+        # Exit status and output are the code under test's to write, so without the harness's own report
+        # nothing says the tests ran, whatever the exit code was.
+        return f"Tests ended without a result report (exit {result.exit_code}); nothing counts as passed.", 0.0
+    if not total:
+        return "No tests are declared for this task.", None
+    failed = report["failures"] + report["errors"] + report["unexpected_successes"]
+    passed = min(total, max(0, report["tests_run"] - failed - report["skipped"]))
+    if passed == total and not failed and not report["skipped"]:
+        return f"All {total} tests passed.", 100.0
     note = f"{passed}/{total} tests passed"
-    if failures or errors:
-        note += f" (failures={failures}, errors={errors})"
-    if skipped:
-        note += f", skipped={skipped}"
-    return note, score
+    if failed:
+        note += f" (failures={report['failures']}, errors={report['errors']})"
+    if report["skipped"]:
+        note += f", skipped={report['skipped']}"
+    return note, round(100.0 * passed / total, 1)
 
 
-def _summary_count(text: str, pattern: str) -> int:
-    """The last match wins: the summary is printed after anything the code under test wrote."""
-    matches = re.findall(pattern, text)
-    return int(matches[-1]) if matches else 0
+def _harness_report(stderr: str, nonce: str) -> dict[str, int] | None:
+    """The harness's result line, or None unless exactly one carries this run's nonce."""
+    lines = re.findall(rf"(?m)^{re.escape(HARNESS_MARKER)} {re.escape(nonce)} (\{{.*\}})\r?$", stderr)
+    if len(lines) != 1:
+        return None
+    try:
+        data = json.loads(lines[0])
+        keys = ("tests_run", "failures", "errors", "skipped", "unexpected_successes")
+        return {key: max(0, int(data[key])) for key in keys}
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def _workspace_note(workspace: dict[str, str]) -> str:

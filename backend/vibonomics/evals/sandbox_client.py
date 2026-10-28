@@ -60,6 +60,9 @@ async def run_code(
                     json={"files": files, "command": command, "timeout": timeout, "cwd": cwd},
                     headers=headers,
                 )
+                if response.status_code == 413:
+                    # The sidecar refuses an oversized workspace before running anything: the files' fault.
+                    return ExecResult(None, "", "Workspace too large", False, 0, error_kind=executor.WORKSPACE_ERROR)
                 response.raise_for_status()
                 data = response.json()
             return ExecResult(
@@ -68,6 +71,7 @@ async def run_code(
                 stderr=str(data.get("stderr") or ""),
                 timed_out=bool(data.get("timed_out")),
                 duration_ms=int(data.get("duration_ms") or 0),
+                error_kind=data.get("error_kind"),
             )
         except (httpx.HTTPError, ValueError) as exc:
             log.warning("Sandbox sidecar call failed: %s", exc)
