@@ -1,6 +1,7 @@
 /**
  * Client-side price maths. Blended prices and value depend on the usage profile picked in the UI,
  * so the server returns raw per-1M prices and the composite score, and everything else is here.
+ * `backend/vibonomics/pricing.py` copies these formulas for programs (`POST /api/models/value`): change both.
  *
  * - Cache-aware input price: `inEff = input·(1−c) + (cache_read ?? input)·c`
  * - Blended $/1M: `(iw·inEff + ow·output) / (iw + ow)`
