@@ -1,66 +1,46 @@
 # Outstanding work
 
-Known follow-ups after the 2026-10-27/28 review fixes. Each entry says what it is, how it was
-verified, who it affects, and what fixing it would take. Nothing here blocks normal use of the
-instance at `192.168.10.78`.
+Nothing is outstanding. This file records what was checked and decided, so a settled question does not get
+raised again, and it is where a new follow-up goes: what it is, how it was verified, who it affects, and
+what fixing it would take.
 
-Last reviewed 2026-10-28, against `main` at `efe7e10`.
+Last reviewed 2026-10-28, against `main` at `3ca416a`.
 
-## 1. Local sandbox mode has no process cap, and leaks zombies
+## Fixed on 2026-10-28, with what to know
 
-**Verified.** In `docker-compose.yml` the `sandbox` service has `init: true` and `pids_limit: 256`;
-the `vibonomics` service has neither. The executor sets no `RLIMIT_NPROC` — removed deliberately,
-because that limit counts every process the uid owns across the host, so a low value fails ordinary
-code on a busy machine.
+- **Local sandbox mode had no process cap and leaked zombies** (`34f97f9`). The `vibonomics` service now
+  has `init: true` and `pids_limit: 1024`, so the processes a **Local** run orphans are reaped and a run
+  cannot start more than the cap. The cap counts threads too, which is why it is far looser than the
+  sidecar's 256. The executor still sets no `RLIMIT_NPROC`: that limit counts every process the uid owns
+  across the host, so a low value fails ordinary code on a busy machine. A process that starts its own
+  session still leaves the run's process group.
+- **The sandbox guard gave up after five minutes** (`94a6305`). `keep_trying()` now retries for as long as
+  the sidecar's name does not resolve, backing off from 5 s to a ceiling of 60 s, and warns once after
+  five minutes that the guard is still off. It still fails open until the name resolves. Failing closed
+  would refuse everyone's requests while a slow sidecar builds, and only the opt-in TCP layout
+  (`docker/compose.sandbox-tcp.yml`) has a network to guard at all.
+- **A curated alias that never fired** (`3ca416a`). `"gpt-4o-2024-11-20"` in the `epoch` aliases is gone.
+  With it removed, the live models.dev catalogue still resolves that name to `openai/gpt-4o-2024-11-20`
+  by name, because a full-dated name reaches its exact id before any alias is consulted.
+- **The benchmark unmatched rate** (`3ca416a`). Counted by model name on the live instance, `arena` had
+  187 of 460 unmatched (40.7%), `epoch` 91 of 312 (29.2%) and `terminal-bench` 0 of 21. The earlier 37.8%
+  and 29.7% counted score rows, not models. 256 of the 278 unmatched names have no counterpart in
+  models.dev at all, mostly open models from before 2025, so most of this rate is catalogue coverage and
+  not a matcher defect. Seven arena names were the same release as a catalogue id and only a qualifier
+  in the name defeated the matcher; they are now curated, which should take `arena` to 180 of 460
+  (39.1%) after the next rematch. Left unmatched on purpose:
+  - Previews that are not the released model: `QwQ-32B-Preview`, `Qwen3.7-Max-Preview`,
+    `MiniMax-M2.1 Preview`, the DeepSeek V4 previews, both `GPT-4 Turbo Preview` snapshots,
+    `Gemini 2.0 Flash-Lite Preview (02-05)` and `Gemini 2.5 Flash Preview (09-2025)` (the catalogue
+    has only the 05-20 preview and the release).
+  - Names for an older model than anything the catalogue lists under a similar name: `Gemini Pro` (the
+    2023 model, not `gemini-pro-latest`), `Mercury`, `Mistral 7B Instruct` (the catalogue has only v0.3),
+    `Step-3`, `GLM-4 (0520)`, `Reka Flash (20240904)`.
+  - Names that could mean more than one catalogue model: `Muse Spark` (1.1, 1.2, 1.3 or open), `Grok 4.1`
+    (the catalogue lists only the fast variants), epoch's `Grok 4 Fast` (reasoning or not), and any
+    `Grok 4`, `Phi-4` or `Qwen2.5-Coder` size the catalogue does not list.
 
-**Impact.** **Local** sandbox mode (documented development-only) therefore has no cap on how many
-processes model-written code can start. Because the app is PID 1 in its container and nothing reaps
-there, processes a run orphans stay as zombies until the container restarts. The sidecar is
-unaffected — its `pids_limit` bounds it and its `init` reaps it.
-
-**Fix.** Add `init: true` to the `vibonomics` service, and optionally a generous `pids_limit`. Neither
-changes behaviour in the default sidecar layout.
-
-## 2. The sandbox guard stops retrying after five minutes
-
-**Verified.** `backend/vibonomics/sandbox_guard.py` sets `_RETRIES = 60` and `_RETRY_SECONDS = 5`.
-`keep_trying()` therefore gives up after 300 s and logs "the sandbox guard off: the sidecar's name
-never resolved", leaving `_refused` empty.
-
-**Impact.** Only the opt-in TCP layout (`docker/compose.sandbox-tcp.yml`), which is the one that has a
-shared network to guard. If the sidecar starts more than five minutes after the app — a slow first
-build on a constrained host is the realistic case — the app serves sandbox-originated requests
-unguarded until the next restart, with only a log warning. The default socket layout has no network
-to guard and is unaffected.
-
-**Fix.** Retry with a longer backoff instead of stopping, or fail closed (keep refusing the sandbox
-network until the address is known). Failing closed is the safer default but risks locking users out,
-which is why the guard currently errs the other way.
-
-## 3. A curated alias is now dead weight
-
-**Verified.** `backend/vibonomics/benchmarks/aliases.yaml` maps both `"GPT-4o (Nov 2024)"` and
-`"gpt-4o-2024-11-20"` to `openai/gpt-4o-2024-11-20`. A full-dated name now resolves to its exact
-canonical id before any alias is consulted, so the second entry never fires.
-
-**Impact.** None on behaviour — an unused alias is harmless. It is misleading to whoever maintains the
-file next, because it implies the date would not otherwise match.
-
-**Fix.** Drop the `"gpt-4o-2024-11-20"` line once a benchmarks refresh confirms the same match without
-it. Low priority.
-
-## 4. The benchmark unmatched rate is worth a look
-
-**Verified on the live instance** after `rematch_scores`: `arena` 389/1030 rows unmatched (37.8%),
-`epoch` 93/313 (29.7%), `terminal-bench` 0/21. The counts were identical before and after the rematch,
-so this predates the matching changes and is not a regression from them.
-
-**Impact.** Unmatched rows carry no canonical id and so contribute nothing to a model's score. This is
-not a defect — a benchmark name that maps to no catalogue model is simply unmapped — but 37.8% is high
-enough to be worth a look for names that are mappable but not yet covered by an alias.
-
-**Fix.** Review `GET /api/benchmarks/rows?unmatched_only=true` and add curated aliases where the
-mapping is obvious. Do this with the source's licence and attribution in mind, as usual.
+  Revisit a name when models.dev adds the model it should map to.
 
 ## Not outstanding (checked, so they do not get re-raised)
 

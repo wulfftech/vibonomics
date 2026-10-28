@@ -317,8 +317,8 @@ frontend/src/     React 19, Mantine 9
 docker/           Dockerfile and entrypoint
 ```
 
-Known follow-ups that are not defects and do not block use are listed in
-[OUTSTANDING.md](OUTSTANDING.md), each with how it was verified and what fixing it would take.
+Known follow-ups, and questions already checked and settled, are recorded in
+[OUTSTANDING.md](OUTSTANDING.md), each with how it was verified.
 
 ## Contributing and security
 
