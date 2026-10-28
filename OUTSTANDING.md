@@ -6,43 +6,7 @@ instance at `192.168.10.78`.
 
 Last reviewed 2026-10-28, against `main` at `efe7e10`.
 
-## 1. `npm run format:check` fails on a Windows checkout
-
-**Verified.** `frontend/.prettierrc.json` sets `endOfLine: "lf"`, and `.gitattributes` pins LF only
-for `*.sh`, `*.py`, `*.yml`, `*.yaml`, `*.json` and `Dockerfile` — not for `*.ts`/`*.tsx`. This clone
-has `core.autocrlf=true`, so two files were checked out with CRLF:
-
-```
-$ git ls-files --eol frontend/src/lib/format.ts
-i/lf  w/crlf  attr/text=auto   frontend/src/lib/format.ts
-```
-
-The committed blobs are pure LF (0 CR bytes), so **git holds the right content** — only the working
-tree is wrong, and only for those two files. `npx prettier --check src/lib/format.ts` warns on them.
-CI passes because a Linux checkout is LF.
-
-**Impact.** A Windows contributor sees a false failure on files they did not touch. The obvious "fix"
-(`prettier --write`) rewrites whole files, producing a diff that hides the real change. It is also easy
-to conclude CI is broken when it is not.
-
-**Fix.** Add to `.gitattributes`:
-
-```
-*.ts   text eol=lf
-*.tsx  text eol=lf
-*.css  text eol=lf
-*.md   text eol=lf
-```
-
-then `git add --renormalize .` once and commit the result on its own, so the renormalisation does not
-hide inside an unrelated change.
-
-**Tested in a throwaway clone.** After adding the attribute and renormalising, `git ls-files --eol`
-reported `attr/text eol=lf` but still `w/crlf` — the attribute only governs the *next* checkout. Deleting
-and re-checking-out the two files (`rm <file> && git checkout -- <file>`) moved them to `w/lf`. So the
-commit alone fixes future clones; existing working trees need the re-checkout too.
-
-## 2. Local sandbox mode has no process cap, and leaks zombies
+## 1. Local sandbox mode has no process cap, and leaks zombies
 
 **Verified.** In `docker-compose.yml` the `sandbox` service has `init: true` and `pids_limit: 256`;
 the `vibonomics` service has neither. The executor sets no `RLIMIT_NPROC` — removed deliberately,
@@ -57,7 +21,7 @@ unaffected — its `pids_limit` bounds it and its `init` reaps it.
 **Fix.** Add `init: true` to the `vibonomics` service, and optionally a generous `pids_limit`. Neither
 changes behaviour in the default sidecar layout.
 
-## 3. The sandbox guard stops retrying after five minutes
+## 2. The sandbox guard stops retrying after five minutes
 
 **Verified.** `backend/vibonomics/sandbox_guard.py` sets `_RETRIES = 60` and `_RETRY_SECONDS = 5`.
 `keep_trying()` therefore gives up after 300 s and logs "the sandbox guard off: the sidecar's name
@@ -73,7 +37,7 @@ to guard and is unaffected.
 network until the address is known). Failing closed is the safer default but risks locking users out,
 which is why the guard currently errs the other way.
 
-## 4. A curated alias is now dead weight
+## 3. A curated alias is now dead weight
 
 **Verified.** `backend/vibonomics/benchmarks/aliases.yaml` maps both `"GPT-4o (Nov 2024)"` and
 `"gpt-4o-2024-11-20"` to `openai/gpt-4o-2024-11-20`. A full-dated name now resolves to its exact
@@ -85,7 +49,7 @@ file next, because it implies the date would not otherwise match.
 **Fix.** Drop the `"gpt-4o-2024-11-20"` line once a benchmarks refresh confirms the same match without
 it. Low priority.
 
-## 5. The benchmark unmatched rate is worth a look
+## 4. The benchmark unmatched rate is worth a look
 
 **Verified on the live instance** after `rematch_scores`: `arena` 389/1030 rows unmatched (37.8%),
 `epoch` 93/313 (29.7%), `terminal-bench` 0/21. The counts were identical before and after the rematch,
@@ -100,6 +64,12 @@ mapping is obvious. Do this with the source's licence and attribution in mind, a
 
 ## Not outstanding (checked, so they do not get re-raised)
 
+- **CRLF in a Windows checkout.** `.gitattributes` now pins LF for every file type
+  `npm run format:check` reads (`907671c`), and `npm run format:check` passes on this clone. The
+  committed blobs were already LF, so the commit changed no content. The attribute only governs the
+  next checkout: a clone that already has CRLF files needs `rm <file> && git checkout -- <file>` once
+  per file (find them with `git ls-files --eol | grep w/crlf`). `.env.example` is not pinned and still
+  checks out as CRLF under `core.autocrlf=true`.
 - **Three socket tests cannot pass on Windows.** `tests/sandbox/test_isolation.py` fails
   `test_code_runs_through_the_socket`, `test_healthcheck_uses_the_socket` and
   `test_healthcheck_fails_without_a_sidecar` with `AttributeError: module 'socket' has no attribute
