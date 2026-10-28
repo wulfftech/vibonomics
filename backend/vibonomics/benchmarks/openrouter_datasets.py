@@ -241,6 +241,7 @@ class OpenRouterDatasetsSource(BenchmarkSource):
             raise FetchError("; ".join(errors)[:600])
         for err in errors:
             log.warning("OpenRouter evals & datasets partially failed: %s", err)
+        self.partial_errors = errors
         today = datetime.now(UTC).date().isoformat()
         for rec in records:
             rec.as_of = rec.as_of or today

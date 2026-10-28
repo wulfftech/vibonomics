@@ -214,4 +214,5 @@ class ArenaSource(BenchmarkSource):
             records.extend(rows_to_records(config, rows))
         if not records:
             raise FetchError("Arena: no leaderboard rows found" + (f" ({'; '.join(errors)[:300]})" if errors else ""))
+        self.partial_errors = errors
         return records

@@ -18,7 +18,7 @@ from vibonomics.benchmarks.registry import SOURCES
 from vibonomics.catalog.modelsdev import ModelsDevCatalog
 from vibonomics.db import init_db, session_scope
 from vibonomics.http import FetchError
-from vibonomics.orm import BenchmarkScore, RefreshRun
+from vibonomics.orm import BenchmarkScore, ModelAlias, RefreshRun
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -358,10 +358,10 @@ async def test_benchmark_refresh_waits_for_every_source_when_one_fails(database,
     persisted: list[str] = []
     real_persist = jobs.persist_scores
 
-    def persist(source_id: str, records: list[ScoreRecord], matcher: Matcher) -> int:
+    def persist(source_id: str, records: list[ScoreRecord], matcher: Matcher, **options: bool) -> int:
         if source_id == "broken":
             raise RuntimeError("database is locked")
-        count = real_persist(source_id, records, matcher)
+        count = real_persist(source_id, records, matcher, **options)
         persisted.append(source_id)
         return count
 
@@ -385,3 +385,152 @@ async def test_benchmark_refresh_waits_for_every_source_when_one_fails(database,
         assert run.status == "partial"
         assert run.message == "Broken: database is locked"
         assert run.stats["ok"] == 1 and run.stats["failed"] == 1
+
+
+# -- A refresh that only partly worked --------------------------------------------------------
+
+
+def _two_metric_source(source_id: str, state: dict) -> type[BenchmarkSource]:
+    class Partial(BenchmarkSource):
+        spec = SourceSpec(
+            id=source_id,
+            name=source_id.title(),
+            homepage="https://example.com",
+            description="",
+            license="test",
+            attribution="test",
+            metrics=(MetricSpec("a", "A", "coding"), MetricSpec("b", "B", "agentic")),
+        )
+
+        async def fetch(self) -> list[ScoreRecord]:
+            self.partial_errors = list(state["errors"])
+            return [ScoreRecord(metric=m, source_model="model", value=state["value"]) for m in state["metrics"]]
+
+    return Partial
+
+
+def _stored_metrics(source_id: str) -> dict[str, float]:
+    with session_scope() as s:
+        rows = s.scalars(select(BenchmarkScore).where(BenchmarkScore.source == source_id))
+        return {r.metric: r.value for r in rows}
+
+
+async def test_a_leaderboard_that_failed_to_load_keeps_its_stored_scores(database, monkeypatch):
+    state = {"metrics": ["a", "b"], "errors": [], "value": 1.0}
+
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return _catalog()
+
+    monkeypatch.setattr(events, "_loop", None)
+    monkeypatch.setattr(jobs, "SOURCES", {"halfway": _two_metric_source("halfway", state)})
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+
+    await jobs.run_job("benchmarks")
+    assert _stored_metrics("halfway") == {"a": 1.0, "b": 1.0}
+
+    # "b" fails to load: "a" is replaced, "b" is kept, and the run says it was partial.
+    state.update(metrics=["a"], errors=["b: HTTP 500"], value=2.0)
+    await jobs.run_job("benchmarks")
+    assert _stored_metrics("halfway") == {"a": 2.0, "b": 1.0}
+    with session_scope() as s:
+        run = s.scalars(
+            select(RefreshRun).where(RefreshRun.kind == "benchmarks").order_by(RefreshRun.id.desc())
+        ).first()
+        assert run is not None
+        assert run.status == "partial"
+        assert "Halfway: partial" in run.message and "b: HTTP 500" in run.message
+        assert run.stats["ok"] == 1 and run.stats["failed"] == 0 and run.stats["partial"] == 1
+
+    # A complete fetch that no longer has "b" is the source dropping it, so its rows go.
+    state.update(errors=[], value=3.0)
+    await jobs.run_job("benchmarks")
+    assert _stored_metrics("halfway") == {"a": 3.0}
+
+
+async def test_arena_reports_the_subsets_it_could_not_load(monkeypatch):
+    async def fetch_rows(config: str, categories: set[str]) -> list[dict]:
+        if config != "text_style_control":
+            raise FetchError("GET https://datasets-server.huggingface.co/filter: HTTP 500")
+        return load("arena/text_style_control.json")
+
+    monkeypatch.setattr(arena, "_fetch_with_warmup", fetch_rows)
+    from vibonomics.benchmarks.base import BenchContext
+    from vibonomics.settings_store import AppSettings
+
+    source = arena.ArenaSource(BenchContext(catalog=_catalog(), settings=AppSettings()))
+    records = await source.fetch()
+    assert {r.metric for r in records} <= {"text", "text_coding"}
+    assert len(source.partial_errors) == 2
+
+    monkeypatch.setattr(
+        arena, "_fetch_with_warmup", lambda config, categories: asyncio.sleep(0, load(f"arena/{config}.json"))
+    )
+    complete = arena.ArenaSource(BenchContext(catalog=_catalog(), settings=AppSettings()))
+    await complete.fetch()
+    assert complete.partial_errors == []
+
+
+# -- Aliases edited while a refresh runs ------------------------------------------------------
+
+
+def _alias(source: str, name: str, canonical_id: str) -> None:
+    with session_scope() as s:
+        s.add(ModelAlias(source=source, source_model=name, canonical_id=canonical_id))
+
+
+def _drop_alias(source: str, name: str) -> None:
+    with session_scope() as s:
+        for alias in s.scalars(select(ModelAlias).where(ModelAlias.source == source, ModelAlias.source_model == name)):
+            s.delete(alias)
+
+
+def test_an_alias_saved_after_a_refresh_started_is_applied_when_its_source_is_stored(database):
+    matcher_built_at_job_start = Matcher(_catalog(("acme/m1", "M1")))
+    _alias("livebench", "Mystery Model", "acme/m1")
+    try:
+        jobs.persist_scores(
+            "livebench",
+            [ScoreRecord(metric="coding", source_model="Mystery Model", value=1.0)],
+            matcher_built_at_job_start,
+        )
+        with session_scope() as s:
+            row = s.scalars(select(BenchmarkScore).where(BenchmarkScore.source == "livebench")).one()
+            assert (row.canonical_id, row.match_method) == ("acme/m1", "operator")
+    finally:
+        _drop_alias("livebench", "Mystery Model")
+
+
+async def test_a_rematch_cannot_hand_one_row_the_match_computed_for_another(database, monkeypatch):
+    catalog = _catalog(("acme/m1", "M1"))
+    refresh_matcher = Matcher(catalog)
+    mystery = ScoreRecord(metric="coding", source_model="Mystery Model", value=1.0)
+    jobs.persist_scores("livebench", [mystery], refresh_matcher)
+    _alias("livebench", "Mystery Model", "acme/m1")
+
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return catalog
+
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+    real_match = Matcher.match
+    refreshed: list[int] = []
+
+    def match_then_a_refresh_lands(self, *args, **kwargs):
+        if not refreshed:
+            refreshed.append(1)
+            # The refresh replaces the source's rows after the rematch read them and before it writes.
+            new = ScoreRecord(metric="coding", source_model="Brand New Model", value=2.0)
+            jobs.persist_scores("livebench", [new, mystery], refresh_matcher)
+        return real_match(self, *args, **kwargs)
+
+    monkeypatch.setattr(Matcher, "match", match_then_a_refresh_lands)
+    try:
+        await jobs.rematch_scores()
+        with session_scope() as s:
+            stored = {
+                r.source_model: (r.canonical_id, r.match_method)
+                for r in s.scalars(select(BenchmarkScore).where(BenchmarkScore.source == "livebench"))
+            }
+        assert stored["Mystery Model"] == ("acme/m1", "operator")
+        assert stored["Brand New Model"] == (None, "unmatched")
+    finally:
+        _drop_alias("livebench", "Mystery Model")

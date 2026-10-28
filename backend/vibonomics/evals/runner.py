@@ -251,7 +251,12 @@ async def _run(run_id: int) -> None:
             _update_progress(run_id, done, total, current)
 
     try:
-        await asyncio.gather(*(one(t, task) for t in targets for task in tasks))
+        # Wait for every task even if one dies outside its own error handling (a full disk, a locked
+        # database): the clients are closed below, and a task still running would use a closed one.
+        outcomes = await asyncio.gather(*(one(t, task) for t in targets for task in tasks), return_exceptions=True)
+        crashed = [o for o in outcomes if isinstance(o, Exception)]
+        for outcome in crashed:
+            log.error("Eval task crashed", exc_info=outcome)
         cancelled = run_id in _cancelled
         summary: dict[str, Any] = {
             "targets": {},
@@ -296,6 +301,8 @@ async def _run(run_id: int) -> None:
             )
         if errors:
             notes.append(f"Tasks that ended in an error ({errors}) are left out of the scores.")
+        if crashed:
+            notes.append(f"{len(crashed)} task(s) failed while storing their result and have none; see the log.")
         if notes:
             summary["note"] = " ".join(notes)
     finally:
@@ -428,12 +435,16 @@ async def _run_task(task: TaskDef, target: Target, settings: AppSettings, judge:
             outcome = await _tools(task, target, usage, transcript)
         else:
             outcome = await _chat(task, target, usage, transcript)
-    except ChatError as exc:
+    except Exception as exc:
+        # A ChatError is the model call failing; anything else (a malformed base URL, a bug) is just as much
+        # this task's error and must not abort the run while its other tasks are still using the clients.
+        if not isinstance(exc, ChatError):
+            log.warning("Eval task %s failed unexpectedly: %s: %s", task.id, type(exc).__name__, exc)
         return {
             "task_id": task.id,
             "category": task.category,
             "status": "error",
-            "error": str(exc)[:1000],
+            "error": (str(exc) if isinstance(exc, ChatError) else f"{type(exc).__name__}: {exc}")[:1000],
             "steps": usage.steps,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,

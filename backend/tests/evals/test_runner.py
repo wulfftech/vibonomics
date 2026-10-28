@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from vibonomics import crypto
@@ -386,6 +387,55 @@ async def test_model_errors_are_reported_and_left_out_of_scores(monkeypatch):
         assert own[(provider_id, MODEL_ID)]["score"] == pytest.approx(97.0)
         assert own[(provider_id, MODEL_ID)]["tasks"] == 2
         assert (gone["provider_id"], gone["model_id"]) not in own
+
+
+class MalformedUrlToolsClient(FakeClient):
+    """A base URL with a typo: httpx raises its own error, which is not a ChatError."""
+
+    async def chat(self, messages, tools=None):
+        if any(t.name == "get_forecast" for t in tools or []):
+            raise httpx.InvalidURL("Invalid non-printable ASCII character in URL")
+        return await super().chat(messages, tools)
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_error_in_one_task_is_that_tasks_error_not_the_runs(monkeypatch):
+    monkeypatch.setattr(runner, "LLMClient", MalformedUrlToolsClient)
+    run_id, _provider_id = _seed()
+    await runner.execute(run_id)
+
+    with session_scope() as session:
+        run = session.get(EvalRun, run_id)
+        results = {r.task_id: r for r in session.query(EvalResult).filter(EvalResult.run_id == run_id)}
+        assert run is not None
+        assert run.status == "done", run.error
+        assert results["tool-pick"].status == "error"
+        assert "InvalidURL" in results["tool-pick"].error
+        assert results["instr-json"].status == "passed"
+        assert results["agentic-fix-mean"].status in {"passed", "partial"}
+
+
+@pytest.mark.asyncio
+async def test_a_task_that_cannot_store_its_result_does_not_stop_the_others(monkeypatch):
+    monkeypatch.setattr(runner, "LLMClient", FakeClient)
+    real_store = runner._store_result
+
+    def store(run_id: int, result: dict) -> None:
+        if result.get("task_id") == "tool-pick":
+            raise RuntimeError("disk is full")
+        real_store(run_id, result)
+
+    monkeypatch.setattr(runner, "_store_result", store)
+    run_id, _provider_id = _seed()
+    await runner.execute(run_id)
+
+    with session_scope() as session:
+        run = session.get(EvalRun, run_id)
+        stored = {r.task_id for r in session.query(EvalResult).filter(EvalResult.run_id == run_id)}
+        assert run is not None
+        assert run.status == "done", run.error
+        assert stored == {"instr-json", "agentic-fix-mean"}
+        assert "1 task(s) failed while storing their result" in run.summary["note"]
 
 
 @pytest.mark.asyncio

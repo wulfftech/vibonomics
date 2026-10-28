@@ -13,6 +13,8 @@ Rules for sources:
   ``source_model``-derived ids. An id with an effort-like suffix removed goes in ``fallback_ids``,
   because the suffix may be part of the model's name ("kimi-k2-thinking", "qwen3-max").
 - Raise ``vibonomics.http.FetchError`` on failure; return [] only when the source is genuinely empty.
+  When some leaderboards load and others do not, return what loaded and append the reasons to
+  ``self.partial_errors`` so the refresh does not delete the stored scores of the ones that failed.
 """
 
 from __future__ import annotations
@@ -82,6 +84,10 @@ class BenchmarkSource:
 
     def __init__(self, ctx: BenchContext):
         self.ctx = ctx
+        # Why part of the source was left out of the last fetch (a leaderboard that failed to load). Empty
+        # means the fetch was complete; otherwise the refresh keeps the stored scores for what is missing
+        # instead of deleting them, and reports the run as partial.
+        self.partial_errors: list[str] = []
 
     async def fetch(self) -> list[ScoreRecord]:
         raise NotImplementedError

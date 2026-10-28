@@ -10,7 +10,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, bindparam, delete, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import events
 from .benchmarks.base import BenchContext, ScoreRecord
@@ -27,12 +28,29 @@ from .settings_store import AppSettings, load_settings
 log = logging.getLogger(__name__)
 
 PROVIDER_TIMEOUT = 300
+BALANCE_TIMEOUT = 60
 _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 KINDS = ("models", "balances", "benchmarks")
 
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+def failure_text(exc: BaseException, timeout: float | None = None) -> str:
+    """What to show for a failed fetch or write.
+
+    ``str(exc)`` is empty for a timeout, which used to leave a run message ending in "Slow: ". A database
+    error carries the statement and its parameters, so only the driver's own message is kept.
+    """
+    if isinstance(exc, SQLAlchemyError):
+        return str(getattr(exc, "orig", None) or type(exc).__name__)
+    text = str(exc)
+    if text:
+        return text
+    if isinstance(exc, TimeoutError):
+        return f"timed out after {timeout:g}s" if timeout else "timed out"
+    return type(exc).__name__
 
 
 _background: set[asyncio.Task[Any]] = set()
@@ -74,9 +92,13 @@ async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | N
             if failed:
                 status = "partial" if stats.get("ok", 0) else "failed"
                 message = "; ".join(stats.get("errors", []))[:2000]
+            elif stats.get("partial", 0):
+                # Every source answered, but at least one left part of its data out.
+                status = "partial"
+                message = "; ".join(stats.get("errors", []))[:2000]
         except Exception as exc:  # the scheduler must survive any single failure
             log.exception("Refresh %s failed", kind)
-            status, message = "failed", f"{type(exc).__name__}: {exc}"
+            status, message = "failed", f"{type(exc).__name__}: {failure_text(exc)}"
         await asyncio.to_thread(_finish_run, run_id, status, message, stats)
         events.publish(
             "refresh.finished",
@@ -97,6 +119,13 @@ def _start_run(kind: str, trigger: str) -> int:
         s.add(run)
         s.flush()
         return run.id
+
+
+def recover_interrupted_runs() -> None:
+    """A run still marked running when the app starts was cut off by a restart and can never finish."""
+    with session_scope() as s:
+        for run in s.scalars(select(RefreshRun).where(RefreshRun.status == "running")):
+            run.status, run.message, run.finished_at = "failed", "Interrupted by a Vibonomics restart.", now()
 
 
 def _finish_run(run_id: int, status: str, message: str | None, stats: dict[str, Any]) -> None:
@@ -131,20 +160,33 @@ async def _refresh_models(run_id: int, provider_ids: set[int] | None = None) -> 
         events.publish("refresh.progress", {"kind": "models", "provider": cfg.name})
         try:
             offers = await asyncio.wait_for(adapter.fetch_models(), PROVIDER_TIMEOUT)
+            # Inside the try: a provider deleted mid-refresh fails here, and must not take the others down.
+            count = await asyncio.to_thread(persist_offers, cfg.id, offers)
         except Exception as exc:
-            msg = f"{type(exc).__name__}: {exc}" if not str(exc).startswith(("GET", "POST")) else str(exc)
+            text = failure_text(exc, PROVIDER_TIMEOUT)
+            msg = text if text.startswith(("GET", "POST")) else f"{type(exc).__name__}: {text}"
             log.warning("Models refresh failed for %s: %s", cfg.name, msg)
             stats["failed"] += 1
             stats["errors"].append(f"{cfg.name}: {msg[:300]}")
             await asyncio.to_thread(_mark_provider, cfg.id, "error", msg[:1000])
             return
-        count = await asyncio.to_thread(persist_offers, cfg.id, offers)
         stats["ok"] += 1
         stats["models"] += count
         await asyncio.to_thread(_mark_provider, cfg.id, "ok", f"{count} models")
 
-    await asyncio.gather(*(one(p) for p in providers))
+    # Wait for every provider even if one task dies, so none is still writing once the job lock is released.
+    results = await asyncio.gather(*(one(p) for p in providers), return_exceptions=True)
+    _record_crashes(results, [p.name for p in providers], stats)
     return stats
+
+
+def _record_crashes(results: list[Any], names: list[str], stats: dict[str, Any]) -> None:
+    """Count the tasks that raised out of their own error handling, so a run reports them as failures."""
+    for name, result in zip(names, results, strict=True):
+        if isinstance(result, BaseException):
+            log.error("Refresh task for %s crashed", name, exc_info=result)
+            stats["failed"] += 1
+            stats["errors"].append(f"{name}: {failure_text(result)[:300]}")
 
 
 def _mark_provider(provider_id: int, status: str, message: str) -> None:
@@ -182,8 +224,10 @@ def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
                 )
                 s.add(row)
                 old_total, old_discount = None, None
+                priced_as_before = False
             else:
                 old_total, old_discount = _total(row.price_input, row.price_output), row.discount or 0
+                priced_as_before = (row.price_input, row.price_output) == (offer.price.input, offer.price.output)
 
             new_total = _total(offer.price.input, offer.price.output)
             new_discount = offer.discount or 0
@@ -224,7 +268,8 @@ def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
                 elif new_total > old_total * 1.01:
                     row.price_drop_since = None
 
-            changed = old_total is None or new_total != old_total or new_discount != (old_discount or 0)
+            # A model with no price has no total to compare, which used to count as a change on every refresh.
+            changed = not priced_as_before or new_discount != (old_discount or 0)
             if changed:
                 s.flush()
                 s.add(
@@ -260,17 +305,22 @@ async def _refresh_balances(run_id: int, provider_ids: set[int] | None = None) -
             return
         events.publish("refresh.progress", {"kind": "balances", "provider": cfg.name})
         try:
-            info = await asyncio.wait_for(adapter.fetch_balance(), 60)
+            info = await asyncio.wait_for(adapter.fetch_balance(), BALANCE_TIMEOUT)
         except Exception as exc:
-            info = BalanceInfo(status="error", message=str(exc)[:500])
+            info = BalanceInfo(status="error", message=failure_text(exc, BALANCE_TIMEOUT)[:500])
+        try:
+            await asyncio.to_thread(_persist_balance, cfg.id, info)
+        except Exception as exc:  # a provider deleted mid-refresh, or a locked database
+            log.warning("Balance for %s could not be saved: %s", cfg.name, failure_text(exc))
+            info = BalanceInfo(status="error", message=f"could not save: {failure_text(exc)}"[:500])
         if info.status == "error":
             stats["failed"] += 1
             stats["errors"].append(f"{cfg.name}: {info.message}")
         else:
             stats["ok"] += 1
-        await asyncio.to_thread(_persist_balance, cfg.id, info)
 
-    await asyncio.gather(*(one(p) for p in providers))
+    results = await asyncio.gather(*(one(p) for p in providers), return_exceptions=True)
+    _record_crashes(results, [p.name for p in providers], stats)
     return stats
 
 
@@ -300,9 +350,10 @@ def _persist_balance(provider_id: int, info: BalanceInfo) -> None:
 async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
     _providers, settings = await asyncio.to_thread(_load_providers_and_settings)
     catalog = await load_catalog()
-    operator_aliases = await asyncio.to_thread(_load_operator_aliases)
-    matcher = Matcher(catalog, operator_aliases)
-    stats: dict[str, Any] = {"ok": 0, "failed": 0, "errors": [], "records": 0, "matched": 0}
+    # The aliases are read again when each source is stored: a refresh can run for minutes, and an alias set
+    # meanwhile must not be overwritten by a matcher built before it existed.
+    matcher = Matcher(catalog, await asyncio.to_thread(_load_operator_aliases))
+    stats: dict[str, Any] = {"ok": 0, "failed": 0, "partial": 0, "errors": [], "records": 0, "matched": 0}
 
     async def one(source_id: str) -> None:
         cls = SOURCES[source_id]
@@ -315,15 +366,23 @@ async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
         events.publish("refresh.progress", {"kind": "benchmarks", "provider": cls.spec.name})
         try:
             records = await asyncio.wait_for(source.fetch(), PROVIDER_TIMEOUT)
-            matched = await asyncio.to_thread(persist_scores, source_id, records, matcher)
+            # A source that skipped part of its data keeps the stored rows of what it skipped.
+            matched = await asyncio.to_thread(
+                persist_scores, source_id, records, matcher, keep_missing_metrics=bool(source.partial_errors)
+            )
         except Exception as exc:
-            log.warning("Benchmark source %s failed: %s", source_id, exc)
+            text = failure_text(exc, PROVIDER_TIMEOUT)
+            log.warning("Benchmark source %s failed: %s", source_id, text)
             stats["failed"] += 1
-            stats["errors"].append(f"{cls.spec.name}: {str(exc)[:300]}")
+            stats["errors"].append(f"{cls.spec.name}: {text[:300]}")
             return
         stats["ok"] += 1
         stats["records"] += len(records)
         stats["matched"] += matched
+        if source.partial_errors:
+            stats["partial"] += 1
+            missing = "; ".join(source.partial_errors)[:250]
+            stats["errors"].append(f"{cls.spec.name}: partial, kept the stored scores for what was missing ({missing})")
 
     # Wait for every source, even after one fails, so none is still writing once the job lock is released.
     results = await asyncio.gather(*(one(sid) for sid in SOURCES), return_exceptions=True)
@@ -331,7 +390,7 @@ async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
         if isinstance(result, BaseException):
             log.error("Benchmark source %s failed", sid, exc_info=result)
             stats["failed"] += 1
-            stats["errors"].append(f"{SOURCES[sid].spec.name}: {str(result)[:300]}")
+            stats["errors"].append(f"{SOURCES[sid].spec.name}: {failure_text(result, PROVIDER_TIMEOUT)[:300]}")
     return stats
 
 
@@ -355,73 +414,121 @@ def _percentiles(values: list[float], higher_is_better: bool) -> list[float]:
     return result
 
 
-def persist_scores(source_id: str, records: list[ScoreRecord], matcher: Matcher) -> int:
+def persist_scores(
+    source_id: str, records: list[ScoreRecord], matcher: Matcher, *, keep_missing_metrics: bool = False
+) -> int:
+    """Replace a source's stored scores with ``records`` and return how many matched a model.
+
+    With ``keep_missing_metrics`` only the metrics present in ``records`` are replaced: a source that could
+    not fetch one of its leaderboards must not wipe the stored scores for it.
+    """
     cls = SOURCES[source_id]
     ts = now()
     rows: dict[tuple[str, str, str], BenchmarkScore] = {}
     metrics = {m.id: m for m in cls.spec.metrics}
+    present = {rec.metric for rec in records if rec.metric in metrics and math.isfinite(rec.value)}
     skipped = 0
-    for rec in records:
-        metric = metrics.get(rec.metric)
-        if metric is None:
-            continue
-        if not math.isfinite(rec.value):  # SQLite stores NaN as NULL, which the NOT NULL column rejects
-            skipped += 1
-            continue
-        effort = rec.effort or matcher.effort(rec.source_model)
-        canonical, method = matcher.match(source_id, rec.source_model, rec.model_ids, rec.fallback_ids)
-        key = (rec.metric, rec.source_model, effort)
-        rows[key] = BenchmarkScore(
-            source=source_id,
-            metric=rec.metric,
-            dimension=metric.dimension,
-            source_model=rec.source_model,
-            effort=effort,
-            canonical_id=canonical,
-            match_method=method,
-            value=rec.value,
-            higher_is_better=metric.higher_is_better,
-            cost_per_task=rec.cost_per_task,
-            tokens_per_task=rec.tokens_per_task,
-            as_of=rec.as_of,
-            url=rec.url,
-            extra={
-                **rec.extra,
-                "model_ids": [i for i in rec.model_ids if i],
-                "fallback_ids": [i for i in rec.fallback_ids if i],
-            },
-            fetched_at=ts,
-        )
-    if skipped:
-        log.warning("Benchmark source %s: skipped %d non-finite values", source_id, skipped)
-    by_metric: dict[str, list[BenchmarkScore]] = defaultdict(list)
-    for row in rows.values():
-        by_metric[row.metric].append(row)
-    for metric_rows in by_metric.values():
-        pcts = _percentiles([r.value for r in metric_rows], metric_rows[0].higher_is_better)
-        for row, pct in zip(metric_rows, pcts, strict=True):
-            row.percentile = pct
     with session_scope() as s:
-        s.execute(delete(BenchmarkScore).where(BenchmarkScore.source == source_id))
+        # The delete comes first so this transaction holds the write lock from the start. An alias saved while
+        # the source is stored is then either committed before the aliases are read below, or waits and is
+        # applied by its own rematch to the rows stored here; it cannot fall between the two.
+        stmt = delete(BenchmarkScore).where(BenchmarkScore.source == source_id)
+        if keep_missing_metrics:
+            stmt = stmt.where(BenchmarkScore.metric.in_(present))
+        s.execute(stmt)
+        matcher.operator_aliases = {(a.source, a.source_model): a.canonical_id for a in s.scalars(select(ModelAlias))}
+        for rec in records:
+            metric = metrics.get(rec.metric)
+            if metric is None:
+                continue
+            if not math.isfinite(rec.value):  # SQLite stores NaN as NULL, which the NOT NULL column rejects
+                skipped += 1
+                continue
+            effort = rec.effort or matcher.effort(rec.source_model)
+            canonical, method = matcher.match(source_id, rec.source_model, rec.model_ids, rec.fallback_ids)
+            key = (rec.metric, rec.source_model, effort)
+            rows[key] = BenchmarkScore(
+                source=source_id,
+                metric=rec.metric,
+                dimension=metric.dimension,
+                source_model=rec.source_model,
+                effort=effort,
+                canonical_id=canonical,
+                match_method=method,
+                value=rec.value,
+                higher_is_better=metric.higher_is_better,
+                cost_per_task=rec.cost_per_task,
+                tokens_per_task=rec.tokens_per_task,
+                as_of=rec.as_of,
+                url=rec.url,
+                extra={
+                    **rec.extra,
+                    "model_ids": [i for i in rec.model_ids if i],
+                    "fallback_ids": [i for i in rec.fallback_ids if i],
+                },
+                fetched_at=ts,
+            )
+        if skipped:
+            log.warning("Benchmark source %s: skipped %d non-finite values", source_id, skipped)
+        by_metric: dict[str, list[BenchmarkScore]] = defaultdict(list)
+        for row in rows.values():
+            by_metric[row.metric].append(row)
+        for metric_rows in by_metric.values():
+            pcts = _percentiles([r.value for r in metric_rows], metric_rows[0].higher_is_better)
+            for row, pct in zip(metric_rows, pcts, strict=True):
+                row.percentile = pct
         s.add_all(rows.values())
     return sum(1 for r in rows.values() if r.canonical_id)
 
 
 async def rematch_scores() -> int:
-    """Re-run matching for stored scores (after alias edits) without refetching."""
+    """Re-run matching for stored scores (after alias edits) without refetching.
+
+    Each update is addressed by the row's natural key, not its id: a refresh can replace a source's rows
+    between the read and the write, and SQLite reuses ids, so an update by id could land on another row.
+    """
     catalog = await load_catalog()
     operator_aliases = await asyncio.to_thread(_load_operator_aliases)
     matcher = Matcher(catalog, operator_aliases)
+    table = BenchmarkScore.__table__
+    statement = (
+        update(table)
+        .where(
+            and_(
+                table.c.source == bindparam("key_source"),
+                table.c.metric == bindparam("key_metric"),
+                table.c.source_model == bindparam("key_model"),
+                table.c.effort == bindparam("key_effort"),
+            )
+        )
+        .values(canonical_id=bindparam("new_canonical"), match_method=bindparam("new_method"))
+    )
 
     def _apply() -> int:
         matched = 0
         with session_scope() as s:
-            for row in s.scalars(select(BenchmarkScore)):
-                extra = row.extra or {}
-                hints, fallback = extra.get("model_ids", []), extra.get("fallback_ids", [])
-                cid, method = matcher.match(row.source, row.source_model, hints, fallback)
-                row.canonical_id, row.match_method = cid, method
+            stored = s.execute(
+                select(table.c.source, table.c.metric, table.c.source_model, table.c.effort, table.c.extra)
+            ).all()
+            changes = []
+            for source, metric, source_model, effort, extra in stored:
+                extra = extra or {}
+                cid, method = matcher.match(
+                    source, source_model, extra.get("model_ids", []), extra.get("fallback_ids", [])
+                )
                 matched += 1 if cid else 0
+                changes.append(
+                    {
+                        "key_source": source,
+                        "key_metric": metric,
+                        "key_model": source_model,
+                        "key_effort": effort,
+                        "new_canonical": cid,
+                        "new_method": method,
+                    }
+                )
+            if changes:
+                s.execute(statement, changes)
         return matched
 
     return await asyncio.to_thread(_apply)

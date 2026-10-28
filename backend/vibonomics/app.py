@@ -18,7 +18,7 @@ from .config import get_config
 from .db import init_db, session_scope
 from .evals import runner
 from .http import close_client
-from .jobs import KINDS, run_job, spawn
+from .jobs import KINDS, recover_interrupted_runs, run_job, spawn
 from .provider_service import seed_providers
 from .settings_store import load_settings
 
@@ -39,6 +39,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         seed_providers(s)
         app_settings = load_settings(s)
     runner.recover_interrupted()
+    recover_interrupted_runs()
     if not await sandbox_guard.refresh():
         spawn(sandbox_guard.keep_trying())
     scheduler.start(app_settings)
