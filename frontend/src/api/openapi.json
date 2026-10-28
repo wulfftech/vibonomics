@@ -172,6 +172,48 @@
         }
       }
     },
+    "/api/models/value": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Models Value",
+        "description": "Price, score and rank the named models for one task size, and pick the best value.",
+        "operationId": "models_value_api_models_value_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValueResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/providers/types": {
       "get": {
         "tags": [
@@ -4490,6 +4532,519 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "ValueModelRef": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Provider",
+            "description": "A provider type such as `openrouter`, or a configured provider's name"
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Model",
+            "description": "The model id as that provider lists it, e.g. `openai/gpt-5.4-mini:batch`"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "model"
+        ],
+        "title": "ValueModelRef"
+      },
+      "ValueRequest": {
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ValueModelRef"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Models"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile",
+            "description": "A usage profile id; the operator's default when neither this nor task is given"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ValueTaskIn"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The size of one task; takes precedence over profile"
+          },
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "composite",
+              "intelligence",
+              "coding",
+              "agentic"
+            ],
+            "title": "Dimension",
+            "default": "composite"
+          },
+          "min_score": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Score",
+            "description": "A model scoring below this is never picked"
+          },
+          "alternatives": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 0.0,
+            "title": "Alternatives",
+            "description": "Also suggest up to this many models the request did not name, from the same providers, that score at least as well as the pick and give better value (with no pick, the best values at or above min_score). Free offers are left out.",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "models"
+        ],
+        "title": "ValueRequest"
+      },
+      "ValueResponse": {
+        "properties": {
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "scores_as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scores As Of"
+          },
+          "task": {
+            "$ref": "#/components/schemas/ValueTaskOut"
+          },
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "composite",
+              "intelligence",
+              "coding",
+              "agentic"
+            ],
+            "title": "Dimension"
+          },
+          "min_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Score"
+          },
+          "free_model_cost": {
+            "type": "number",
+            "title": "Free Model Cost"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ValueRow"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "pick": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ValueRow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "alternatives": {
+            "items": {
+              "$ref": "#/components/schemas/ValueRow"
+            },
+            "type": "array",
+            "title": "Alternatives"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generated_at",
+          "scores_as_of",
+          "task",
+          "dimension",
+          "min_score",
+          "free_model_cost",
+          "models",
+          "pick",
+          "reason",
+          "alternatives"
+        ],
+        "title": "ValueResponse"
+      },
+      "ValueRow": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "found": {
+            "type": "boolean",
+            "title": "Found"
+          },
+          "eligible": {
+            "type": "boolean",
+            "title": "Eligible",
+            "default": false
+          },
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rank"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "provider_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Name"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "canonical_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Id"
+          },
+          "active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active"
+          },
+          "batch": {
+            "type": "boolean",
+            "title": "Batch",
+            "default": false
+          },
+          "is_free": {
+            "type": "boolean",
+            "title": "Is Free",
+            "default": false
+          },
+          "price": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriceOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "list_price": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriceOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "discount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount"
+          },
+          "discount_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Note"
+          },
+          "discount_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Until"
+          },
+          "discount_since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Since"
+          },
+          "new_discount": {
+            "type": "boolean",
+            "title": "New Discount",
+            "default": false
+          },
+          "price_drop": {
+            "type": "boolean",
+            "title": "Price Drop",
+            "default": false
+          },
+          "batch_discount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Discount",
+            "description": "The provider's own batch API discount, for a direct offer"
+          },
+          "prices_as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prices As Of"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score",
+            "description": "The requested dimension's score, 0-100"
+          },
+          "scores": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoresOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "task_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Cost",
+            "description": "Estimated USD per task at the current price; 0 when free"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value",
+            "description": "Score points per dollar per task; a free model is costed at free_model_cost, as in the UI"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "model",
+          "found"
+        ],
+        "title": "ValueRow"
+      },
+      "ValueTaskIn": {
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "maximum": 100000000.0,
+            "minimum": 0.0,
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "maximum": 100000000.0,
+            "minimum": 0.0,
+            "title": "Output Tokens"
+          },
+          "cache_hit_rate": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Cache Hit Rate",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_tokens",
+          "output_tokens"
+        ],
+        "title": "ValueTaskIn"
+      },
+      "ValueTaskOut": {
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens"
+          },
+          "cache_hit_rate": {
+            "type": "number",
+            "title": "Cache Hit Rate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "profile",
+          "input_tokens",
+          "output_tokens",
+          "cache_hit_rate"
+        ],
+        "title": "ValueTaskOut"
       },
       "WindowOut": {
         "properties": {
