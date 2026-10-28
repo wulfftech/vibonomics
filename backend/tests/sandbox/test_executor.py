@@ -132,10 +132,11 @@ def test_processes_a_run_starts_do_not_outlive_it(rest, timeout, timed_out):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX resource limits")
-def test_process_count_is_not_limited_per_user():
+def test_process_count_is_not_limited_per_user(monkeypatch):
     """RLIMIT_NPROC counts every process the user owns, so other runs' processes would fail this one."""
     import resource
 
+    monkeypatch.delenv(executor.RUN_UIDS_ENV, raising=False)  # with run uids, each run has a limit of its own
     code = "import resource\nprint(resource.getrlimit(resource.RLIMIT_NPROC)[0])\n"
     result = executor.run({"nproc.py": code}, ["python", "nproc.py"])
     assert int(result.stdout) == resource.getrlimit(resource.RLIMIT_NPROC)[0]

@@ -162,8 +162,9 @@ not offered as judges, and free models are labelled because they rate-limit ofte
 judge still completes, scored by the deterministic checks, and says so.
 
 **Sandbox.** Model-written code never runs beside your keys. The compose file starts `vibonomics-sandbox`
-with no network at all, a read-only filesystem, no capabilities, a non-root user and limits on CPU, memory
-and processes. The app reaches it through a Unix socket on a small in-memory volume they share, so code
+with no network at all, a read-only filesystem and limits on CPU, memory and processes. Its server runs as
+root with only the capabilities to switch user (`SETUID`, `SETGID`, `CHOWN`), and every run of test code
+starts under its own unprivileged uid, so code that outlives its run cannot touch the next one. The app reaches it through a Unix socket on a small in-memory volume they share, so code
 under test cannot call the app, the host or the internet.
 
 If your Docker host cannot share a Unix socket between containers, add the TCP layout in `.env`:
@@ -257,6 +258,7 @@ Environment variables for the app and the compose stack:
 | `VIBONOMICS_SANDBOX_SOCKET` | empty | on the sidecar: serve on this Unix socket instead of TCP port `VIBONOMICS_SANDBOX_PORT` (`2290`) |
 | `VIBONOMICS_SANDBOX_GUARD` | `on` | refuse requests that reach the app from a TCP sidecar's network |
 | `VIBONOMICS_SANDBOX_TOKEN` | empty | shared token between app and sidecar |
+| `VIBONOMICS_SANDBOX_RUN_UIDS` | `65530,65531` in compose | on the sidecar, which runs as root: the unprivileged uids test code is started under, one per concurrent run. Set in `docker-compose.yml`, not `.env` |
 | `VIBONOMICS_STATIC_DIR` | packaged UI | override the built frontend location |
 | `VIBONOMICS_LOG_LEVEL` | `info` | `debug`, `info`, `warning` |
 | `PUID`, `PGID`, `UMASK`, `TZ` | `1000`, `1000`, `002`, `Etc/UTC` | file ownership and time zone inside the container |

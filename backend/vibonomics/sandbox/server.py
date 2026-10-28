@@ -6,7 +6,9 @@ and serves it on a Unix socket in a volume shared with the app (``VIBONOMICS_SAN
 ``VIBONOMICS_SANDBOX_PORT`` (2290), for an internal-only network.
 
 It only ever touches a fresh temp directory, so it works with a read-only root filesystem plus a
-tmpfs at ``/tmp``.
+tmpfs at ``/tmp``. The compose service starts it as root with three capabilities and
+``VIBONOMICS_SANDBOX_RUN_UIDS``, so each run executes under an unprivileged uid of its own (see
+``executor.py``); without that variable it drops to ``VIBONOMICS_SANDBOX_UID`` (65534) and all runs share it.
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ def create_app() -> FastAPI:
         if executor.workspace_size(body.files) > MAX_REQUEST_BYTES:
             raise HTTPException(status_code=413, detail="Workspace too large")
         if _semaphore is None:
-            _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+            _semaphore = asyncio.Semaphore(min(MAX_CONCURRENT, len(executor.run_uids()) or MAX_CONCURRENT))
         async with _semaphore:
             result = await asyncio.to_thread(executor.run, body.files, body.command, body.timeout, cwd=body.cwd)
         return RunResponse(**result.to_dict())
@@ -108,10 +110,19 @@ def main() -> None:
         sys.exit(check())
     logging.basicConfig(level="INFO")
     if os.name == "posix" and os.geteuid() == 0:
-        try:  # the compose service drops privileges; this keeps a manual `docker run` safer too
-            os.setuid(int(os.environ.get("VIBONOMICS_SANDBOX_UID", "65534")))
-        except (OSError, ValueError):
-            log.warning("Could not drop privileges; the sandbox is running as root")
+        if executor.run_uids():
+            # Root with CAP_SETUID/SETGID/CHOWN and nothing else, so each run can be started under a uid of its
+            # own. Refuse to serve if that does not work, rather than leave every task ungraded.
+            problem = executor.selftest()
+            if problem:
+                log.critical("Run uids %s do not work: %s", executor.run_uids(), problem)
+                sys.exit(1)
+            log.info("Running as root so each run starts under its own uid (%s)", executor.run_uids())
+        else:
+            try:  # without run uids, keep a manual `docker run` as an unprivileged user
+                os.setuid(int(os.environ.get("VIBONOMICS_SANDBOX_UID", "65534")))
+            except (OSError, ValueError):
+                log.warning("Could not drop privileges; the sandbox is running as root")
     socket_path = _socket_path()
     if socket_path:
         uvicorn.run(create_app(), uds=socket_path, log_level="info")

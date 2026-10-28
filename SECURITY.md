@@ -35,8 +35,12 @@ acknowledgement within a few days. There is no bounty.
 ## Threat model for the sandbox
 
 The sandbox exists because Vibonomics runs code written by a language model. It is a separate container
-with a read-only root filesystem, a tmpfs for `/tmp`, no Linux capabilities, a non-root user, and limits
-on memory, CPU and process count. It has no provider keys and cannot reach the app's database.
+with a read-only root filesystem, a tmpfs for `/tmp`, and limits on memory, CPU and process count. Its server
+runs as root with three capabilities (`SETUID`, `SETGID`, `CHOWN`) and `no-new-privileges`, and starts each
+run of test code under one of two unprivileged uids (`VIBONOMICS_SANDBOX_RUN_UIDS`). The code never runs as
+root, has no capabilities, and shares its uid with neither the server nor the other run, so a process it
+leaves behind is killed by uid when the run ends and cannot rewrite a later run's files or replace the
+socket. Concurrent runs still share `/tmp`'s 256 MB, so one can fill it. It has no provider keys and cannot reach the app's database.
 
 In the default compose layout it has no network at all: the app reaches it through a Unix socket on a
 small in-memory volume they share, which is the only thing mounted. Code under test cannot call the

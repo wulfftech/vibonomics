@@ -47,31 +47,44 @@ services:
     restart: unless-stopped
 
   # Executes model-written code during tests. Isolated: no network at all (the app reaches it through
-  # a Unix socket on a shared in-memory volume), no secrets, no /config, read-only filesystem,
-  # non-root, capped CPU/memory/processes. To use TCP on an internal network instead, add
-  # docker/compose.sandbox-tcp.yml (see .env.example).
+  # a Unix socket on a shared in-memory volume), no secrets, no /config, read-only filesystem, capped
+  # CPU/memory/processes. To use TCP on an internal network instead, add docker/compose.sandbox-tcp.yml
+  # (see .env.example).
+  #
+  # The server runs as root with three capabilities, so it can start every run under one of the two
+  # unprivileged uids in VIBONOMICS_SANDBOX_RUN_UIDS, own that run's files as the uid, and kill and clean up
+  # by uid. Code under test never runs as root, and cannot touch the server, the socket (the volume below is
+  # root's) or another run's files. When all runs shared the server's uid, a process that started its own
+  # session survived its run and could rewrite later runs' workspaces, hidden tests included.
   sandbox:
     build:
       context: .
       dockerfile: docker/Dockerfile
     image: vibonomics:local
     container_name: vibonomics-sandbox
-    command: ["python", "-m", "vibonomics", "sandbox"]
+    # Not the image's entrypoint: that drops root to PUID and wants /config, neither of which applies here.
+    entrypoint: ["python", "-m", "vibonomics", "sandbox"]
     # An init as PID 1 reaps processes a test orphans; without it they stay as zombies under the
     # server and count against pids_limit until the container restarts.
     init: true
     environment:
       VIBONOMICS_SANDBOX_SOCKET: /run/vibonomics-sandbox/sandbox.sock
       VIBONOMICS_SANDBOX_TOKEN: "${VIBONOMICS_SANDBOX_TOKEN:-}"
+      # One uid per concurrent run (the server allows two at once).
+      VIBONOMICS_SANDBOX_RUN_UIDS: "65530,65531"
     volumes:
       - sandbox-socket:/run/vibonomics-sandbox
     network_mode: none
-    user: "65534:65534"
+    user: "0:0"
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
@@ -86,9 +99,10 @@ services:
     restart: unless-stopped
 
 volumes:
-  # In memory, and writable only by the sandbox's user, which creates the socket in it.
+  # In memory, and writable only by root: the sandbox server creates the socket in it, and the uids code
+  # under test runs as cannot remove or replace it.
   sandbox-socket:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: "size=1m,uid=65534,gid=65534,mode=0755"
+      o: "size=1m,uid=0,gid=0,mode=0755"

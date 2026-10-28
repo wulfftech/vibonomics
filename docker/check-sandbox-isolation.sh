@@ -44,6 +44,37 @@ assert result is not None and result.exit_code == 0 and result.stdout.strip() ==
   echo "ok   $1: the app runs code in the sandbox"
 }
 
+# Code under test must not run as root, or as the server's own user, and must not be able to replace the
+# socket the app talks to.
+code_runs_unprivileged() {
+  docker compose exec -T -u 1000:1000 vibonomics python -c '
+import asyncio
+import textwrap
+
+from vibonomics.evals import sandbox_client
+from vibonomics.settings_store import AppSettings
+
+code = textwrap.dedent("""
+    import os
+    status = dict(line.split(":", 1) for line in open("/proc/self/status") if ":" in line)
+    try:
+        os.unlink("/run/vibonomics-sandbox/sandbox.sock")
+        socket = "unlinked"
+    except OSError:
+        socket = "kept"
+    print(os.getuid(), os.geteuid(), os.getgid(), len(os.getgroups()), status["CapEff"].strip(), socket)
+""")
+settings = AppSettings()
+settings.evals.sandbox_mode = "sidecar"
+result = asyncio.run(sandbox_client.run_code({"main.py": code}, ["python", "main.py"], 20, settings))
+assert result is not None and result.exit_code == 0, result
+uid, euid, gid, groups, caps, socket = result.stdout.split()
+assert uid == euid == gid and int(uid) in (65530, 65531), result.stdout
+assert groups == "0" and set(caps) == {"0"} and socket == "kept", result.stdout
+' || fail "$1: test code does not run as an unprivileged uid of its own"
+  echo "ok   $1: test code runs as its own unprivileged uid and cannot touch the socket"
+}
+
 users_reach_app() {
   docker compose exec -T vibonomics python -c '
 import urllib.request
@@ -55,6 +86,7 @@ assert urllib.request.urlopen("http://127.0.0.1:2289/ping", timeout=5).read() ==
 echo "== socket layout (default)"
 up
 app_runs_code socket
+code_runs_unprivileged socket
 app_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' vibonomics)"
 docker compose exec -T sandbox python - $app_ip <<'EOF' || fail "socket: the sandbox has a network"
 import socket
@@ -74,6 +106,7 @@ echo "== TCP layout (docker/compose.sandbox-tcp.yml)"
 export COMPOSE_FILE=docker-compose.yml:docker/compose.sandbox-tcp.yml
 up
 app_runs_code tcp
+code_runs_unprivileged tcp
 docker compose exec -T sandbox python - <<'EOF' || fail "tcp: the app served a request from the sandbox"
 import urllib.error
 import urllib.request
