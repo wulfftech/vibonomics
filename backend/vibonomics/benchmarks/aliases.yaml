@@ -3,7 +3,7 @@
 # that don't correspond to a single model). Operators can add their own overrides in the UI.
 #
 # Only add entries the automatic matcher gets wrong or can't find, and only for models people still
-# compare. Checked against models.dev on 2026-10-24.
+# compare. Checked against models.dev on 2026-10-28.
 #
 # <source id>:
 #   "<source model name>": "<creator>/<model>"
@@ -17,6 +17,15 @@ arena:
   "Dola Seed 2.0 Pro": bytedance-seed/seed-2.0-pro
   # models.dev also lists a "Devstral 2 (latest)" alias, which makes the name ambiguous.
   "Devstral 2": mistral/devstral-2512
+  # Dated previews and releases: the date in the name is the date in the catalogue id.
+  "Gemini 2.5 Flash-Lite Preview (Non-Thinking, 09-2025)": google/gemini-2.5-flash-lite-preview-09-2025
+  "Gemini 2.5 Flash-Lite Preview (Thinking, 06-17)": google/gemini-2.5-flash-lite-preview-06-17
+  "Kimi K2 Preview (0711)": moonshotai/kimi-k2
+  "Kimi K2 Preview (0905)": moonshotai/kimi-k2-0905
+  "Mistral Large 2 (2407)": mistral/mistral-large-2407
+  # The catalogue drops the version suffix because there is only one release.
+  "Mixtral 8x22B Instruct v0.1": mistral/mixtral-8x22b-instruct
+  "Llama 3.1 Nemotron Ultra 253B v1": nvidia/llama-3.1-nemotron-ultra-253b
   # Multi-agent system, not a single model.
   "Grok 4.20 Multi-Agent Beta (0309)": null
   # Unreleased experimental endpoints.
@@ -32,7 +41,6 @@ arena:
 
 epoch:
   "GPT-4o (Nov 2024)": openai/gpt-4o-2024-11-20
-  "gpt-4o-2024-11-20": openai/gpt-4o-2024-11-20
   # 2024 models whose names collapse onto different catalogue entries.
   "Ministral 3B": null
   "Qwen2.5-72B": null

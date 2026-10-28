@@ -13,7 +13,8 @@ from sqlalchemy import select
 from vibonomics import events, jobs
 from vibonomics.benchmarks import arena, artificial_analysis, epoch, livebench, openrouter_datasets, terminal_bench
 from vibonomics.benchmarks.base import BenchmarkSource, MetricSpec, ScoreRecord, SourceSpec
-from vibonomics.benchmarks.matching import Matcher, split_effort
+from vibonomics.benchmarks.matching import Matcher, curated_aliases, split_effort
+from vibonomics.benchmarks.registry import SOURCES
 from vibonomics.catalog.modelsdev import ModelsDevCatalog
 from vibonomics.db import init_db, session_scope
 from vibonomics.http import FetchError
@@ -274,6 +275,36 @@ def test_matcher_strips_effort_words_only_when_the_full_name_fails():
         "moonshotai/kimi-k2",
         "id",
     )
+
+
+def test_a_full_dated_name_needs_no_curated_alias():
+    matcher = Matcher(_catalog(("openai/gpt-4o", "GPT-4o"), ("openai/gpt-4o-2024-11-20", "GPT-4o (2024-11-20)")))
+    assert matcher.match("epoch", "gpt-4o-2024-11-20") == ("openai/gpt-4o-2024-11-20", "name")
+
+
+CURATED_ARENA = {
+    "Gemini 2.5 Flash-Lite Preview (Non-Thinking, 09-2025)": "google/gemini-2.5-flash-lite-preview-09-2025",
+    "Gemini 2.5 Flash-Lite Preview (Thinking, 06-17)": "google/gemini-2.5-flash-lite-preview-06-17",
+    "Kimi K2 Preview (0711)": "moonshotai/kimi-k2",
+    "Kimi K2 Preview (0905)": "moonshotai/kimi-k2-0905",
+    "Mistral Large 2 (2407)": "mistral/mistral-large-2407",
+    "Mixtral 8x22B Instruct v0.1": "mistral/mixtral-8x22b-instruct",
+    "Llama 3.1 Nemotron Ultra 253B v1": "nvidia/llama-3.1-nemotron-ultra-253b",
+}
+
+
+def test_curated_arena_aliases_reach_their_catalogue_ids():
+    matcher = Matcher(_catalog(*[(cid, cid.split("/", 1)[1]) for cid in CURATED_ARENA.values()]))
+    for name, cid in CURATED_ARENA.items():
+        assert matcher.match("arena", name) == (cid, "curated"), name
+        assert matcher.match("arena", name.lower()) == (cid, "curated"), name
+
+
+def test_curated_aliases_name_a_known_source_and_a_creator_slash_model():
+    for source, aliases in curated_aliases().items():
+        assert source in SOURCES, source
+        for name, target in aliases.items():
+            assert target is None or target.count("/") == 1, (source, name, target)
 
 
 # -- Refresh ----------------------------------------------------------------------------------
