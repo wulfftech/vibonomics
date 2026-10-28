@@ -1,32 +1,31 @@
-import { Alert, Anchor, Button, Card, Code, CopyButton, Group, Stack, Text, Title, Tooltip } from '@mantine/core';
+import { Alert, Anchor, Button, Card, Code, Group, Stack, Text, Title, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Check, CircleAlert, Copy } from 'lucide-react';
+import { Check, CircleAlert, Copy, X } from 'lucide-react';
 import { Link } from 'react-router';
 import { useProviders } from '../../api/providers';
 import { useClaudeSubscription, useClearClaudeSnapshot, useRotateClaudeToken } from '../../api/subscription';
 import { ErrorState, LoadingState } from '../../components/DataState';
 import { SubscriptionDetails } from '../../components/models/SubscriptionDetails';
 import { claudeUsage } from '../../lib/claudeUsage';
+import { useCopyText } from '../../lib/clipboard';
 import { relativeTime } from '../../lib/format';
 
 function CopyCode({ value, label }: { value: string; label: string }) {
+  const { copied, failed, copy } = useCopyText(2000);
   return (
     <Group gap="xs" justify="flex-end">
-      <CopyButton value={value} timeout={2000}>
-        {({ copied, copy }) => (
-          <Tooltip label={copied ? 'Copied' : `Copy ${label}`} withArrow>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={copied ? <Check size={14} /> : <Copy size={14} />}
-              onClick={copy}
-              aria-label={`Copy ${label}`}
-            >
-              {copied ? 'Copied' : 'Copy'}
-            </Button>
-          </Tooltip>
-        )}
-      </CopyButton>
+      <Tooltip label={copied ? 'Copied' : failed ? "Couldn't copy" : `Copy ${label}`} withArrow>
+        <Button
+          variant="light"
+          color={failed ? 'red' : undefined}
+          size="xs"
+          leftSection={copied ? <Check size={14} /> : failed ? <X size={14} /> : <Copy size={14} />}
+          onClick={(event) => void copy(value, event.currentTarget.parentElement ?? undefined)}
+          aria-label={`Copy ${label}`}
+        >
+          {copied ? 'Copied' : failed ? 'Failed' : 'Copy'}
+        </Button>
+      </Tooltip>
     </Group>
   );
 }
