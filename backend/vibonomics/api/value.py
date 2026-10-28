@@ -230,7 +230,9 @@ def _sort_key(entry: _Scored) -> tuple[float, float, float, int]:
 
 def _describe(entry: _Scored) -> str:
     row = entry.row
-    if row.is_free:
+    # A row has no value when it is infinite, which also holds for an offer with a zero price that is not flagged
+    # free, such as a subscription plan.
+    if row.is_free or row.value is None:
         return f"{row.score:g} for nothing"
     return f"{row.score:g} for ${row.task_cost:.4f} a task, {row.value:,.0f} points per dollar"
 

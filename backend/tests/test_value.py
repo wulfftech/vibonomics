@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from vibonomics.app import create_app
 from vibonomics.config import get_config
@@ -174,6 +174,45 @@ def test_a_free_model_is_costed_like_the_ui(client):
     assert free["value"] == pytest.approx(61 / assumed, rel=1e-6)
     assert data["pick"]["model"] == "acme/free-61:free"
     assert "61 for nothing" in data["reason"]
+
+
+def test_an_offer_with_a_zero_price_that_is_not_flagged_free_can_win(client):
+    # A subscription plan, such as the GLM Coding Plan, has no per-token price but is not marked free. Its value is
+    # infinite, which the response leaves out; describing the pick must not need it.
+    canonical = "value-test/plan-80"
+    with session_scope() as session:
+        provider = session.scalars(select(ProviderConfig).where(ProviderConfig.name == PROVIDER)).one()
+        session.add(
+            Model(
+                provider_config_id=provider.id,
+                model_id="acme/plan-80",
+                name="acme/plan-80",
+                canonical_id=canonical,
+                price_input=0.0,
+                price_output=0.0,
+                active=True,
+                is_free=False,
+            )
+        )
+        session.add(
+            BenchmarkScore(
+                source="epoch",
+                metric="eci",
+                dimension="intelligence",
+                source_model="value-test-acme/plan-80",
+                canonical_id=canonical,
+                value=80,
+                percentile=80,
+            )
+        )
+    try:
+        data = _ask(client, ["acme/plan-80", "acme/cheap-60:batch"], task=TASK)
+    finally:
+        with session_scope() as session:
+            session.execute(delete(BenchmarkScore).where(BenchmarkScore.canonical_id == canonical))
+    assert data["pick"]["model"] == "acme/plan-80"
+    assert (data["pick"]["task_cost"], data["pick"]["value"]) == (0.0, None)
+    assert "80 for nothing" in data["reason"]
 
 
 def test_alternatives_score_as_well_and_give_better_value(client):
