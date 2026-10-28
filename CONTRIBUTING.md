@@ -70,6 +70,9 @@ If you changed a router or a pydantic schema, run `npm run gen:api` and commit t
   environment variables, not in code. Vibonomics is published for other people to run.
 - **Pricing failures degrade.** A scraping change must fall back to models.dev prices and leave
   `pricing_page_error` on the offer. Never let a page change break a refresh.
+- **Refreshes are serialised per kind.** `run_job` returns without doing anything when that kind is
+  already running, so a set of providers must go in one call (`POST /api/providers/refresh` with
+  `provider_ids`). Looping one request per provider looks right and silently refreshes only the first.
 - **Licences are honest.** A new benchmark source needs its real licence and attribution in
   `SourceSpec`, and data that must stay opt-in stays opt-in.
 

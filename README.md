@@ -25,7 +25,8 @@ on Windows (development) and Linux (Docker) only.
   history is kept, so a model that is new, discounted, or newly cheaper is marked as such.
 - **Balances where they exist.** Credit left (DeepSeek, Moonshot, Chutes), a prepaid balance from a
   management key (OpenRouter, xAI, Requesty), spend from an admin API (OpenAI, Anthropic orgs), Claude
-  subscription windows, or a stated "not exposed by the API" with a link to the console.
+  subscription windows, or a stated "not exposed by the API" with a link to the console. One card per
+  vendor, each with its own refresh button that re-fetches only that vendor's providers.
 - **Scores from named sources.** Terminal-Bench 4.0, Arena (text, Code Arena and Agent Arena) and the
   Epoch AI hub are on by default. OpenRouter's datasets, LiveBench and Artificial Analysis are opt-in.
   Each number keeps its source, licence and date.
@@ -34,7 +35,8 @@ on Windows (development) and Linux (Docker) only.
   are costed at a configurable stand-in price so "free" alone does not top the list.
 - **A sortable table.** Search, quick filters (free, best value, new, discounted, scored, tool calling,
   testable), grouping by provider, creator, model, price band or value tier, and copy-ready model IDs.
-  Where several providers sell the same model, the canonical model id groups them.
+  Where several providers sell the same model, the canonical model id groups them. OpenCode's two
+  catalogues are folded: a model both Console and Go list appears once, marked **also on Go**.
 - **Your own tests.** Pick models, pick a judge model, and run agentic coding, tool-use,
   instruction-following and accuracy tasks. Coding tasks run in the sandbox and are graded by real unit
   tests; the judge scores code quality and writes a short assessment per model.
@@ -225,6 +227,19 @@ plan's windows sit above a line saying Console credit is only visible in the con
 providers underneath, because their catalogues differ (Go covers a subset of Console's models) and each
 needs its own key. Where both list the same model at the same per-token rate, the table shows one row
 marked **also on Go** rather than the same model twice.
+
+## Refreshing
+
+The **Refresh** menu on the Models page runs a whole kind — models and prices, balances, or benchmarks —
+across every enabled provider. Each balance card also has its own refresh button, which re-fetches only
+that card's providers: Anthropic's card refreshes Anthropic, OpenCode's refreshes both Console and Go,
+and a provider with its own card refreshes itself.
+
+A card sends one request for its whole set (`POST /api/providers/refresh` with `provider_ids`), because
+the refresh jobs are serialised per kind: two concurrent single-provider calls would leave the second
+waiting on the lock and silently do nothing. `POST /api/providers/{id}/refresh` remains for a single
+provider and delegates to the same path. A single-provider run is quiet unless it fails; the card's own
+spinner and timestamp are the feedback.
 
 ## Configuration
 

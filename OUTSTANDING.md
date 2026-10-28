@@ -100,6 +100,16 @@ mapping is obvious. Do this with the source's licence and attribution in mind, a
 
 ## Not outstanding (checked, so they do not get re-raised)
 
+- **Three socket tests cannot pass on Windows.** `tests/sandbox/test_isolation.py` fails
+  `test_code_runs_through_the_socket`, `test_healthcheck_uses_the_socket` and
+  `test_healthcheck_fails_without_a_sidecar` with `AttributeError: module 'socket' has no attribute
+  'AF_UNIX'`. Windows Python has no Unix-domain sockets, so this is a platform limit, not a defect:
+  verified on a clean tree at `efe7e10` with the docs changes stashed, and the same three fail. CI on
+  Linux passes. Run the suite in Docker or WSL to cover them locally.
+- **`backend/.venv/pyvenv.cfg` still names the old checkout.** Its `command` line reads
+  `... -m venv D:\Code\catwalk\backend\.venv`, from before the rename. Harmless — `home`, `executable`
+  and the editable `.pth` all point at the right places, and imports resolve from
+  `D:\Code\vibonomics\backend`. Recreating the venv clears it; nothing depends on the line.
 - **Eval rows from before the ungraded fix.** The live database has **0 eval runs**, so there is no
   historical `failed`/`0.0` data to reinterpret.
 - **Stale Artificial Analysis hints in `extra.model_ids`.** Artificial Analysis is **disabled** on this
