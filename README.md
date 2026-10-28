@@ -167,7 +167,7 @@ that task and its value. The ones with a price and a score at or above `min_scor
 `pick` is the first, and `reason` says why in a sentence. A model Vibonomics doesn't list, or whose
 provider isn't configured, comes back with `found: false` and a note. `alternatives` asks for up to that
 many models the request didn't name, from the same providers, that score at least as well as the pick
-and cost less for the same task. Free offers are left out of those, because their rate limits and data
+and give better value. Free offers are left out of those, because their rate limits and data
 terms differ from paid ones. `dimension` ranks by `intelligence`, `coding` or `agentic` instead of the
 composite.
 
