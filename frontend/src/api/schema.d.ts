@@ -106,6 +106,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/models/value": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Models Value
+         * @description Price, score and rank the named models for one task size, and pick the best value.
+         */
+        post: operations["models_value_api_models_value_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/providers/types": {
         parameters: {
             query?: never;
@@ -1570,6 +1590,179 @@ export interface components {
             /** Context */
             ctx?: Record<string, never>;
         };
+        /** ValueModelRef */
+        ValueModelRef: {
+            /**
+             * Provider
+             * @description A provider type such as `openrouter`, or a configured provider's name
+             */
+            provider: string;
+            /**
+             * Model
+             * @description The model id as that provider lists it, e.g. `openai/gpt-5.4-mini:batch`
+             */
+            model: string;
+        };
+        /** ValueRequest */
+        ValueRequest: {
+            /** Models */
+            models: components["schemas"]["ValueModelRef"][];
+            /**
+             * Profile
+             * @description A usage profile id; the operator's default when neither this nor task is given
+             */
+            profile?: string | null;
+            /** @description The size of one task; takes precedence over profile */
+            task?: components["schemas"]["ValueTaskIn"] | null;
+            /**
+             * Dimension
+             * @default composite
+             * @enum {string}
+             */
+            dimension: "composite" | "intelligence" | "coding" | "agentic";
+            /**
+             * Min Score
+             * @description A model scoring below this is never picked
+             */
+            min_score?: number | null;
+            /**
+             * Alternatives
+             * @description Also suggest up to this many models the request did not name, from the same providers, that score at least as well as the pick and give better value (with no pick, the best values at or above min_score). Free offers are left out.
+             * @default 0
+             */
+            alternatives: number;
+        };
+        /** ValueResponse */
+        ValueResponse: {
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Scores As Of */
+            scores_as_of: string | null;
+            task: components["schemas"]["ValueTaskOut"];
+            /**
+             * Dimension
+             * @enum {string}
+             */
+            dimension: "composite" | "intelligence" | "coding" | "agentic";
+            /** Min Score */
+            min_score: number | null;
+            /** Free Model Cost */
+            free_model_cost: number;
+            /** Models */
+            models: components["schemas"]["ValueRow"][];
+            pick: components["schemas"]["ValueRow"] | null;
+            /** Reason */
+            reason: string;
+            /** Alternatives */
+            alternatives: components["schemas"]["ValueRow"][];
+        };
+        /** ValueRow */
+        ValueRow: {
+            /** Provider */
+            provider: string;
+            /** Model */
+            model: string;
+            /** Found */
+            found: boolean;
+            /**
+             * Eligible
+             * @default false
+             */
+            eligible: boolean;
+            /** Rank */
+            rank?: number | null;
+            /** Note */
+            note?: string | null;
+            /** Id */
+            id?: number | null;
+            /** Provider Name */
+            provider_name?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Canonical Id */
+            canonical_id?: string | null;
+            /** Active */
+            active?: boolean | null;
+            /**
+             * Batch
+             * @default false
+             */
+            batch: boolean;
+            /**
+             * Is Free
+             * @default false
+             */
+            is_free: boolean;
+            price?: components["schemas"]["PriceOut"] | null;
+            list_price?: components["schemas"]["PriceOut"] | null;
+            /** Discount */
+            discount?: number | null;
+            /** Discount Note */
+            discount_note?: string | null;
+            /** Discount Until */
+            discount_until?: string | null;
+            /** Discount Since */
+            discount_since?: string | null;
+            /**
+             * New Discount
+             * @default false
+             */
+            new_discount: boolean;
+            /**
+             * Price Drop
+             * @default false
+             */
+            price_drop: boolean;
+            /**
+             * Batch Discount
+             * @description The provider's own batch API discount, for a direct offer
+             */
+            batch_discount?: number | null;
+            /** Prices As Of */
+            prices_as_of?: string | null;
+            /**
+             * Score
+             * @description The requested dimension's score, 0-100
+             */
+            score?: number | null;
+            scores?: components["schemas"]["ScoresOut"] | null;
+            /**
+             * Task Cost
+             * @description Estimated USD per task at the current price; 0 when free
+             */
+            task_cost?: number | null;
+            /**
+             * Value
+             * @description Score points per dollar per task; a free model is costed at free_model_cost, as in the UI
+             */
+            value?: number | null;
+        };
+        /** ValueTaskIn */
+        ValueTaskIn: {
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
+            /**
+             * Cache Hit Rate
+             * @default 0
+             */
+            cache_hit_rate: number;
+        };
+        /** ValueTaskOut */
+        ValueTaskOut: {
+            /** Profile */
+            profile: string | null;
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
+            /** Cache Hit Rate */
+            cache_hit_rate: number;
+        };
         /** WindowOut */
         WindowOut: {
             /** Key */
@@ -1761,6 +1954,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    models_value_api_models_value_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ValueRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValueResponse"];
                 };
             };
             /** @description Validation Error */
