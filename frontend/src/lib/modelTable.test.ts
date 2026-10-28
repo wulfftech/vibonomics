@@ -134,6 +134,40 @@ describe('filterModels', () => {
     expect(filterModels(enriched, filters({ chips: ['discounted'] })).map((m) => m.row.name)).toEqual(['Charlie']);
     expect(filterModels(enriched, filters({ chips: ['scored', 'free'] })).map((m) => m.row.name)).toEqual(['Bravo']);
   });
+
+  describe('batch variants', () => {
+    const withBatch = enrichModels(
+      [
+        ...rows,
+        row({ id: 4, name: 'Alpha (batch)', model_id: 'acme/alpha:batch' }),
+        row({ id: 5, name: 'Delta', model_id: 'acme/batch-delta' }),
+      ],
+      profile,
+    );
+
+    it('hides them by default, and only by the :batch suffix', () => {
+      expect(DEFAULT_FILTERS.nonBatchOnly).toBe(true);
+      expect(filterModels(withBatch, DEFAULT_FILTERS).map((m) => m.row.name)).toEqual([
+        'Alpha',
+        'Bravo',
+        'Charlie',
+        'Delta',
+      ]);
+    });
+
+    it('shows them once the filter is off', () => {
+      expect(filterModels(withBatch, filters({ nonBatchOnly: false })).map((m) => m.row.name)).toContain(
+        'Alpha (batch)',
+      );
+    });
+
+    it('combines with the other filters', () => {
+      expect(filterModels(withBatch, filters({ search: 'alpha' })).map((m) => m.row.name)).toEqual(['Alpha']);
+      expect(filterModels(withBatch, filters({ search: 'alpha', nonBatchOnly: false })).map((m) => m.row.name)).toEqual(
+        ['Alpha', 'Alpha (batch)'],
+      );
+    });
+  });
 });
 
 describe('sorting', () => {

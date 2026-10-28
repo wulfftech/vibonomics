@@ -216,9 +216,16 @@ export function defaultDir(key: SortKey): SortDir {
   return key === 'name' || key === 'provider' || key === 'blended' || key === 'taskCost' ? 'asc' : 'desc';
 }
 
+/** OpenRouter lists a batch-API copy of a model under the same id plus a `:batch` suffix. */
+export function isBatchModel(row: ModelRow): boolean {
+  return row.model_id.endsWith(':batch');
+}
+
 export interface ModelFilters {
   search: string;
   chips: QuickFilter[];
+  /** Hide batch-API variants. On by default; a separate flag, not a chip, so saved filters pick up the default. */
+  nonBatchOnly: boolean;
   providers: string[];
   groupBy: GroupBy;
   profileId: string | null;
@@ -229,6 +236,7 @@ export interface ModelFilters {
 export const DEFAULT_FILTERS: ModelFilters = {
   search: '',
   chips: [],
+  nonBatchOnly: true,
   providers: [],
   groupBy: 'none',
   profileId: null,
@@ -263,6 +271,7 @@ export function filterModels(models: EnrichedModel[], filters: ModelFilters): En
       (needle === '' || model.haystack.includes(needle)) &&
       (providers.size === 0 || providers.has(String(model.row.provider_id))) &&
       (filters.minContext <= 0 || (model.row.context_length ?? 0) >= filters.minContext) &&
+      (!filters.nonBatchOnly || !isBatchModel(model.row)) &&
       filters.chips.every((chip) => matchesChip(model, chip)),
   );
 }

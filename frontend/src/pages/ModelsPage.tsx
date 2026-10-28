@@ -48,6 +48,7 @@ function sanitizeFilters(filters: ModelFilters): ModelFilters {
   return {
     search: typeof filters.search === 'string' ? filters.search : '',
     chips: Array.isArray(filters.chips) ? filters.chips.filter((chip) => chips.has(chip)) : [],
+    nonBatchOnly: typeof filters.nonBatchOnly === 'boolean' ? filters.nonBatchOnly : DEFAULT_FILTERS.nonBatchOnly,
     providers: Array.isArray(filters.providers) ? filters.providers.filter((p) => typeof p === 'string') : [],
     groupBy: groups.has(filters.groupBy) ? filters.groupBy : 'none',
     profileId: typeof filters.profileId === 'string' ? filters.profileId : null,
@@ -127,10 +128,18 @@ export function ModelsPage() {
   );
 
   const search = useDeferredValue(filters.search);
-  const { chips, providers: providerFilter, minContext, groupBy } = filters;
+  const { chips, nonBatchOnly, providers: providerFilter, minContext, groupBy } = filters;
   const filtered = useMemo(
-    () => filterModels(enriched, { ...DEFAULT_FILTERS, search, chips, providers: providerFilter, minContext }),
-    [enriched, search, chips, providerFilter, minContext],
+    () =>
+      filterModels(enriched, {
+        ...DEFAULT_FILTERS,
+        search,
+        chips,
+        nonBatchOnly,
+        providers: providerFilter,
+        minContext,
+      }),
+    [enriched, search, chips, nonBatchOnly, providerFilter, minContext],
   );
   // Fold the Go copy of a model into its Console row while both providers are in view.
   const folded = useMemo(() => foldOpenCodeOffers(filtered), [filtered]);

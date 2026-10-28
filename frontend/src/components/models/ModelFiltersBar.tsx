@@ -109,15 +109,30 @@ export function ModelFiltersBar({
           onChange={(value) => onChange((old) => ({ ...old, minContext: Number(value ?? 0) }))}
         />
       </Group>
-      <Chip.Group multiple value={filters.chips} onChange={(value) => onChange((old) => ({ ...old, chips: value }))}>
-        <Group gap="xs">
+      <Group gap="xs">
+        <Tooltip
+          multiline
+          maw={300}
+          withArrow
+          label="Hides the batch-API copies of models (ids ending :batch). They are priced for asynchronous batch jobs, not live requests."
+        >
+          <Chip
+            checked={filters.nonBatchOnly}
+            onChange={(nonBatchOnly) => onChange((old) => ({ ...old, nonBatchOnly }))}
+            size="xs"
+            variant="light"
+          >
+            Non-batch only
+          </Chip>
+        </Tooltip>
+        <Chip.Group multiple value={filters.chips} onChange={(value) => onChange((old) => ({ ...old, chips: value }))}>
           {QUICK_FILTERS.map((chip) => (
             <Chip key={chip.value} value={chip.value} size="xs" variant="light">
               {chip.label}
             </Chip>
           ))}
-        </Group>
-      </Chip.Group>
+        </Chip.Group>
+      </Group>
     </Stack>
   );
 }
