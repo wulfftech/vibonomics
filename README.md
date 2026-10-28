@@ -142,6 +142,39 @@ Review unmatched**; corrections are stored as aliases.
   0 to restore the older behaviour, where any free model sorted first.
 - **Discount column** shows the percentage; the blended price shows the list price in brackets.
 
+### The same figures for a program
+
+`POST /api/models/value` gives a program that sends work to models the numbers the Models page shows,
+so it can choose between the models it can use. It names each model as its provider lists it, and says
+how big a task is, or picks a usage profile:
+
+```sh
+curl -s http://localhost:2289/api/models/value -H 'Content-Type: application/json' -d '{
+  "models": [
+    {"provider": "openrouter", "model": "openai/gpt-5.6-luna:batch"},
+    {"provider": "openrouter", "model": "google/gemini-3.7-flash:batch"},
+    {"provider": "ollama", "model": "qwen3.5:4b"}
+  ],
+  "task": {"input_tokens": 25000, "output_tokens": 10000},
+  "min_score": 55,
+  "alternatives": 3
+}'
+```
+
+Each model comes back in the order asked, with its price after discounts, the list price and the
+discount's dates while one applies, a direct offer's batch discount, its scores, its estimated cost for
+that task and its value. The ones with a price and a score at or above `min_score` are ranked by value;
+`pick` is the first, and `reason` says why in a sentence. A model Vibonomics doesn't list, or whose
+provider isn't configured, comes back with `found: false` and a note. `alternatives` asks for up to that
+many models the request didn't name, from the same providers, that score at least as well as the pick
+and cost less for the same task. Free offers are left out of those, because their rate limits and data
+terms differ from paid ones. `dimension` ranks by `intelligence`, `coding` or `agentic` instead of the
+composite.
+
+The maths is the Models page's: `backend/vibonomics/pricing.py` copies `frontend/src/lib/pricing.ts`.
+The endpoint only reads. It sits behind the password like the rest of `/api`, so a program calling an
+instance with `VIBONOMICS_PASSWORD` set logs in first and sends the session cookie.
+
 ## Testing models
 
 Tests make real API calls on the account behind the selected key. Free models cost nothing; a paid

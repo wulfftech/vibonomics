@@ -59,7 +59,12 @@ docker compose logs -f vibonomics
   with a refreshed token; Vibonomics does not refresh it, so Claude Code's copy stays valid.
 - **API**: routers in `backend/vibonomics/api/`, schemas are pydantic models, and the frontend consumes
   generated types (`npm run gen:api`). Update the types with the router change. Keep the evals API
-  contract stable; the UI is built against it.
+  contract stable; the UI is built against it. Give a schema a name no other router uses: two classes of
+  one name are both renamed in the generated types. `POST /api/models/value` is for programs, not the UI;
+  keep its contract stable too.
+- **Price maths** lives twice: `frontend/src/lib/pricing.ts` for the Models page and
+  `backend/vibonomics/pricing.py` for `POST /api/models/value`. Change a formula in both, and keep
+  `tests/test_value.py` checking the cases `pricing.test.ts` checks.
 - **Refresh** (`jobs.py`, `api/refresh.py`, `api/providers.py`): `run_job(kind, trigger, provider_ids)`
   serialises each kind behind a lock and **returns immediately if the lock is held** — it does not queue.
   So never fire one request per provider for a set: send them together (`POST /api/providers/refresh`

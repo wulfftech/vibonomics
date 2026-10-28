@@ -7,7 +7,8 @@ model; the composite is the weighted mean of the available dimensions. Vibonomic
 (already 0-100) feed the coding and agentic dimensions with ``own_tests_weight``.
 
 Blended prices and value scores depend on the usage profile the operator picks in the UI, so they
-are computed client-side from the raw prices and the composite returned here.
+are computed client-side from the raw prices and the composite returned here. A program that can't run the
+UI's copy asks ``POST /api/models/value``, which uses the same formulas from ``pricing.py``.
 """
 
 from __future__ import annotations
