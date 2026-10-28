@@ -3,18 +3,10 @@
 This file records what was checked and decided, so a settled question does not get raised again, and it is
 where a new follow-up goes: what it is, how it was verified, who it affects, and what fixing it would take.
 
-Last reviewed 2026-10-28, against `main` at `96384c3`.
+Last reviewed 2026-10-28, against `main` at `b7d253c`.
 
 ## Open
 
-- **The sandbox's run uids have not run in Docker yet.** They were tested as root with only `SETUID`,
-  `SETGID` and `CHOWN` and `no-new-privileges` (`setpriv` in WSL, which is the capability set the compose
-  file gives the sidecar), and the unit tests pass there. The compose file itself (`entrypoint`, `user: 0:0`,
-  the root-owned socket volume, the read-only root with a tmpfs `/tmp`) was never started, because the
-  Docker engine would not start on the machine the work was done on. Before deploying it, run
-  `docker/check-sandbox-isolation.sh` from the repository root on a machine with Docker, and look at
-  `docker compose logs sandbox` for "Running as root so each run starts under its own uid". The server
-  refuses to start, with a critical log line, if the uids do not work.
 - **The live instance has no password and no allowed-host list** (`/api/auth/status` answers
   `enabled: false`). The HTTPS name is behind Authelia, but `http://192.168.10.78:2289` is not, so anything
   on the LAN, and any web page a LAN browser opens (DNS rebinding), can use the whole API. The code now
@@ -69,7 +61,13 @@ that fixed each. Findings are numbered as in that review.
   two unprivileged uids (`VIBONOMICS_SANDBOX_RUN_UIDS`), kills by uid and removes the uid's files when the
   run ends, closes each workspace to the other uid, and gives each run its own process limit. The socket
   volume is root's. The README and SECURITY.md describe the new shape, including that the server is no longer
-  a non-root user.
+  a non-root user. The unit tests ran as root with only `SETUID`, `SETGID` and `CHOWN` and `no-new-privileges`
+  (`setpriv` in WSL). The compose file itself was then run in Docker Desktop 29.8.2:
+  `docker/check-sandbox-isolation.sh` passed in both layouts (code runs, as its own unprivileged uid, cannot
+  touch the socket, cannot reach the app), and the sidecar came up healthy with `user 0:0`, only `CHOWN`,
+  `SETGID` and `SETUID`, `no-new-privileges`, a read-only root and no network, logging "Running as root so
+  each run starts under its own uid". Not exercised there: the concurrency, fork-bomb and leftover-file
+  cases, which only the WSL run covered.
 
 ## Fixed on 2026-10-28, with what to know
 

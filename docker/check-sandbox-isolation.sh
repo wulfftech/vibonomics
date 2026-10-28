@@ -103,6 +103,8 @@ echo "ok   socket: the sandbox cannot reach the app, the host or the internet"
 users_reach_app socket
 
 echo "== TCP layout (docker/compose.sandbox-tcp.yml)"
+# Windows' docker splits COMPOSE_FILE on ";" unless told otherwise, so a script run from Git Bash needs this.
+export COMPOSE_PATH_SEPARATOR=:
 export COMPOSE_FILE=docker-compose.yml:docker/compose.sandbox-tcp.yml
 up
 app_runs_code tcp
