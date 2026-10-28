@@ -8,7 +8,8 @@ cases.
 
 Two things the executor cannot bound on its own. A process that starts its own session leaves the
 process group, so the group kill does not reach it. And there is no per-run process count: the
-sidecar's ``pids_limit`` caps that, and its ``init`` reaps the processes a run orphans.
+container's ``pids_limit`` caps that (the sidecar's, or the app's in Local mode), and its ``init`` reaps
+the processes a run orphans.
 """
 
 from __future__ import annotations

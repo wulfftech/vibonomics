@@ -53,7 +53,8 @@ would lock everyone out. `docker/check-sandbox-isolation.sh` checks both layouts
 What it does not do: it is not a hardened multi-tenant sandbox. A container escape or a kernel bug
 would matter, and the local `Local` sandbox mode runs model-written code in the app container with no
 isolation beyond the executor's limits (time, memory, file size, open files and output size; the
-number of processes is capped only by the sidecar's `pids_limit`, so not at all in **Local**). The
+number of processes is capped only by the container's `pids_limit`: 256 on the sidecar, 1024 on the app
+container that **Local** runs in, and nothing outside Docker). The
 executor kills a run's process group when the run ends, but a process that starts its own session
 leaves that group. Do not use **Local** on a host you do not trust, and do not share one instance with
 people you do not trust.

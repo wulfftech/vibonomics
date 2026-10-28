@@ -18,6 +18,11 @@ services:
     env_file:
       - path: .env
         required: false
+    # Local sandbox mode runs tests as children of this container. An init as PID 1 reaps the ones they
+    # orphan, and pids_limit caps how many they can start. The cap counts threads too, so it is far
+    # looser than the sidecar's.
+    init: true
+    pids_limit: 1024
     environment:
       TZ: "${TZ:-Etc/UTC}"
       PUID: "${PUID:-1000}"
