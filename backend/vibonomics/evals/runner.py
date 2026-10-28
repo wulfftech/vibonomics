@@ -358,7 +358,7 @@ def _store_result(run_id: int, result: dict[str, Any]) -> None:
                 output_tokens=int(result.get("output_tokens") or 0),
                 cost_usd=result.get("cost_usd"),
                 latency_ms=int(result.get("latency_ms") or 0),
-                transcript=result.get("transcript") or [],
+                transcript=transcript,
                 error=result.get("error"),
             )
         )

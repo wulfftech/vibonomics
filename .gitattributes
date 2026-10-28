@@ -5,6 +5,7 @@
 *.yaml text eol=lf
 *.json text eol=lf
 Dockerfile text eol=lf
+.env.example text eol=lf
 
 # Everything `prettier --check` reads under frontend/ (its config sets endOfLine: lf), plus the
 # docs. Without these, a Windows checkout with core.autocrlf=true writes CRLF and the check fails.

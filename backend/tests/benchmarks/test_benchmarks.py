@@ -300,6 +300,29 @@ def test_curated_arena_aliases_reach_their_catalogue_ids():
         assert matcher.match("arena", name.lower()) == (cid, "curated"), name
 
 
+def test_a_curated_alias_to_a_model_the_catalogue_lacks_does_not_count_as_a_match(caplog):
+    name = "Kimi K2 Preview (0711)"
+    without = Matcher(_catalog(("openai/gpt-6", "GPT-6")))
+    with caplog.at_level("WARNING"):
+        assert without.match("arena", name) == (None, "unmatched")
+    assert "moonshotai/kimi-k2" in caplog.text and "not in the catalogue" in caplog.text
+    # Listed again, the alias applies.
+    with_it = Matcher(_catalog(("moonshotai/kimi-k2", "Kimi K2")))
+    assert with_it.match("arena", name) == ("moonshotai/kimi-k2", "curated")
+
+
+def test_an_ignored_name_stays_ignored_whatever_the_catalogue_holds():
+    ignored = [
+        (source, name)
+        for source, aliases in curated_aliases().items()
+        for name, target in aliases.items()
+        if target is None
+    ]
+    assert ignored, "expected at least one ignored name in aliases.yaml"
+    source, name = ignored[0]
+    assert Matcher(_catalog()).match(source, name) == (None, "curated")
+
+
 def test_curated_aliases_name_a_known_source_and_a_creator_slash_model():
     for source, aliases in curated_aliases().items():
         assert source in SOURCES, source

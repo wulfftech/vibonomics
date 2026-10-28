@@ -9,6 +9,7 @@ Unmatched records are still stored (canonical_id NULL) so the operator can map t
 
 from __future__ import annotations
 
+import logging
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -16,6 +17,9 @@ from pathlib import Path
 import yaml
 
 from ..catalog.modelsdev import ModelsDevCatalog, normalize_model_key
+
+log = logging.getLogger(__name__)
+_warned_stale: set[tuple[str, str]] = set()
 
 _EFFORT_PATTERNS = [
     re.compile(
@@ -294,7 +298,14 @@ class Matcher:
             return self.operator_aliases[key], "operator"
         curated = curated_aliases().get(source, {})
         if source_model.lower() in curated:
-            return curated[source_model.lower()], "curated"
+            target = curated[source_model.lower()]
+            # A curated alias to a model the catalogue no longer lists would count as matched while attaching
+            # the scores to nothing, and hide the name from the unmatched list. None means "ignore this name".
+            if target is None or target in self.index:
+                return target, "curated"
+            if (source, source_model.lower()) not in _warned_stale:
+                _warned_stale.add((source, source_model.lower()))
+                log.warning("Curated alias %s %r names %s, which is not in the catalogue", source, source_model, target)
 
         hints = _clean(model_ids or [])
         names = _clean([source_model, *hints])

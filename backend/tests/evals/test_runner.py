@@ -398,6 +398,26 @@ class MalformedUrlToolsClient(FakeClient):
         return await super().chat(messages, tools)
 
 
+def test_a_long_transcript_is_stored_trimmed():
+    run_id, provider_id = _seed()
+    entries = [{"role": "assistant", "content": f"step {i}"} for i in range(100)]
+    runner._store_result(
+        run_id,
+        {
+            "provider_id": provider_id,
+            "model_id": MODEL_ID,
+            "task_id": "agentic-fix-mean",
+            "status": "passed",
+            "score": 90.0,
+            "transcript": entries,
+        },
+    )
+    with session_scope() as session:
+        row = session.query(EvalResult).filter(EvalResult.run_id == run_id).one()
+        assert len(row.transcript) == 60
+        assert row.transcript[0]["content"] == "step 0" and row.transcript[-1]["content"] == "step 99"
+
+
 @pytest.mark.asyncio
 async def test_an_unexpected_error_in_one_task_is_that_tasks_error_not_the_runs(monkeypatch):
     monkeypatch.setattr(runner, "LLMClient", MalformedUrlToolsClient)

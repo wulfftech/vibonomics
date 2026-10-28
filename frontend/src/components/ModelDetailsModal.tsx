@@ -23,7 +23,7 @@ import { compactTokens, dateOnly, dateTime, DASH, discountLabel, integer, money,
 import { listPrices } from '../lib/modelTable';
 import { scoreColor } from '../lib/modelText';
 import { blendedPrice, profileFormula, taskCost } from '../lib/pricing';
-import { statusColor, statusLabel } from '../lib/status';
+import { isGraded, statusColor, statusLabel } from '../lib/status';
 import { ModelBadges, ScoreNumber } from './models/cells';
 import { CopyIconButton } from './CopyIconButton';
 import { ProviderDot } from './ProviderDot';
@@ -456,7 +456,7 @@ function PriceHistoryTab({ detail }: { detail: ModelDetail }) {
   );
 }
 
-function TestsTab({ detail }: { detail: ModelDetail }) {
+export function TestsTab({ detail }: { detail: ModelDetail }) {
   const summary = detail.row.test;
   return (
     <Stack gap="md">
@@ -524,7 +524,7 @@ function TestsTab({ detail }: { detail: ModelDetail }) {
                       </Badge>
                     </Table.Td>
                     <Table.Td>
-                      <ScoreNumber value={test.score} />
+                      <ScoreNumber value={isGraded(test.status) ? test.score : null} />
                     </Table.Td>
                     <Table.Td maw={280}>
                       {test.judge_notes ? (
