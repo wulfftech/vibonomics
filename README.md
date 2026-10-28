@@ -248,9 +248,10 @@ Environment variables for the app and the compose stack:
 | Variable | Default | Purpose |
 |---|---|---|
 | `VIBONOMICS_CONFIG_DIR` | `./config` | database, key file, cache |
-| `VIBONOMICS_PORT`, `VIBONOMICS_HOST` | `2289`, `0.0.0.0` | listen address |
+| `VIBONOMICS_PORT`, `VIBONOMICS_HOST` | `2289`, `0.0.0.0` | listen address. In compose the app always listens on 2289 inside the container, and `VIBONOMICS_PORT` in `.env` picks the host port |
 | `VIBONOMICS_URL_BASE` | empty | serve under a sub-path such as `/vibonomics` |
-| `VIBONOMICS_PASSWORD` | empty | password gate on the UI (signed cookie session) |
+| `VIBONOMICS_PASSWORD` | empty | password gate on the UI (signed cookie session). Changing it ends every session |
+| `VIBONOMICS_ALLOWED_HOSTS` | empty (any) | comma-separated host names the app answers to. Set it when there is no password: it stops DNS rebinding from a web page on your network |
 | `VIBONOMICS_SECRET_KEY` | generated file | encrypts stored provider keys and signs sessions |
 | `VIBONOMICS_SANDBOX_URL` | empty | sidecar address: `unix:///run/vibonomics-sandbox/sandbox.sock` (compose default) or `http://sandbox:2290` |
 | `VIBONOMICS_SANDBOX_SOCKET` | empty | on the sidecar: serve on this Unix socket instead of TCP port `VIBONOMICS_SANDBOX_PORT` (`2290`) |

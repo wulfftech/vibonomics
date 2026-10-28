@@ -176,6 +176,27 @@ def test_ingest_rejects_bad_token_and_payload():
     assert response.status_code == 400
 
 
+def test_a_request_without_the_token_is_refused_before_its_body_is_read():
+    client = _client()
+    big = "x" * (api.MAX_INGEST_BYTES + 1)
+    # Refused as unauthorised, not as too large: the oversized body was never looked at.
+    assert client.post("/api/subscription/ingest/claude?token=wrong", content=big).status_code == 401
+    assert client.post("/api/subscription/ingest/claude", content=big).status_code == 401
+
+
+def test_a_body_over_the_cap_is_refused_even_with_the_token_and_even_without_a_length():
+    client = _client()
+    token = client.get("/api/subscription/claude").json()["ingest_token"]
+    url = f"/api/subscription/ingest/claude?token={token}"
+    assert client.post(url, content="x" * (api.MAX_INGEST_BYTES + 1)).status_code == 413
+
+    def chunks():  # a streamed body has no Content-Length to check up front
+        for _ in range(5):
+            yield b"x" * (api.MAX_INGEST_BYTES // 4)
+
+    assert client.post(url, content=chunks()).status_code == 413
+
+
 def test_clear_snapshot():
     client = _client()
     config = client.get("/api/subscription/claude").json()

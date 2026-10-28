@@ -6,6 +6,7 @@ cookie. Put Vibonomics behind your reverse proxy's auth instead if you already h
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 from functools import lru_cache
 
@@ -32,6 +33,16 @@ def auth_enabled() -> bool:
     return bool(get_config().password)
 
 
+def _session_value() -> str:
+    """What a session cookie carries: a digest of the password it was issued under.
+
+    Changing ``VIBONOMICS_PASSWORD`` then ends every session, without rotating the secret key (which would
+    make every stored provider key unreadable).
+    """
+    password = (get_config().password or "").encode()
+    return hmac.new(derive_secret("session-password").encode(), password, hashlib.sha256).hexdigest()[:32]
+
+
 def is_authenticated(request: Request) -> bool:
     if not auth_enabled():
         return True
@@ -39,10 +50,10 @@ def is_authenticated(request: Request) -> bool:
     if not token:
         return False
     try:
-        _serializer().loads(token, max_age=MAX_AGE)
-        return True
+        value = _serializer().loads(token, max_age=MAX_AGE)
     except BadSignature:
         return False
+    return isinstance(value, str) and hmac.compare_digest(value, _session_value())
 
 
 class LoginIn(BaseModel):
@@ -68,7 +79,7 @@ def login(body: LoginIn, response: Response, request: Request) -> AuthStatus:
         raise HTTPException(status_code=401, detail="Wrong password")
     response.set_cookie(
         COOKIE,
-        _serializer().dumps("ok"),
+        _serializer().dumps(_session_value()),
         max_age=MAX_AGE,
         httponly=True,
         samesite="lax",

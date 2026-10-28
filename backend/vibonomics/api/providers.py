@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -298,8 +299,37 @@ async def test_provider(provider_id: int, body: ProviderTestOverride | None = No
         if p is None:
             raise HTTPException(404, "Provider not found")
         settings = load_settings(session)
-    resolved = _override(resolve(p), body)
-    return await _run_test(resolved, settings)
+    resolved = resolve(p)
+    withheld = _withhold_stored_keys(resolved, body)
+    result = await _run_test(_override(resolved, body), settings)
+    if withheld:
+        result.message += " The saved key was not sent to a different host; enter the key in the form to test it there."
+    return result
+
+
+def _origin(url: str | None, default: str = "") -> tuple[str, str]:
+    parts = urlsplit((url or "").strip() or default)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+def _withhold_stored_keys(cfg: ResolvedProvider, body: ProviderTestOverride | None) -> bool:
+    """Drop the saved keys when the test points at another host, unless the request brings its own.
+
+    The test route is open to anything that can reach the API. Without this, one request naming a base URL of
+    its choosing would be answered with the saved (or environment-locked) key in an Authorization header.
+    """
+    if body is None or body.base_url is None:
+        return False
+    adapter_cls = get_adapter_class(cfg.type)
+    default = adapter_cls.spec.default_base_url if adapter_cls is not None else ""
+    if _origin(body.base_url, default) == _origin(cfg.base_url, default):
+        return False
+    withheld = False
+    for field in ("api_key", "mgmt_key", "extra_key"):
+        if getattr(body, field) is None and getattr(cfg, field):
+            setattr(cfg, field, None)
+            withheld = True
+    return withheld
 
 
 def _override(cfg: ResolvedProvider, body: ProviderTestOverride | None) -> ResolvedProvider:

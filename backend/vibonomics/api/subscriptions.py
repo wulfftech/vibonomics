@@ -109,6 +109,24 @@ def _public_base(request: Request) -> str:
     return base + cfg.url_base
 
 
+MAX_INGEST_BYTES = 512_000
+
+
+async def _read_capped(request: Request, limit: int) -> bytes:
+    """The request body, refused with 413 as soon as it passes ``limit`` instead of after it is all in memory."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail="Snapshot too large")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail="Snapshot too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _check_token(expected: str | None, provided: str | None) -> None:
     if not expected or not provided or not hmac.compare_digest(expected, provided):
         raise HTTPException(status_code=401, detail="Bad subscription ingest token")
@@ -182,12 +200,12 @@ async def ingest_claude(
     token: str | None = Query(default=None),
     x_vibonomics_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    raw = await request.body()
-    if len(raw) > 512_000:
-        raise HTTPException(status_code=413, detail="Snapshot too large")
+    # This route is outside the login guard, so the token comes first: nobody without it gets the app to
+    # read a body at all.
     with session_scope() as session:
         expected = crypto.decrypt(load_settings(session).subscriptions.claude_ingest_token_enc)
     _check_token(expected, token or x_vibonomics_token)
+    raw = await _read_capped(request, MAX_INGEST_BYTES)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

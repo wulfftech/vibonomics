@@ -83,6 +83,53 @@ def test_saved_provider_test_honours_overrides(monkeypatch):
     assert cleared.json()["message"].split("|")[0] == "None"
 
 
+def test_a_saved_key_is_not_sent_to_a_different_host(monkeypatch):
+    provider_id = _seed()
+    client = _client(monkeypatch)
+
+    elsewhere = client.post(f"/api/providers/{provider_id}/test", json={"base_url": "https://attacker.example/v1"})
+    message = elsewhere.json()["message"]
+    key, _mgmt, _extra, url = message.split(" The saved key")[0].split("|")
+    assert (key, url) == ("None", "https://attacker.example/v1")
+    assert "The saved key was not sent to a different host" in message
+
+    # With a key typed into the same request, it is the user's to send wherever they like.
+    typed = client.post(
+        f"/api/providers/{provider_id}/test", json={"base_url": "https://attacker.example/v1", "api_key": "typed"}
+    )
+    assert typed.json()["message"].split("|")[0] == "typed"
+    assert "not sent" not in typed.json()["message"]
+
+
+def test_a_saved_key_still_goes_to_the_same_host_under_another_path(monkeypatch):
+    with session_scope() as session:
+        row = ProviderConfig(
+            type="custom-openai",
+            name="Same host",
+            enabled=True,
+            api_key_enc=api.crypto.encrypt("stored-key"),
+            base_url="https://llm.internal.example/v1",
+            options={},
+        )
+        session.add(row)
+        session.flush()
+        provider_id = row.id
+    client = _client(monkeypatch)
+    same_host = client.post(f"/api/providers/{provider_id}/test", json={"base_url": "https://llm.internal.example/v2"})
+    assert same_host.json()["message"].split("|")[0] == "stored-key"
+    other_scheme = client.post(
+        f"/api/providers/{provider_id}/test", json={"base_url": "http://llm.internal.example/v1"}
+    )
+    assert other_scheme.json()["message"].split("|")[0] == "None"
+
+
+def test_blank_base_url_means_the_default_host_and_keeps_the_key(monkeypatch):
+    provider_id = _seed()
+    client = _client(monkeypatch)
+    response = client.post(f"/api/providers/{provider_id}/test", json={"base_url": ""})
+    assert response.json()["message"].split("|")[0] == "stored-key"
+
+
 def test_draft_requires_custom_base_url(monkeypatch):
     client = _client(monkeypatch)
     response = client.post("/api/providers/test", json={"type": "custom-openai", "api_key": "x"})

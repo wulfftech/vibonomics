@@ -24,6 +24,9 @@ services:
     init: true
     pids_limit: 1024
     environment:
+      # .env reaches the container through env_file, and VIBONOMICS_PORT there is the host port. Left to
+      # that, the app would listen on it too, and the port mapping and healthcheck both expect 2289.
+      VIBONOMICS_PORT: "2289"
       TZ: "${TZ:-Etc/UTC}"
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
@@ -32,6 +35,7 @@ services:
       VIBONOMICS_PASSWORD: "${VIBONOMICS_PASSWORD:-}"
       VIBONOMICS_SECRET_KEY: "${VIBONOMICS_SECRET_KEY:-}"
       VIBONOMICS_URL_BASE: "${VIBONOMICS_URL_BASE:-}"
+      VIBONOMICS_ALLOWED_HOSTS: "${VIBONOMICS_ALLOWED_HOSTS:-}"
       VIBONOMICS_LOG_LEVEL: "${VIBONOMICS_LOG_LEVEL:-info}"
       VIBONOMICS_SANDBOX_URL: "unix:///run/vibonomics-sandbox/sandbox.sock"
       VIBONOMICS_SANDBOX_TOKEN: "${VIBONOMICS_SANDBOX_TOKEN:-}"

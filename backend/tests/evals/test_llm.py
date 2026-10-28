@@ -174,3 +174,42 @@ def test_anthropic_conversion_merges_tool_results():
     assert messages[2]["role"] == "user"
     assert [b["type"] for b in messages[2]["content"]] == ["tool_result", "tool_result"]
     assert messages[1]["content"][1]["input"]["_invalid_json"]
+
+
+KEY = "sk-live-0123456789abcdef"
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(401, json={"error": {"message": f"Incorrect API key provided: {KEY}"}}),
+        httpx.Response(401, text=f"bad credentials {KEY}"),
+        httpx.Response(200, json={"error": {"message": f"Invalid key {KEY}"}}),
+    ],
+    ids=["http-error-body", "plain-text-body", "error-in-a-200"],
+)
+async def test_a_key_the_provider_echoes_never_reaches_the_error(response):
+    respx.post("https://example.test/v1/chat/completions").mock(return_value=response)
+    target = ChatTarget(
+        wire="openai", base_url="https://example.test/v1", model="m", headers={"Authorization": f"Bearer {KEY}"}
+    )
+    client = LLMClient(target)
+    with pytest.raises(ChatError) as caught:
+        await client.chat([{"role": "user", "content": "hi"}])
+    await client.aclose()
+    assert KEY not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_key_echoed_by_anthropic_never_reaches_the_error():
+    body = {"type": "error", "error": {"message": f"invalid x-api-key {KEY}"}}
+    respx.post("https://example.test/v1/messages").mock(return_value=httpx.Response(200, json=body))
+    target = ChatTarget(wire="anthropic", base_url="https://example.test", model="m", headers={"x-api-key": KEY})
+    client = LLMClient(target)
+    with pytest.raises(ChatError) as caught:
+        await client.chat([{"role": "user", "content": "hi"}])
+    await client.aclose()
+    assert KEY not in str(caught.value)

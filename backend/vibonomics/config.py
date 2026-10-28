@@ -40,6 +40,8 @@ class AppConfig:
     password: str | None
     log_level: str
     static_dir: Path | None
+    # Host names the app answers to; empty means any. See ``app.py`` for why this exists.
+    allowed_hosts: tuple[str, ...] = ()
 
     @property
     def db_path(self) -> Path:
@@ -68,6 +70,7 @@ def get_config() -> AppConfig:
         password=_env("VIBONOMICS_PASSWORD"),
         log_level=(_env("VIBONOMICS_LOG_LEVEL", "info") or "info").lower(),
         static_dir=_find_static_dir(),
+        allowed_hosts=tuple(h.strip() for h in (_env("VIBONOMICS_ALLOWED_HOSTS", "") or "").split(",") if h.strip()),
     )
 
 

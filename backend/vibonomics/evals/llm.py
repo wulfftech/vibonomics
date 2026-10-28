@@ -106,6 +106,10 @@ class LLMClient:
             return await self._chat_anthropic(messages, tools)
         return await self._chat_openai(messages, tools)
 
+    def _scrub(self, text: str) -> str:
+        """Some providers echo the key they rejected; it must not reach a stored result, a summary or a log."""
+        return scrub_secrets(text, self.target.headers)
+
     # -- OpenAI wire ------------------------------------------------------------------------
 
     def _openai_url(self) -> str:
@@ -121,7 +125,7 @@ class LLMClient:
             payload["usage"] = {"include": True}
         data, latency = await self._post(self._openai_url(), payload, self.target.headers)
         if isinstance(data.get("error"), dict) and "choices" not in data:
-            raise ChatError(str(data["error"].get("message") or data["error"]))
+            raise ChatError(self._scrub(str(data["error"].get("message") or data["error"])))
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         text = _flatten_content(message.get("content"))
@@ -175,7 +179,7 @@ class LLMClient:
             payload["tools"] = [t.anthropic() for t in tools]
         data, latency = await self._post(self._anthropic_url(), payload, self._anthropic_headers())
         if data.get("type") == "error":
-            raise ChatError(str((data.get("error") or {}).get("message") or "Anthropic error"))
+            raise ChatError(self._scrub(str((data.get("error") or {}).get("message") or "Anthropic error")))
         text_parts: list[str] = []
         calls: list[ToolCall] = []
         for index, block in enumerate(data.get("content") or []):
@@ -233,7 +237,7 @@ class LLMClient:
                 await asyncio.sleep(_retry_delay(response, attempt))
                 continue
             if response.status_code >= 400:
-                raise ChatError(f"HTTP {response.status_code}: {_error_text(response)}")
+                raise ChatError(self._scrub(f"HTTP {response.status_code}: {_error_text(response)}"))
             latency = int((time.monotonic() - started) * 1000)
             try:
                 data = response.json()

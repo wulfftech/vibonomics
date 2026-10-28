@@ -10,7 +10,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__, events, sandbox_guard, scheduler
 from .api import auth, benchmarks, evals, models, providers, refresh, settings, subscriptions, system
@@ -45,6 +46,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     scheduler.start(app_settings)
     if app_settings.refresh.refresh_on_startup:
         spawn(_startup_refresh())
+    cfg = get_config()
+    if not cfg.password and not cfg.allowed_hosts:
+        log.warning(
+            "No VIBONOMICS_PASSWORD and no VIBONOMICS_ALLOWED_HOSTS: anything that can reach this port can use the "
+            "API, including a web page opened in a browser on this network (DNS rebinding). Set one of them "
+            "unless a proxy in front already restricts access."
+        )
     log.info("Vibonomics %s started", __version__)
     try:
         yield
@@ -77,6 +85,12 @@ def _api_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.add_middleware(GZipMiddleware, minimum_size=2048)
+    cfg = get_config()
+    if cfg.allowed_hosts:
+        # A web page cannot reach a private address directly, but DNS rebinding makes a hostile name resolve to
+        # this one, and the browser then lets that page call the whole API under the hostile name. Refusing any
+        # Host header the operator did not list ends that. The container's own healthcheck always gets in.
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=[*cfg.allowed_hosts, "localhost", "127.0.0.1", "[::1]"])
 
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -141,5 +155,11 @@ def create_app() -> FastAPI:
     if not cfg.url_base:
         return inner
     outer = FastAPI(lifespan=inner.router.lifespan_context, docs_url=None, redoc_url=None, openapi_url=None)
+
+    @outer.get("/ping", response_class=PlainTextResponse, include_in_schema=False)
+    def ping() -> str:
+        # The image's healthcheck asks for /ping, which under a URL base exists only below the prefix.
+        return "pong"
+
     outer.mount(cfg.url_base, inner)
     return outer
