@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -13,6 +13,7 @@ from ..config import get_config
 from ..db import get_session
 from ..orm import BenchmarkScore
 from ..settings_store import AppSettings, BenchmarkSourceSettings, load_settings, save_settings
+from .auth import is_authenticated
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -132,8 +133,13 @@ def _out(session: Session, settings: AppSettings) -> SettingsOut:
 
 
 @router.get("", response_model=SettingsOut)
-def get_settings(session: Session = Depends(get_session)) -> SettingsOut:
-    return _out(session, load_settings(session))
+def get_settings(request: Request, session: Session = Depends(get_session)) -> SettingsOut:
+    out = _out(session, load_settings(session))
+    if not is_authenticated(request):
+        # A visitor with no session sees which keys are set, never the end of one.
+        for source in out.sources:
+            source.key_hint = None
+    return out
 
 
 @router.put("", response_model=SettingsOut)

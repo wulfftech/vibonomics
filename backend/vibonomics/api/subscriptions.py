@@ -25,6 +25,7 @@ from ..db import get_session, session_scope
 from ..orm import SubscriptionSnapshot
 from ..settings_store import AppSettings, load_settings, save_settings
 from ..subscriptions import KINDS, latest_snapshot, normalize_statusline, store_snapshot
+from .auth import is_authenticated
 
 router = APIRouter(prefix="/api/subscription", tags=["subscription"])
 
@@ -135,7 +136,10 @@ def _check_token(expected: str | None, provided: str | None) -> None:
 @router.get("/claude", response_model=ClaudeSubscriptionOut)
 def claude_subscription(request: Request, session: Session = Depends(get_session)) -> ClaudeSubscriptionOut:
     settings = load_settings(session)
-    token = _token(session, settings)
+    # The token lets anyone post usage figures, so a visitor with no session gets the usage and no token (and
+    # none is minted for them).
+    reveal = is_authenticated(request)
+    token = _token(session, settings) if reveal else ""
     latest = latest_snapshot(session, "claude")
     snapshot = None
     if latest is not None:
@@ -164,9 +168,9 @@ def claude_subscription(request: Request, session: Session = Depends(get_session
         kind="claude",
         title=KINDS["claude"],
         snapshot=snapshot,
-        ingest_path=f"/api/subscription/ingest/claude?token={token}",
+        ingest_path=f"/api/subscription/ingest/claude?token={token}" if reveal else "/api/subscription/ingest/claude",
         ingest_token=token,
-        statusline_command=command,
+        statusline_command=command if reveal else "",
         docs_url=DOCS_URL,
         note=(
             "Subscriptions have no dollar balance. The windows are the rolling 5-hour and weekly limits (cloud "

@@ -60,7 +60,10 @@ docker compose logs -f vibonomics
 - **API**: routers in `backend/vibonomics/api/`, schemas are pydantic models, and the frontend consumes
   generated types (`npm run gen:api`). Update the types with the router change. Keep the evals API
   contract stable; the UI is built against it. Give a schema a name no other router uses: two classes of
-  one name are both renamed in the generated types. `POST /api/models/value` is for programs, not the UI;
+  one name are both renamed in the generated types. With `VIBONOMICS_OPEN_READ` a visitor may call every GET
+  and the one read-only POST, so a new route that changes something is refused until someone lists it in
+  `api/auth.py`; a GET that returns a secret must withhold it from a visitor (`is_authenticated`). Keep
+  `tests/test_open_read.py` passing: it walks every route. `POST /api/models/value` is for programs, not the UI;
   keep its contract stable too.
 - **Price maths** lives twice: `frontend/src/lib/pricing.ts` for the Models page and
   `backend/vibonomics/pricing.py` for `POST /api/models/value`. Change a formula in both, and keep

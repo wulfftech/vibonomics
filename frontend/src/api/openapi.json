@@ -1361,6 +1361,11 @@
           "authenticated": {
             "type": "boolean",
             "title": "Authenticated"
+          },
+          "open_read": {
+            "type": "boolean",
+            "title": "Open Read",
+            "default": false
           }
         },
         "type": "object",

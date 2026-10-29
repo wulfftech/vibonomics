@@ -556,6 +556,11 @@ export interface components {
             enabled: boolean;
             /** Authenticated */
             authenticated: boolean;
+            /**
+             * Open Read
+             * @default false
+             */
+            open_read: boolean;
         };
         /** BalanceOut */
         BalanceOut: {

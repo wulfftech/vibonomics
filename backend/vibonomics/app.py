@@ -53,6 +53,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "API, including a web page opened in a browser on this network (DNS rebinding). Set one of them "
             "unless a proxy in front already restricts access."
         )
+    if cfg.open_read and not cfg.password:
+        log.warning(
+            "VIBONOMICS_OPEN_READ does nothing without VIBONOMICS_PASSWORD: with no password, nothing is locked."
+        )
     log.info("Vibonomics %s started", __version__)
     try:
         yield
@@ -98,7 +102,12 @@ def _api_app() -> FastAPI:
             return JSONResponse({"detail": "Requests from the sandbox network are refused"}, status_code=403)
         path = _route_path(request)
         open_path = path.startswith("/api/auth/") or path.startswith("/api/subscription/ingest/")
-        if path.startswith("/api/") and not open_path and not auth.is_authenticated(request):
+        if (
+            path.startswith("/api/")
+            and not open_path
+            and not auth.is_authenticated(request)
+            and not (auth.open_read() and auth.anonymous_allowed(request.method, path))
+        ):
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
         return await call_next(request)
 

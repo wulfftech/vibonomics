@@ -29,9 +29,9 @@ def test_api_needs_a_session(client):
 
 def test_login_opens_the_api(client):
     assert client.post("/api/auth/login", json={"password": "wrong"}).status_code == 401
-    assert client.get("/api/auth/status").json() == {"enabled": True, "authenticated": False}
+    assert client.get("/api/auth/status").json() == {"enabled": True, "authenticated": False, "open_read": False}
     assert client.post("/api/auth/login", json={"password": "hunter2"}).status_code == 200
-    assert client.get("/api/auth/status").json() == {"enabled": True, "authenticated": True}
+    assert client.get("/api/auth/status").json() == {"enabled": True, "authenticated": True, "open_read": False}
     assert client.get("/api/providers").status_code == 200
 
 
@@ -54,7 +54,7 @@ def test_changing_the_password_ends_every_session(client, monkeypatch):
 
     monkeypatch.setenv("VIBONOMICS_PASSWORD", "a-new-password")
     get_config.cache_clear()
-    assert client.get("/api/auth/status").json() == {"enabled": True, "authenticated": False}
+    assert client.get("/api/auth/status").json() == {"enabled": True, "authenticated": False, "open_read": False}
     assert client.get("/api/providers").status_code == 401
 
     assert client.post("/api/auth/login", json={"password": "a-new-password"}).status_code == 200

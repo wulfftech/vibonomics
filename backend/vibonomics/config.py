@@ -42,6 +42,8 @@ class AppConfig:
     static_dir: Path | None
     # Host names the app answers to; empty means any. See ``app.py`` for why this exists.
     allowed_hosts: tuple[str, ...] = ()
+    # With a password set, let visitors read without logging in; changing anything still needs the password.
+    open_read: bool = False
 
     @property
     def db_path(self) -> Path:
@@ -71,6 +73,7 @@ def get_config() -> AppConfig:
         log_level=(_env("VIBONOMICS_LOG_LEVEL", "info") or "info").lower(),
         static_dir=_find_static_dir(),
         allowed_hosts=tuple(h.strip() for h in (_env("VIBONOMICS_ALLOWED_HOSTS", "") or "").split(",") if h.strip()),
+        open_read=(_env("VIBONOMICS_OPEN_READ", "") or "").lower() in {"1", "true", "yes", "on"},
     )
 
 

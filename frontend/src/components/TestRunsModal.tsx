@@ -27,6 +27,7 @@ import type { EvalResultOut, EvalRunOut } from '../api/types';
 import { compactCount, dateTime, DASH, duration, integer, money, relativeTime } from '../lib/format';
 import { isGraded, statusColor, statusLabel } from '../lib/status';
 import { ScoreNumber } from './models/cells';
+import { ChangeOnly } from './ChangeOnly';
 import { EmptyState, ErrorState, LoadingState } from './DataState';
 import { TranscriptViewer } from './TranscriptViewer';
 
@@ -238,17 +239,18 @@ function ResultRow({
   );
 }
 
-function DeleteRunButton({ runId, onDeleted }: { runId: number; onDeleted: () => void }) {
+function DeleteRunButton({ runId, onDeleted, disabled }: { runId: number; onDeleted: () => void; disabled: boolean }) {
   const remove = useDeleteRun();
   const [opened, setOpened] = useState(false);
   return (
-    <Popover opened={opened} onChange={setOpened} position="bottom-end" withArrow>
+    <Popover opened={opened && !disabled} onChange={setOpened} position="bottom-end" withArrow>
       <Popover.Target>
         <Button
           variant="light"
           color="red"
           size="xs"
           leftSection={<Trash size={14} />}
+          disabled={disabled}
           onClick={() => setOpened((o) => !o)}
         >
           Delete
@@ -338,21 +340,30 @@ function RunDetail({
         </Stack>
         <Group gap="xs">
           {active && (
-            <Button
-              variant="default"
-              size="xs"
-              leftSection={<Square size={14} />}
-              loading={cancel.isPending}
-              onClick={() =>
-                cancel.mutate(run.id, {
-                  onError: (error) => notifications.show({ message: error.message, color: 'red' }),
-                })
-              }
-            >
-              Cancel run
-            </Button>
+            <ChangeOnly reason="Log in to cancel a run">
+              {(blocked) => (
+                <Button
+                  variant="default"
+                  size="xs"
+                  leftSection={<Square size={14} />}
+                  loading={cancel.isPending}
+                  disabled={blocked}
+                  onClick={() =>
+                    cancel.mutate(run.id, {
+                      onError: (error) => notifications.show({ message: error.message, color: 'red' }),
+                    })
+                  }
+                >
+                  Cancel run
+                </Button>
+              )}
+            </ChangeOnly>
           )}
-          {!active && <DeleteRunButton runId={run.id} onDeleted={onDeleted} />}
+          {!active && (
+            <ChangeOnly reason="Log in to delete a run">
+              {(blocked) => <DeleteRunButton runId={run.id} onDeleted={onDeleted} disabled={blocked} />}
+            </ChangeOnly>
+          )}
         </Group>
       </Group>
 

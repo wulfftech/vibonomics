@@ -3,6 +3,7 @@ import {
   AppShell,
   Badge,
   Burger,
+  Button,
   Group,
   Loader,
   NavLink as MantineNavLink,
@@ -13,11 +14,11 @@ import {
   VisuallyHidden,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { ChartNoAxesCombined, LayoutList, Moon, Settings, Sun, WifiOff } from 'lucide-react';
+import { ChartNoAxesCombined, LayoutList, LogIn, LogOut, Moon, Settings, Sun, WifiOff } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import { useEventStream } from '../api/eventStream';
-import { useRefreshStatus, useSystemStatus } from '../api/system';
+import { useAuthStatus, useLogout, useRefreshStatus, useSystemStatus } from '../api/system';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Models', icon: LayoutList, match: (path: string) => path === '/' || path.startsWith('/models') },
@@ -88,6 +89,34 @@ function RefreshIndicator() {
   );
 }
 
+/** Log out when there is a session; otherwise a way to the login that unlocks Settings and every change. */
+function SessionControl() {
+  const auth = useAuthStatus();
+  const logout = useLogout();
+  if (!auth.data?.enabled) {
+    return null;
+  }
+  if (auth.data.authenticated) {
+    return (
+      <Button
+        variant="subtle"
+        color="gray"
+        size="xs"
+        leftSection={<LogOut size={14} />}
+        loading={logout.isPending}
+        onClick={() => logout.mutate()}
+      >
+        Log out
+      </Button>
+    );
+  }
+  return (
+    <Button component={NavLink} to="/settings" variant="subtle" size="xs" leftSection={<LogIn size={14} />}>
+      Log in to make changes
+    </Button>
+  );
+}
+
 /** The shell: a header with the instance name and live status, a navbar, and the page. */
 export function AppLayout() {
   const system = useSystemStatus();
@@ -150,6 +179,9 @@ export function AppLayout() {
               leftSection={<Icon size={16} />}
             />
           ))}
+        </AppShell.Section>
+        <AppShell.Section px="xs" py={4}>
+          <SessionControl />
         </AppShell.Section>
         <AppShell.Section px="sm" py={4}>
           <Text size="xs" c="dimmed">

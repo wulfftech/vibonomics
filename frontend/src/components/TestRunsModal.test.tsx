@@ -50,6 +50,9 @@ vi.mock('../api/evals', () => ({
   useDeleteRun: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
+let canChange = true;
+vi.mock('../api/system', () => ({ useCanChange: () => canChange }));
+
 function renderModal() {
   return render(
     <MantineProvider>
@@ -80,6 +83,22 @@ describe('TestRunsModal, ungraded and errored results', () => {
       const cells = row(taskId).querySelectorAll('td');
       const scoreCell = cells[3]; // Task, Category, Status, Score for a single-target run
       expect(scoreCell.textContent?.trim()).toBe('—');
+    }
+  });
+});
+
+describe('TestRunsModal, for a visitor who cannot change anything', () => {
+  it('shows delete disabled, and enabled for someone who can', () => {
+    canChange = false;
+    try {
+      const { unmount } = renderModal();
+      expect(screen.getByRole('button', { name: /delete/i })).toBeDisabled();
+      unmount();
+      canChange = true;
+      renderModal();
+      expect(screen.getByRole('button', { name: /delete/i })).toBeEnabled();
+    } finally {
+      canChange = true;
     }
   });
 });

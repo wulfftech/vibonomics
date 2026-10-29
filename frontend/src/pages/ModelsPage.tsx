@@ -8,6 +8,7 @@ import { useProviders } from '../api/providers';
 import { useSettings } from '../api/settings';
 import { useTriggerRefresh } from '../api/system';
 import type { RefreshKind } from '../api/types';
+import { ChangeOnly } from '../components/ChangeOnly';
 import { ErrorState, LoadingState } from '../components/DataState';
 import { ModelDetailsModal } from '../components/ModelDetailsModal';
 import { BalancesStrip } from '../components/models/BalancesStrip';
@@ -64,33 +65,38 @@ function RefreshMenu() {
   const refresh = useTriggerRefresh();
   const { markRequested } = useEventStream();
   return (
-    <Menu position="bottom-end" withinPortal>
-      <Menu.Target>
-        <Button
-          variant="default"
-          leftSection={<RefreshCw size={16} />}
-          rightSection={<ChevronDown size={14} />}
-          loading={refresh.isPending}
-        >
-          Refresh
-        </Button>
-      </Menu.Target>
-      <Menu.Dropdown>
-        {REFRESH_ITEMS.map((item) => (
-          <Menu.Item
-            key={item.label}
-            onClick={() => {
-              markRequested(item.kinds);
-              refresh.mutate(item.kinds, {
-                onError: (error) => notifications.show({ message: error.message, color: 'red' }),
-              });
-            }}
-          >
-            {item.label}
-          </Menu.Item>
-        ))}
-      </Menu.Dropdown>
-    </Menu>
+    <ChangeOnly reason="Log in to refresh">
+      {(blocked) => (
+        <Menu position="bottom-end" withinPortal disabled={blocked}>
+          <Menu.Target>
+            <Button
+              variant="default"
+              leftSection={<RefreshCw size={16} />}
+              rightSection={<ChevronDown size={14} />}
+              loading={refresh.isPending}
+              disabled={blocked}
+            >
+              Refresh
+            </Button>
+          </Menu.Target>
+          <Menu.Dropdown>
+            {REFRESH_ITEMS.map((item) => (
+              <Menu.Item
+                key={item.label}
+                onClick={() => {
+                  markRequested(item.kinds);
+                  refresh.mutate(item.kinds, {
+                    onError: (error) => notifications.show({ message: error.message, color: 'red' }),
+                  });
+                }}
+              >
+                {item.label}
+              </Menu.Item>
+            ))}
+          </Menu.Dropdown>
+        </Menu>
+      )}
+    </ChangeOnly>
   );
 }
 
@@ -241,13 +247,17 @@ export function ModelsPage() {
           <Button variant="default" leftSection={<History size={16} />} onClick={() => setRunsModal({ runId: null })}>
             Test runs
           </Button>
-          <Button
-            leftSection={<FlaskConical size={16} />}
-            disabled={selectedRows.length === 0}
-            onClick={() => setRunTestsOpen(true)}
-          >
-            Test selected ({selectedRows.length})
-          </Button>
+          <ChangeOnly reason="Log in to run tests">
+            {(blocked) => (
+              <Button
+                leftSection={<FlaskConical size={16} />}
+                disabled={blocked || selectedRows.length === 0}
+                onClick={() => setRunTestsOpen(true)}
+              >
+                Test selected ({selectedRows.length})
+              </Button>
+            )}
+          </ChangeOnly>
           <RefreshMenu />
         </Group>
       </Group>

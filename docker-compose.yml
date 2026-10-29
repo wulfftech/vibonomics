@@ -33,6 +33,7 @@ services:
       UMASK: "${UMASK:-002}"
       # Repeated here so they also work when exported in the shell without a .env file.
       VIBONOMICS_PASSWORD: "${VIBONOMICS_PASSWORD:-}"
+      VIBONOMICS_OPEN_READ: "${VIBONOMICS_OPEN_READ:-}"
       VIBONOMICS_SECRET_KEY: "${VIBONOMICS_SECRET_KEY:-}"
       VIBONOMICS_URL_BASE: "${VIBONOMICS_URL_BASE:-}"
       VIBONOMICS_ALLOWED_HOSTS: "${VIBONOMICS_ALLOWED_HOSTS:-}"

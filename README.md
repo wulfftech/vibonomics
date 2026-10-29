@@ -173,7 +173,8 @@ composite.
 
 The maths is the Models page's: `backend/vibonomics/pricing.py` copies `frontend/src/lib/pricing.ts`.
 The endpoint only reads. It sits behind the password like the rest of `/api`, so a program calling an
-instance with `VIBONOMICS_PASSWORD` set logs in first and sends the session cookie.
+instance with `VIBONOMICS_PASSWORD` set logs in first and sends the session cookie, unless the instance is
+[open to read](#open-to-read): this endpoint only reads, so it needs no login there.
 
 ## Testing models
 
@@ -285,6 +286,7 @@ Environment variables for the app and the compose stack:
 | `VIBONOMICS_PORT`, `VIBONOMICS_HOST` | `2289`, `0.0.0.0` | listen address. In compose the app always listens on 2289 inside the container, and `VIBONOMICS_PORT` in `.env` picks the host port |
 | `VIBONOMICS_URL_BASE` | empty | serve under a sub-path such as `/vibonomics` |
 | `VIBONOMICS_PASSWORD` | empty | password gate on the UI (signed cookie session). Changing it ends every session |
+| `VIBONOMICS_OPEN_READ` | off | with a password, let visitors read without logging in. Settings and every change still need the password; see [Open to read](#open-to-read) |
 | `VIBONOMICS_ALLOWED_HOSTS` | empty (any) | comma-separated host names the app answers to. Set it when there is no password: it stops DNS rebinding from a web page on your network |
 | `VIBONOMICS_SECRET_KEY` | generated file | encrypts stored provider keys and signs sessions |
 | `VIBONOMICS_SANDBOX_URL` | empty | sidecar address: `unix:///run/vibonomics-sandbox/sandbox.sock` (compose default) or `http://sandbox:2290` |
@@ -310,6 +312,21 @@ Proxy authentication and the status line do not mix. The ingest endpoint is exem
 login guard because its caller has no browser session, but a proxy authenticator in front of it will still
 answer that caller with a redirect to a login portal, and the snapshot is lost. Point the status line at an
 address that reaches the app without passing the proxy — a LAN address and port is the simple choice.
+
+### Open to read
+
+Set `VIBONOMICS_PASSWORD` and `VIBONOMICS_OPEN_READ=1`, and anyone who can reach the instance can look at
+the models, prices, scores and test results without logging in. Changing anything needs the password: the
+Settings pages, refreshing, running, cancelling or deleting tests, fixing unmatched benchmark names and
+the Claude subscription token. The UI shows visitors those controls disabled, and the Settings page asks
+for the password. A visitor sees which provider keys are set but no part of one, and never the
+status-line token. `POST /api/models/value` stays open, because it only reads.
+
+The API enforces this, not just the UI: any route that is not a read is refused to a visitor until
+`api/auth.py` lists it as open, so a route added later is protected by default. This keeps visitors from
+changing things; it does not keep them from reading. If prices, scores or test results must stay private,
+leave `VIBONOMICS_OPEN_READ` off, and set `VIBONOMICS_ALLOWED_HOSTS` if a web page on your network should
+not be able to read them either.
 
 ## Development
 

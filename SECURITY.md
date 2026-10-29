@@ -80,6 +80,8 @@ empty by default).
 ## Hardening checklist for operators
 
 - Set `VIBONOMICS_PASSWORD`, or put the instance behind a reverse proxy that authenticates.
+- Set `VIBONOMICS_OPEN_READ` only if the model list, prices, scores and test results can be seen by anyone
+  who reaches the instance. It lets visitors read; changing anything still needs the password.
 - Set `VIBONOMICS_SECRET_KEY` from a secret store rather than relying on the generated file.
 - Keep the compose default for the sandbox (no network, reached through its socket). With the TCP
   layout, keep `VIBONOMICS_SANDBOX_GUARD` on and set `VIBONOMICS_SANDBOX_TOKEN`.

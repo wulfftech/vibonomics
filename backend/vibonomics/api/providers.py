@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,6 +22,7 @@ from ..provider_service import env_locked, resolve
 from ..providers.base import FetchContext, ResolvedProvider
 from ..providers.registry import all_specs, get_adapter_class
 from ..settings_store import load_settings
+from .auth import is_authenticated
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
@@ -205,9 +206,13 @@ def _provider_out(p: ProviderConfig, session: Session) -> ProviderOut:
 
 
 @router.get("", response_model=list[ProviderOut])
-def list_providers(session: Session = Depends(get_session)) -> list[ProviderOut]:
+def list_providers(request: Request, session: Session = Depends(get_session)) -> list[ProviderOut]:
     providers = session.scalars(select(ProviderConfig).order_by(ProviderConfig.name)).all()
-    return [_provider_out(p, session) for p in providers]
+    out = [_provider_out(p, session) for p in providers]
+    if not is_authenticated(request):
+        # A visitor with no session sees which keys are set, never the end of one.
+        out = [p.model_copy(update={"api_key_hint": None, "mgmt_key_hint": None, "extra_key_hint": None}) for p in out]
+    return out
 
 
 def _apply_secret(current: str | None, new_value: str | None) -> str | None:

@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { canChange } from '../lib/auth';
 import { api } from './client';
 import { keys } from './keys';
 import type { RefreshKind } from './types';
@@ -16,6 +17,23 @@ export function useLogin() {
       void client.invalidateQueries({ predicate: (query) => query.queryKey[0] !== 'auth' });
     },
   });
+}
+
+export function useLogout() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/api/auth/logout'),
+    onSuccess: (status) => {
+      client.setQueryData(keys.auth, status);
+      // What a visitor may read differs (key hints, the ingest token), so fetch it all again.
+      void client.invalidateQueries({ predicate: (query) => query.queryKey[0] !== 'auth' });
+    },
+  });
+}
+
+/** Whether this browser may change things; false for a visitor of an instance that is open to read. */
+export function useCanChange(): boolean {
+  return canChange(useAuthStatus().data);
 }
 
 export function useSystemStatus() {

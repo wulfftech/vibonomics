@@ -1,5 +1,5 @@
 import { MantineProvider } from '@mantine/core';
-import { Notifications } from '@mantine/notifications';
+import { Notifications, notifications } from '@mantine/notifications';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { createBrowserRouter, RouterProvider, type RouteObject } from 'react-router';
@@ -7,9 +7,11 @@ import { setUnauthorizedListener } from './api/client';
 import { EventStreamProvider } from './api/EventStreamProvider';
 import { keys } from './api/keys';
 import { useAuthStatus } from './api/system';
+import type { AuthStatus } from './api/types';
 import { AppLayout } from './components/AppLayout';
 import { ErrorState, LoadingState } from './components/DataState';
 import { LoginScreen } from './components/LoginScreen';
+import { needsLoginScreen } from './lib/auth';
 import { routerBasename } from './lib/basename';
 import { ModelsPage } from './pages/ModelsPage';
 import { NotFoundPage } from './pages/NotFoundPage';
@@ -34,14 +36,25 @@ function Routes() {
   return <RouterProvider router={router} />;
 }
 
-/** Shows the login card while auth is on and this browser has no session; any 401 brings it back. */
+/**
+ * Shows the login card while auth is on, this browser has no session and reading is not open; any 401 brings it
+ * back. When reading is open a 401 means a change needs the password, so it says so and leaves the page alone.
+ */
 function AuthGate() {
   const client = useQueryClient();
   const auth = useAuthStatus();
 
   useEffect(() => {
     setUnauthorizedListener(() => {
-      client.setQueryData(keys.auth, { enabled: true, authenticated: false });
+      const known = client.getQueryData<AuthStatus>(keys.auth);
+      client.setQueryData(keys.auth, { enabled: true, authenticated: false, open_read: known?.open_read ?? false });
+      if (known?.open_read) {
+        notifications.show({
+          id: 'login-needed',
+          color: 'yellow',
+          message: 'That needs the password. Log in under Settings.',
+        });
+      }
     });
     return () => setUnauthorizedListener(null);
   }, [client]);
@@ -52,7 +65,7 @@ function AuthGate() {
   if (auth.isError) {
     return <ErrorState title="Vibonomics is unreachable" message={auth.error.message} />;
   }
-  if (auth.data.enabled && !auth.data.authenticated) {
+  if (needsLoginScreen(auth.data)) {
     return <LoginScreen />;
   }
   return (
