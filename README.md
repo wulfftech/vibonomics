@@ -1,8 +1,17 @@
 ﻿# Vibonomics
 
-A self-hosted dashboard of LLM model prices, published scores and per-provider balances. It also
-runs its own sandboxed tests against models that nobody has scored, so a free or brand-new model can
-be compared with the paid ones next to it.
+A self-hosted dashboard of LLM model prices, published scores and per-provider balances. It answers one
+question: what does this model cost for what it does?
+
+Every pricing page says its model is the best deal. Every leaderboard says someone else's model is the
+best model. Vibonomics puts both on one screen and does the division. It also runs its own sandboxed
+tests against models that nobody has scored, so a free or brand-new model can be compared with the paid
+ones next to it.
+
+![The Models page sorted by value: free and cheap models that score well come first, each with its price, estimated cost per task, scores and a value index](docs/screenshots/models.png)
+
+*Best value first, on a fresh install with no API keys. Screenshots taken 2026-10-31; prices and scores
+move.*
 
 Vibonomics reads from providers and leaderboards; it does not sit in front of your inference traffic.
 It stores everything in one SQLite file and sends nothing anywhere except the requests you enable.
@@ -10,8 +19,9 @@ Two containers: the app, and a sandbox sidecar that runs model-written code with
 network.
 
 **Status: 0.1.0, pre-1.0.** The UI and most of the API are settled; the database schema and a few
-response shapes may still change between releases. There is one maintainer, and the app has been run
-on Windows (development) and Linux (Docker) only.
+response shapes may still change between releases. There is one maintainer. The app has been run on
+Windows (development) and Linux (Docker). macOS is untested, which is a polite way of saying nobody has
+tried.
 
 ## What it does
 
@@ -25,8 +35,9 @@ on Windows (development) and Linux (Docker) only.
   history is kept, so a model that is new, discounted, or newly cheaper is marked as such.
 - **Balances where they exist.** Credit left (DeepSeek, Moonshot, Chutes), a prepaid balance from a
   management key (OpenRouter, xAI, Requesty), spend from an admin API (OpenAI, Anthropic orgs), Claude
-  subscription windows, or a stated "not exposed by the API" with a link to the console. One card per
-  vendor, each with its own refresh button that re-fetches only that vendor's providers.
+  subscription windows. Where a vendor exposes nothing, the card says "not exposed by the API" and links
+  the console, which beats a confident zero. One card per vendor, each with its own refresh button that
+  re-fetches only that vendor's providers.
 - **Scores from named sources.** Terminal-Bench 4.0, Arena (text, Code Arena and Agent Arena) and the
   Epoch AI hub are on by default. OpenRouter's datasets, LiveBench and Artificial Analysis are opt-in.
   Each number keeps its source, licence and date.
@@ -44,6 +55,18 @@ on Windows (development) and Linux (Docker) only.
   Continue, Cline, Roo Code, Kilo Code), OpenCode, Claude Code, Codex CLI, Aider, Zed, Crush, Goose,
   curl and the OpenAI Python SDK. Keys are referenced through environment variables or placeholders.
 
+### A closer look
+
+Every number keeps its source. Open a model and the **Scores** tab lists each leaderboard behind the
+composite, with the raw value, the percentile, the effort setting and the date:
+
+![Details for Claude Sonnet 5.5 on OpenRouter, Scores tab: a composite of 97 from three sources, then one row per metric from Epoch AI, Terminal-Bench and Arena with its raw value, percentile, effort and date](docs/screenshots/model-scores-dark.png)
+
+The **Config** tab writes the setup for the tool you already use. The snippet names an environment
+variable and never contains your key.
+
+![Details for Claude Sonnet 5.5 on OpenRouter, Config tab: a VS Code Copilot custom-endpoint snippet, with 13 more tabs from Continue to Python](docs/screenshots/model-config-dark.png)
+
 ## Quick start
 
 Requirements: Docker with Compose v2.24 or later, and about 1 GB of RAM free (more for a rebuild).
@@ -58,7 +81,7 @@ docker compose up -d --build
 Tagged releases are published to `ghcr.io/wulfftech/vibonomics`, but compose from a checkout is the
 supported way to run it: the sandbox sidecar is part of the stack.
 
-Then open `http://localhost:2289`.
+Then open `http://localhost:2289`. That is the whole install: no account, no sign-up, no telemetry.
 
 The first start loads public catalogues; OpenRouter and the OpenCode Console show models without a
 key. Add keys under **Settings → Providers**, press **Test** in the provider form (it tests what you
@@ -105,9 +128,9 @@ Compose passes everything in `.env` to the app, so keys can live there instead o
 
 ## Scores and their sources
 
-Every metric is converted to a percentile inside its own leaderboard, which makes Elo ratings, pass
-rates and indices comparable. Available percentiles form an intelligence, coding and agentic subtotal,
-and those form a weighted composite. The weights are in **Settings → Scoring**.
+Every metric is converted to a percentile inside its own leaderboard. Elo ratings, pass rates and indices
+share no unit; percentiles give them one. Available percentiles form an intelligence, coding and agentic
+subtotal, and those form a weighted composite. The weights are in **Settings → Scoring**.
 
 | Source | Default | Licence | What it contributes |
 |---|---|---|---|
@@ -129,6 +152,11 @@ Attribution for every enabled source appears in the table footer and in each mod
 matching between a source's model name and a canonical model is reviewed in **Settings → Benchmarks →
 Review unmatched**; corrections are stored as aliases.
 
+![Settings, Benchmarks: each score source with its description, licence and attribution, how many rows were fetched and how many matched a model, and a switch to turn it off](docs/screenshots/settings-benchmarks.png)
+
+The screenshots in this README show scores from Terminal-Bench (Apache-2.0), Arena (CC BY 4.0) and Epoch
+AI (CC BY 4.0), converted to percentiles, and nothing from Artificial Analysis.
+
 ## Cost, value and the numbers you see
 
 - **Blended $/1M** weights input and output for the selected profile. The default profile is agentic
@@ -141,6 +169,12 @@ Review unmatched**; corrections are stored as aliases.
   stand-in price in **Settings → Scoring** (default $0.01 per 1M) so they get a finite value. Set it to
   0 to restore the older behaviour, where any free model sorted first.
 - **Discount column** shows the percentage; the blended price shows the list price in brackets.
+
+![The Models page in dark mode, sorted by score: Claude Opus 5.5, GPT-5.5 Pro and Claude Sonnet 5.5 at the top, with value indexes between 11 and 54](docs/screenshots/models-top-score-dark.png)
+
+Sorted by score, the top of the table is the expensive end: value indexes of 11 to 54, against 100 at the
+top of the best-value view. Same data, other way up. Dark mode follows your OS, because you were going to
+ask.
 
 ### The same figures for a program
 
@@ -179,7 +213,8 @@ instance with `VIBONOMICS_PASSWORD` set logs in first and sends the session cook
 ## Testing models
 
 Tests make real API calls on the account behind the selected key. Free models cost nothing; a paid
-judge costs a few tenths of a cent per task.
+judge costs a few tenths of a cent per task. A model grading other models is as circular as it sounds,
+so wherever a check can decide, a check does.
 
 Two suites ship: **Quick** (seven tasks) for triage and **Standard** (fourteen) for a clearer ranking.
 
@@ -195,7 +230,8 @@ per-model assessment. Models Vibonomics cannot call (free OpenCode models, OpenC
 not offered as judges, and free models are labelled because they rate-limit often. A run with a broken
 judge still completes, scored by the deterministic checks, and says so.
 
-**Sandbox.** Model-written code never runs beside your keys. The compose file starts `vibonomics-sandbox`
+**Sandbox.** Model-written code never runs beside your keys. It gets a room with no network, no secrets
+and a strict curfew. The compose file starts `vibonomics-sandbox`
 with no network at all, a read-only filesystem and limits on CPU, memory and processes. Its server runs as
 root with only the capabilities to switch user (`SETUID`, `SETGID`, `CHOWN`), and every run of test code
 starts under its own unprivileged uid, so code that outlives its run cannot touch the next one. The app reaches it through a Unix socket on a small in-memory volume they share, so code
@@ -217,9 +253,9 @@ Set the mode in **Settings → Testing**:
 
 ## Claude subscription usage
 
-Pro and Max subscriptions have no dollar balance. Usage is a rolling five-hour window and a weekly
-window, and Claude Code cloud sessions count against the same windows; usage credits (optional
-overage) are the only money-based figure.
+Pro and Max subscriptions have no dollar balance, which makes "how much have I got left?" harder than it
+sounds. Usage is a rolling five-hour window and a weekly window, and Claude Code cloud sessions count
+against the same windows; usage credits (optional overage) are the only money-based figure.
 
 The Models page shows one **Anthropic (Claude)** card for the whole account: the Admin API's
 month-to-date spend, then the subscription's plan windows and session figures when Claude Code is
@@ -315,12 +351,13 @@ address that reaches the app without passing the proxy — a LAN address and por
 
 ### Open to read
 
-Set `VIBONOMICS_PASSWORD` and `VIBONOMICS_OPEN_READ=1`, and anyone who can reach the instance can look at
-the models, prices, scores and test results without logging in. Changing anything needs the password: the
-Settings pages, refreshing, running, cancelling or deleting tests, fixing unmatched benchmark names and
-the Claude subscription token. The UI shows visitors those controls disabled, and the Settings page asks
-for the password. A visitor sees which provider keys are set but no part of one, and never the
-status-line token. `POST /api/models/value` stays open, because it only reads.
+Anyone can look; only the password can touch. Set `VIBONOMICS_PASSWORD` and `VIBONOMICS_OPEN_READ=1`, and
+anyone who can reach the instance can look at the models, prices, scores and test results without logging
+in. Changing anything needs the password: the Settings pages, refreshing, running, cancelling or deleting
+tests, fixing unmatched benchmark names and the Claude subscription token. The UI shows visitors those
+controls disabled, and the Settings page asks for the password. A visitor sees which provider keys are
+set but no part of one, and never the status-line token. `POST /api/models/value` stays open, because it
+only reads.
 
 The API enforces this, not just the UI: any route that is not a read is refused to a visitor until
 `api/auth.py` lists it as open, so a route added later is protected by default. This keeps visitors from

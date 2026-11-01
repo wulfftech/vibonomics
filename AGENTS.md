@@ -86,6 +86,10 @@ docker compose logs -f vibonomics
   for two providers passes both ids to one refresh request.
 - **Secrets**: encrypted with Fernet (`crypto.py`); `VIBONOMICS_*_API_KEY` environment values take
   precedence and render as locked. Never log request headers.
+- **README screenshots** (`docs/screenshots/`): taken from a throwaway instance with a fresh config
+  directory and no keys, so they hold public data only. No balances, no key hints, and nothing from
+  Artificial Analysis or any other source whose licence forbids shipping its data. Show each source's
+  attribution, and put the capture date in the README caption. Retake one when its screen changes.
 - **Style**: Ruff, 120 columns. TypeScript strict, `no-explicit-any` an error. Prettier, 120 columns,
   single quotes. Conventional Commits, imperative mood, no AI attribution trailers.
 
