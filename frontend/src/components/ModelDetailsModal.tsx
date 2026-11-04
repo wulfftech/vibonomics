@@ -21,7 +21,7 @@ import { useModelDetail } from '../api/models';
 import type { ModelDetail, UsageProfile } from '../api/types';
 import { compactTokens, dateOnly, dateTime, DASH, discountLabel, integer, money, relativeTime } from '../lib/format';
 import { listPrices } from '../lib/modelTable';
-import { scoreColor } from '../lib/modelText';
+import { clientName, scoreColor } from '../lib/modelText';
 import { blendedPrice, profileFormula, taskCost } from '../lib/pricing';
 import { isGraded, statusColor, statusLabel } from '../lib/status';
 import { ModelBadges, ScoreNumber } from './models/cells';
@@ -61,6 +61,45 @@ function BoolBadge({ value, label }: { value: boolean | null; label: string }) {
   );
 }
 
+/** OpenCode's own docs pages for the terms below; the model lists differ between Console and Go. */
+const TERMS_DOCS: Record<string, string> = {
+  opencode: 'https://opencode.ai/v2/docs/console/models/',
+  'opencode-go': 'https://opencode.ai/v2/docs/console/go/',
+};
+
+/** What the provider says about who may call a free model and what it does with your prompts. */
+export function FreeTerms({ detail }: { detail: ModelDetail }) {
+  const { row, data_use: dataUse } = detail;
+  if (!row.client_restricted && !dataUse) {
+    return null;
+  }
+  const docs = TERMS_DOCS[row.provider_type];
+  return (
+    <Card withBorder padding="md">
+      <Stack gap="sm">
+        <Title order={4}>Free model terms</Title>
+        {row.client_restricted && (
+          <Fact label="Who can call it">
+            Only the {clientName(row.client_restricted)} client. Any other client gets HTTP 403, even with a valid API
+            key, so Vibonomics cannot test it and every other harness on the Config tab says so. Paid models and Go work
+            from other clients.
+          </Fact>
+        )}
+        {dataUse && <Fact label="Your data">{dataUse}</Fact>}
+        {docs && (
+          <Text size="xs" c="dimmed">
+            From{' '}
+            <Anchor href={docs} target="_blank" rel="noreferrer" size="xs">
+              OpenCode&apos;s model docs
+            </Anchor>
+            . Free periods are limited and the terms can change.
+          </Text>
+        )}
+      </Stack>
+    </Card>
+  );
+}
+
 function OverviewTab({ detail, profile }: { detail: ModelDetail; profile: UsageProfile | undefined }) {
   const { row } = detail;
   const list = listPrices(row);
@@ -73,6 +112,7 @@ function OverviewTab({ detail, profile }: { detail: ModelDetail; profile: UsageP
   ];
   return (
     <Stack gap="md">
+      <FreeTerms detail={detail} />
       <Card withBorder padding="md">
         <Stack gap="sm">
           <Title order={4}>Prices per 1M tokens</Title>

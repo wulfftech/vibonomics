@@ -48,6 +48,7 @@ tried.
   are costed at a configurable stand-in price so "free" alone does not top the list.
 - **A sortable table.** Search, quick filters (free, best value, new, discounted, scored, tool calling,
   testable), grouping by provider, creator, model, price band or value tier, and copy-ready model IDs.
+  Once an OpenCode key is set, **Hide OpenCode-only** drops the free models that only the OpenCode client can call.
   Where several providers sell the same model, the canonical model id groups them. OpenCode's two
   catalogues are folded: a model both Console and Go list appears once, marked **also on Go**.
 - **Your own tests.** Pick models, pick a judge model, and run agentic coding, tool-use,
@@ -311,6 +312,12 @@ plan's windows sit above a line saying Console credit is only visible in the con
 providers underneath, because their catalogues differ (Go covers a subset of Console's models) and each
 needs its own key. Where both list the same model at the same per-token rate, the table shows one row
 marked **also on Go** rather than the same model twice.
+
+Console's free models are OpenCode-client-only: OpenCode's docs say every other harness gets HTTP 403, key or
+not. The table badges them **OpenCode only**, the model details state what the docs say each one does with your
+data (some collect prompts to improve the model; the Nemotron ones are trial use, no personal or confidential
+data), and every other harness's config tab warns that the model will 403. Vibonomics has no way to call them
+from elsewhere, on purpose.
 
 ## OpenRouter spend history
 

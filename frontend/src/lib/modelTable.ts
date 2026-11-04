@@ -1,4 +1,4 @@
-import type { ModelRow, UsageProfile } from '../api/types';
+import type { ModelRow, ProviderOut, UsageProfile } from '../api/types';
 import {
   blendedPrice,
   effectiveInputPrice,
@@ -226,6 +226,11 @@ export interface ModelFilters {
   chips: QuickFilter[];
   /** Hide batch-API variants. On by default; a separate flag, not a chip, so saved filters pick up the default. */
   nonBatchOnly: boolean;
+  /**
+   * Hide models only one client can call (free OpenCode models). Off by default, and a separate flag for the same
+   * reason as `nonBatchOnly`. It applies only while an OpenCode key is set: see `applicableFilters`.
+   */
+  hideRestricted: boolean;
   providers: string[];
   groupBy: GroupBy;
   profileId: string | null;
@@ -237,12 +242,56 @@ export const DEFAULT_FILTERS: ModelFilters = {
   search: '',
   chips: [],
   nonBatchOnly: true,
+  hideRestricted: false,
   providers: [],
   groupBy: 'none',
   profileId: null,
   minContext: 0,
   sort: { key: 'score', dir: 'desc' },
 };
+
+/** localStorage key the Models page keeps its filters under. */
+export const MODEL_FILTERS_KEY = 'vibonomics.models.filters';
+
+/** Repairs filters read back from localStorage (an older build may have stored other values). */
+export function sanitizeFilters(filters: ModelFilters): ModelFilters {
+  const chips = new Set<string>(QUICK_FILTERS.map((chip) => chip.value));
+  const groups = new Set<string>(GROUP_OPTIONS.map((group) => group.value));
+  const sortKeys = new Set<string>(SORT_KEYS);
+  return {
+    search: typeof filters.search === 'string' ? filters.search : '',
+    chips: Array.isArray(filters.chips) ? filters.chips.filter((chip) => chips.has(chip)) : [],
+    nonBatchOnly: typeof filters.nonBatchOnly === 'boolean' ? filters.nonBatchOnly : DEFAULT_FILTERS.nonBatchOnly,
+    hideRestricted:
+      typeof filters.hideRestricted === 'boolean' ? filters.hideRestricted : DEFAULT_FILTERS.hideRestricted,
+    providers: Array.isArray(filters.providers) ? filters.providers.filter((p) => typeof p === 'string') : [],
+    groupBy: groups.has(filters.groupBy) ? filters.groupBy : 'none',
+    profileId: typeof filters.profileId === 'string' ? filters.profileId : null,
+    minContext: typeof filters.minContext === 'number' ? filters.minContext : 0,
+    sort:
+      filters.sort && sortKeys.has(filters.sort.key) && (filters.sort.dir === 'asc' || filters.sort.dir === 'desc')
+        ? filters.sort
+        : DEFAULT_FILTERS.sort,
+  };
+}
+
+/** Whether an enabled OpenCode provider (Console or Go) has an API key. Never reads a key, only the `*_set` flag. */
+export function hasOpenCodeKey(
+  providers: readonly Pick<ProviderOut, 'type' | 'enabled' | 'api_key_set'>[] | undefined,
+) {
+  return (providers ?? []).some(
+    (p) => p.enabled && p.api_key_set && (p.type === 'opencode' || p.type === 'opencode-go'),
+  );
+}
+
+/**
+ * The filters to apply. "Hide OpenCode-only" counts only while an OpenCode key is set, because its control is
+ * shown only then. A choice saved before the key was removed stays saved (it comes back, visibly checked, with a
+ * key) but hides nothing meanwhile: a filter with no control to switch it off must not hide rows.
+ */
+export function applicableFilters(filters: ModelFilters, opencodeKey: boolean): ModelFilters {
+  return filters.hideRestricted && !opencodeKey ? { ...filters, hideRestricted: false } : filters;
+}
 
 function matchesChip(model: EnrichedModel, chip: QuickFilter): boolean {
   const { row } = model;
@@ -272,6 +321,7 @@ export function filterModels(models: EnrichedModel[], filters: ModelFilters): En
       (providers.size === 0 || providers.has(String(model.row.provider_id))) &&
       (filters.minContext <= 0 || (model.row.context_length ?? 0) >= filters.minContext) &&
       (!filters.nonBatchOnly || !isBatchModel(model.row)) &&
+      (!filters.hideRestricted || !model.row.client_restricted) &&
       filters.chips.every((chip) => matchesChip(model, chip)),
   );
 }

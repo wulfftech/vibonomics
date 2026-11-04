@@ -7,6 +7,18 @@ export function scoreColor(value: number): string {
   return value >= 80 ? 'green' : value >= 60 ? 'teal' : value >= 40 ? 'yellow' : 'gray';
 }
 
+const CLIENT_NAMES: Record<string, string> = { opencode: 'OpenCode' };
+
+/** The display name of a client that is the only one allowed to call a model, by the id the API sends. */
+export function clientName(id: string): string {
+  return CLIENT_NAMES[id] ?? id;
+}
+
+/** The badge for a model only one client may call, e.g. "OpenCode only". */
+export function restrictedLabel(client: string): string {
+  return `${clientName(client)} only`;
+}
+
 /**
  * The labels `ModelBadges` and `ModelNameCell` draw after a model's name, in order. The table measures
  * them to size the Model column. The discount has its own column and no badge.
@@ -24,6 +36,9 @@ export function modelBadgeLabels(row: ModelRow, alsoOnGo = false): string[] {
   }
   if (row.is_free) {
     labels.push('Free');
+  }
+  if (row.client_restricted) {
+    labels.push(restrictedLabel(row.client_restricted));
   }
   if (!row.active) {
     labels.push('Inactive');

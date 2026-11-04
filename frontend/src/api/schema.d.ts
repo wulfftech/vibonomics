@@ -1001,6 +1001,8 @@ export interface components {
             row: components["schemas"]["ModelRow"];
             /** Description */
             description: string | null;
+            /** Data Use */
+            data_use?: string | null;
             /** Metrics */
             metrics: components["schemas"]["vibonomics__api__models__MetricOut"][];
             /** Reported Cost Sources */
@@ -1092,6 +1094,8 @@ export interface components {
             /** Reported Cost Per Task */
             reported_cost_per_task: number | null;
             test: components["schemas"]["TestSummaryOut"] | null;
+            /** Client Restricted */
+            client_restricted?: string | null;
         };
         /** ModelsResponse */
         ModelsResponse: {

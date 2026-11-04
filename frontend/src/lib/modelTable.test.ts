@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 import type { ModelRow, UsageProfile } from '../api/types';
 import {
   DEFAULT_FILTERS,
+  applicableFilters,
   buildDisplayRows,
   effectiveSort,
   enrichModels,
   filterModels,
   foldOpenCodeOffers,
+  hasOpenCodeKey,
+  sanitizeFilters,
   sortModels,
   type ModelFilters,
 } from './modelTable';
@@ -133,6 +136,33 @@ describe('filterModels', () => {
     expect(filterModels(enriched, filters({ chips: ['free'] })).map((m) => m.row.name)).toEqual(['Bravo']);
     expect(filterModels(enriched, filters({ chips: ['discounted'] })).map((m) => m.row.name)).toEqual(['Charlie']);
     expect(filterModels(enriched, filters({ chips: ['scored', 'free'] })).map((m) => m.row.name)).toEqual(['Bravo']);
+  });
+
+  describe('OpenCode-only models', () => {
+    const withRestricted = enrichModels(
+      [
+        ...rows,
+        row({ id: 6, name: 'Pickle', is_free: true, client_restricted: 'opencode' }),
+        row({ id: 7, name: 'Beam', is_free: true, client_restricted: null }),
+        row({ id: 8, name: 'Quill', is_free: true, client_restricted: undefined }),
+      ],
+      profile,
+    );
+
+    it('shows them by default', () => {
+      expect(DEFAULT_FILTERS.hideRestricted).toBe(false);
+      expect(filterModels(withRestricted, DEFAULT_FILTERS).map((m) => m.row.name)).toContain('Pickle');
+    });
+
+    it('hides exactly the rows flagged client-restricted when asked', () => {
+      const names = filterModels(withRestricted, filters({ hideRestricted: true })).map((m) => m.row.name);
+      expect(names).toEqual(['Alpha', 'Bravo', 'Charlie', 'Beam', 'Quill']);
+    });
+
+    it('combines with the other filters', () => {
+      const free = filters({ chips: ['free'], hideRestricted: true });
+      expect(filterModels(withRestricted, free).map((m) => m.row.name)).toEqual(['Bravo', 'Beam', 'Quill']);
+    });
   });
 
   describe('batch variants', () => {
@@ -264,5 +294,56 @@ describe('folding the OpenCode Go offer', () => {
     const folded = foldOpenCodeOffers(enrichModels([untestableConsole, goRow], profile));
     expect(folded.map((model) => model.row.id)).toEqual([21]);
     expect(folded[0].alsoOnGo).toBe(false);
+  });
+});
+
+describe('hasOpenCodeKey', () => {
+  const provider = (type: string, enabled: boolean, api_key_set: boolean) => ({ type, enabled, api_key_set });
+
+  it('is true for an enabled Console or Go provider with a key', () => {
+    expect(hasOpenCodeKey([provider('opencode', true, true)])).toBe(true);
+    expect(hasOpenCodeKey([provider('openrouter', true, true), provider('opencode-go', true, true)])).toBe(true);
+  });
+
+  it('is false without a key, when disabled, for other providers, and while the list is loading', () => {
+    expect(hasOpenCodeKey([provider('opencode', true, false)])).toBe(false);
+    expect(hasOpenCodeKey([provider('opencode', false, true)])).toBe(false);
+    expect(hasOpenCodeKey([provider('openrouter', true, true), provider('anthropic', true, true)])).toBe(false);
+    expect(hasOpenCodeKey([])).toBe(false);
+    expect(hasOpenCodeKey(undefined)).toBe(false);
+  });
+});
+
+describe('applicableFilters', () => {
+  const on = filters({ hideRestricted: true, search: 'x' });
+
+  it('keeps the filter while an OpenCode key is set', () => {
+    expect(applicableFilters(on, true)).toBe(on);
+  });
+
+  it('stops applying a saved filter once the key is gone, and changes nothing else', () => {
+    const applied = applicableFilters(on, false);
+    expect(applied.hideRestricted).toBe(false);
+    expect({ ...applied, hideRestricted: true }).toEqual(on);
+    // Rows follow: the saved choice hides the restricted model only while a key is set.
+    const enriched = enrichModels([row({ id: 1, name: 'Pickle', client_restricted: 'opencode' })], profile);
+    const saved = filters({ hideRestricted: true });
+    expect(filterModels(enriched, applicableFilters(saved, true))).toHaveLength(0);
+    expect(filterModels(enriched, applicableFilters(saved, false))).toHaveLength(1);
+  });
+
+  it('leaves an off filter alone either way', () => {
+    expect(applicableFilters(DEFAULT_FILTERS, false)).toBe(DEFAULT_FILTERS);
+  });
+});
+
+describe('sanitizeFilters', () => {
+  it('keeps a saved Hide OpenCode-only and falls back to off for anything else', () => {
+    expect(sanitizeFilters({ ...DEFAULT_FILTERS, hideRestricted: true }).hideRestricted).toBe(true);
+    const old: Partial<ModelFilters> = { ...DEFAULT_FILTERS };
+    delete old.hideRestricted; // saved by a build that did not have the filter
+    expect(sanitizeFilters(old as ModelFilters).hideRestricted).toBe(false);
+    const garbled = { ...DEFAULT_FILTERS, hideRestricted: 'yes' } as unknown as ModelFilters;
+    expect(sanitizeFilters(garbled).hideRestricted).toBe(false);
   });
 });

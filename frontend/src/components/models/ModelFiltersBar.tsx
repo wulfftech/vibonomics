@@ -49,12 +49,15 @@ export function ModelFiltersBar({
   profiles,
   profile,
   providers,
+  showHideRestricted = false,
 }: {
   filters: ModelFilters;
   onChange: (update: (old: ModelFilters) => ModelFilters) => void;
   profiles: UsageProfile[];
   profile: UsageProfile | undefined;
   providers: { value: string; label: string }[];
+  /** Offer "Hide OpenCode-only". The page passes true only while an enabled OpenCode provider has a key. */
+  showHideRestricted?: boolean;
 }) {
   return (
     <Stack gap="sm">
@@ -132,6 +135,23 @@ export function ModelFiltersBar({
             </Chip>
           ))}
         </Chip.Group>
+        {showHideRestricted && (
+          <Tooltip
+            multiline
+            maw={320}
+            withArrow
+            label="Hides free OpenCode models that only the OpenCode client can call. Any other harness gets HTTP 403 for them, even with your key."
+          >
+            <Chip
+              checked={filters.hideRestricted}
+              onChange={(hideRestricted) => onChange((old) => ({ ...old, hideRestricted }))}
+              size="xs"
+              variant="light"
+            >
+              Hide OpenCode-only
+            </Chip>
+          </Tooltip>
+        )}
       </Group>
     </Stack>
   );

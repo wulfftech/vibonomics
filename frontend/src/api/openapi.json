@@ -2605,6 +2605,17 @@
             ],
             "title": "Description"
           },
+          "data_use": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Use"
+          },
           "metrics": {
             "items": {
               "$ref": "#/components/schemas/vibonomics__api__models__MetricOut"
@@ -2930,6 +2941,17 @@
                 "type": "null"
               }
             ]
+          },
+          "client_restricted": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Restricted"
           }
         },
         "type": "object",
