@@ -8,6 +8,8 @@ from typing import Any
 
 from ..catalog.modelsdev import creator_of
 from ..http import FetchError, get_json
+from ..pricing import Task, task_cost
+from ..settings_store import DEFAULT_PROFILES
 from .base import BalanceInfo, ModelOffer, Price, ProviderAdapter, ProviderSpec
 from .common import _f
 
@@ -21,6 +23,30 @@ def _per_million(value: Any) -> float | None:
     if v is None or v < 0:  # OpenRouter uses -1 for "variable" router pricing
         return None
     return round(v * 1_000_000, 6)
+
+
+def pick_discounted_endpoint(listed: Price, endpoints: list[dict[str, Any]], task: Task) -> dict[str, Any] | None:
+    """The discounted endpoint worth showing in place of OpenRouter's listed price, or None.
+
+    Providers of one model discount by different amounts, and a big percentage off a high price is still a high
+    price. So the discounted endpoints are ranked by what one ``task`` costs on each, not by percentage, and the
+    winner is used only when it is no dearer than the listed price. The listed endpoint may be the discounted
+    one itself, hence the small tolerance.
+    """
+    listed_cost = task_cost(listed.input, listed.output, listed.cache_read, task)
+    best: dict[str, Any] | None = None
+    best_cost = 0.0
+    for entry in endpoints:
+        if not 0 < entry["discount"] < 1 or entry["input"] is None or entry["output"] is None:
+            continue
+        cost = task_cost(entry["input"], entry["output"], listed.cache_read, task)
+        if cost is None:
+            continue
+        if best is None or (cost, -entry["discount"]) < (best_cost, -best["discount"]):
+            best, best_cost = entry, cost
+    if best is None or (listed_cost is not None and best_cost > listed_cost * 1.005):
+        return None
+    return best
 
 
 class OpenRouterAdapter(ProviderAdapter):
@@ -100,6 +126,8 @@ class OpenRouterAdapter(ProviderAdapter):
     async def _apply_endpoint_discounts(self, offers: list[ModelOffer]) -> None:
         sem = asyncio.Semaphore(8)
         failures = 0
+        profile = (self.ctx.settings.scoring.profiles or DEFAULT_PROFILES)[0]
+        task = Task(profile.task_input_tokens, profile.task_output_tokens, profile.cache_hit_rate)
 
         async def one(offer: ModelOffer) -> None:
             nonlocal failures
@@ -113,37 +141,37 @@ class OpenRouterAdapter(ProviderAdapter):
                     return
             endpoints = (data.get("data") or {}).get("endpoints") or []
             summary = []
-            best: tuple[float, dict[str, Any]] | None = None
             for ep in endpoints:
                 p = ep.get("pricing") or {}
-                disc = _f(p.get("discount")) or 0.0
-                entry = {
-                    "provider": ep.get("provider_name"),
-                    "tag": ep.get("tag"),
-                    "quantization": ep.get("quantization"),
-                    "input": _per_million(p.get("prompt")),
-                    "output": _per_million(p.get("completion")),
-                    "discount": disc,
-                    "uptime_1d": ep.get("uptime_last_1d"),
-                    "service_tier": ep.get("service_tier"),
-                }
-                summary.append(entry)
-                if disc > 0 and (best is None or disc > best[0]):
-                    best = (disc, entry)
+                summary.append(
+                    {
+                        "provider": ep.get("provider_name"),
+                        "tag": ep.get("tag"),
+                        "quantization": ep.get("quantization"),
+                        "input": _per_million(p.get("prompt")),
+                        "output": _per_million(p.get("completion")),
+                        "discount": _f(p.get("discount")) or 0.0,
+                        "uptime_1d": ep.get("uptime_last_1d"),
+                        "service_tier": ep.get("service_tier"),
+                    }
+                )
             offer.extra["endpoints"] = summary
-            if best:
-                disc, entry = best
-                cur_in, cur_out = entry["input"], entry["output"]
-                if cur_in is not None and cur_out is not None and disc < 1:
-                    offer.price = Price(
-                        input=cur_in,
-                        output=cur_out,
-                        cache_read=offer.price.cache_read,
-                        cache_write=offer.price.cache_write,
-                    )
-                    offer.list_price = Price(input=round(cur_in / (1 - disc), 6), output=round(cur_out / (1 - disc), 6))
-                    offer.discount = round(disc, 4)
-                    offer.discount_note = f"{round(disc * 100)}% off via {entry['provider']}"
+            entry = pick_discounted_endpoint(offer.price, summary, task)
+            if entry:
+                disc, cur_in, cur_out = entry["discount"], entry["input"], entry["output"]
+                offer.price = Price(
+                    input=cur_in,
+                    output=cur_out,
+                    cache_read=offer.price.cache_read,
+                    cache_write=offer.price.cache_write,
+                )
+                offer.list_price = Price(input=round(cur_in / (1 - disc), 6), output=round(cur_out / (1 - disc), 6))
+                offer.discount = round(disc, 4)
+                others = {e["provider"] for e in summary if e["discount"] > 0 and e["provider"] != entry["provider"]}
+                offer.discount_note = f"{round(disc * 100)}% off via {entry['provider']}"
+                if others:
+                    plural = "s" if len(others) > 1 else ""
+                    offer.discount_note += f"; {len(others)} other provider{plural} discounted too"
 
         await asyncio.gather(*(one(o) for o in offers))
         if failures:

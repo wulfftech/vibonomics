@@ -30,7 +30,9 @@ tried.
   pricing page, and fall back to the models.dev catalogue when a page cannot be read. The refresh job
   records the failure instead of silently showing stale numbers.
 - **Discounts and price changes.** Discounts are detected where a provider publishes them: OpenRouter's
-  per-endpoint discount and `:free` models, Requesty's discount field, and strike-through prices or
+  per-provider discounts (a model's row shows the cheapest discounted provider, and only when it beats
+  OpenRouter's listed price; the rest sit in its details) and `:free` models, Requesty's discount field,
+  and strike-through prices or
   "50% off" notes on the OpenAI, Anthropic, Google, xAI, Mistral and OpenCode pages. A model's price
   history is kept, so a model that is new, discounted, or newly cheaper is marked as such.
 - **Balances where they exist.** Credit left (DeepSeek, Moonshot, Chutes), a prepaid balance from a
@@ -54,7 +56,6 @@ tried.
 - **Config snippets.** For each model, a copyable setup for VS Code (Copilot Chat custom endpoint,
   Continue, Cline, Roo Code, Kilo Code), OpenCode, Claude Code, Codex CLI, Aider, Zed, Crush, Goose,
   curl and the OpenAI Python SDK. Keys are referenced through environment variables or placeholders.
-
 ### A closer look
 
 Every number keeps its source. Open a model and the **Scores** tab lists each leaderboard behind the
