@@ -16,7 +16,7 @@ from ..orm import RefreshRun
 
 router = APIRouter(prefix="/api/refresh", tags=["refresh"])
 
-Kind = Literal["models", "balances", "benchmarks"]
+Kind = Literal["models", "balances", "benchmarks", "usage"]
 
 
 class RefreshIn(BaseModel):

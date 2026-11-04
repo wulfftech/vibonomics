@@ -14,7 +14,17 @@ import {
   VisuallyHidden,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { ChartNoAxesCombined, LayoutList, LogIn, LogOut, Moon, Settings, Sun, WifiOff } from 'lucide-react';
+import {
+  ChartNoAxesColumn,
+  ChartNoAxesCombined,
+  LayoutList,
+  LogIn,
+  LogOut,
+  Moon,
+  Settings,
+  Sun,
+  WifiOff,
+} from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import { useEventStream } from '../api/eventStream';
@@ -22,6 +32,7 @@ import { useAuthStatus, useLogout, useRefreshStatus, useSystemStatus } from '../
 
 const NAV_ITEMS = [
   { to: '/', label: 'Models', icon: LayoutList, match: (path: string) => path === '/' || path.startsWith('/models') },
+  { to: '/usage', label: 'Usage', icon: ChartNoAxesColumn, match: (path: string) => path.startsWith('/usage') },
   { to: '/settings', label: 'Settings', icon: Settings, match: (path: string) => path.startsWith('/settings') },
 ] as const;
 
@@ -29,6 +40,7 @@ const REFRESH_LABELS: Record<string, string> = {
   models: 'Refreshing models…',
   benchmarks: 'Refreshing benchmarks…',
   balances: 'Refreshing balances…',
+  usage: 'Refreshing spend history…',
 };
 
 function ColorSchemeToggle() {
@@ -72,7 +84,7 @@ function RefreshIndicator() {
   const status = useRefreshStatus();
   const { progress } = useEventStream();
   const running = status.data?.running ?? [];
-  const kind = ['models', 'benchmarks', 'balances'].find((k) => running.includes(k));
+  const kind = ['models', 'benchmarks', 'balances', 'usage'].find((k) => running.includes(k));
   if (kind === undefined) {
     return null;
   }

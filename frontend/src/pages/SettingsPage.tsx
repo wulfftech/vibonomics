@@ -4,6 +4,7 @@ import { useCanChange } from '../api/system';
 import { LoginCard } from '../components/LoginScreen';
 import { BenchmarksSection } from './settings/BenchmarksSection';
 import { GeneralSection } from './settings/GeneralSection';
+import { PresetsSection } from './settings/PresetsSection';
 import { ProvidersSection } from './settings/ProvidersSection';
 import { RefreshSection } from './settings/RefreshSection';
 import { ScoringSection } from './settings/ScoringSection';
@@ -15,6 +16,7 @@ const SECTIONS = [
   { value: 'subscription', label: 'Claude' },
   { value: 'benchmarks', label: 'Benchmarks' },
   { value: 'scoring', label: 'Scoring' },
+  { value: 'presets', label: 'Presets' },
   { value: 'refresh', label: 'Refresh' },
   { value: 'testing', label: 'Testing' },
   { value: 'general', label: 'General' },
@@ -54,6 +56,7 @@ export function SettingsPage() {
       {active === 'subscription' && <SubscriptionSection />}
       {active === 'benchmarks' && <BenchmarksSection />}
       {active === 'scoring' && <ScoringSection />}
+      {active === 'presets' && <PresetsSection />}
       {active === 'refresh' && <RefreshSection />}
       {active === 'testing' && <TestingSection />}
       {active === 'general' && <GeneralSection />}

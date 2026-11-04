@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 
+import httpx
 import pytest
+import respx
 from fastapi.testclient import TestClient
 
 from vibonomics.api.auth import READ_METHODS
@@ -33,7 +35,14 @@ def _logged_in(client: TestClient) -> TestClient:
 
 
 def test_visitors_can_read(client):
-    for path in ("/api/models", "/api/providers", "/api/settings", "/api/system/status", "/api/evals/runs"):
+    for path in (
+        "/api/models",
+        "/api/providers",
+        "/api/settings",
+        "/api/system/status",
+        "/api/evals/runs",
+        "/api/usage",
+    ):
         assert client.get(path).status_code == 200, path
 
 
@@ -60,6 +69,8 @@ CHANGES = [
     ("POST", "/api/providers/1/test"),
     ("POST", "/api/providers/refresh"),
     ("POST", "/api/providers/1/refresh"),
+    ("POST", "/api/presets/plan"),
+    ("POST", "/api/presets/apply"),
     ("POST", "/api/evals/runs"),
     ("POST", "/api/evals/runs/1/cancel"),
     ("DELETE", "/api/evals/runs/1"),
@@ -79,8 +90,11 @@ def test_visitors_cannot_change_anything(client, method, path):
 def test_after_login_a_change_reaches_its_route(client):
     # Whatever the route says about an empty body or a missing id, it is no longer the guard's 401.
     _logged_in(client)
-    for method, path in CHANGES:
-        assert client.request(method, path, json={}).status_code != 401, (method, path)
+    # Some routes call out with a stored key, and an earlier test may have left one in the shared database.
+    with respx.mock(assert_all_called=False) as outbound:
+        outbound.route().mock(return_value=httpx.Response(401, json={"error": "no network in tests"}))
+        for method, path in CHANGES:
+            assert client.request(method, path, json={}).status_code != 401, (method, path)
 
 
 def test_the_read_only_post_is_open(client):

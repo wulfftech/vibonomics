@@ -16,6 +16,7 @@ import { routerBasename } from './lib/basename';
 import { ModelsPage } from './pages/ModelsPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { UsagePage } from './pages/UsagePage';
 import { cssVariablesResolver, theme } from './theme';
 
 const ROUTES: RouteObject[] = [
@@ -24,6 +25,7 @@ const ROUTES: RouteObject[] = [
     element: <AppLayout />,
     children: [
       { index: true, element: <ModelsPage /> },
+      { path: 'usage', element: <UsagePage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: 'settings/:section', element: <SettingsPage /> },
       { path: '*', element: <NotFoundPage /> },

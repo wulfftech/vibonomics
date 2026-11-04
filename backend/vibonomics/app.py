@@ -14,7 +14,20 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__, events, sandbox_guard, scheduler
-from .api import auth, benchmarks, evals, models, providers, refresh, settings, subscriptions, system, value
+from .api import (
+    auth,
+    benchmarks,
+    evals,
+    models,
+    presets,
+    providers,
+    refresh,
+    settings,
+    subscriptions,
+    system,
+    usage,
+    value,
+)
 from .config import get_config
 from .db import init_db, session_scope
 from .evals import runner
@@ -116,6 +129,8 @@ def _api_app() -> FastAPI:
         auth.router,
         models.router,
         value.router,
+        presets.router,
+        usage.router,
         providers.router,
         settings.router,
         refresh.router,

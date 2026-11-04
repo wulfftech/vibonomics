@@ -13,14 +13,14 @@ from typing import Any
 from sqlalchemy import and_, bindparam, delete, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
-from . import events
+from . import events, usage
 from .benchmarks.base import BenchContext, ScoreRecord
 from .benchmarks.matching import Matcher
 from .benchmarks.registry import SOURCES
 from .catalog.modelsdev import load_catalog
 from .db import session_scope
 from .orm import Balance, BenchmarkScore, Model, ModelAlias, PriceHistory, ProviderConfig, RefreshRun
-from .provider_service import build_adapter
+from .provider_service import build_adapter, resolve
 from .providers.base import BalanceInfo, FetchContext, ModelOffer
 from .scoring import source_in_use
 from .settings_store import AppSettings, load_settings
@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 PROVIDER_TIMEOUT = 300
 BALANCE_TIMEOUT = 60
 _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-KINDS = ("models", "balances", "benchmarks")
+KINDS = ("models", "balances", "benchmarks", "usage")
 
 
 def now() -> datetime:
@@ -74,6 +74,7 @@ async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | N
         "models": _refresh_models,
         "balances": _refresh_balances,
         "benchmarks": _refresh_benchmarks,
+        "usage": _refresh_usage,
     }
     job = jobs[kind]
     lock = _locks[kind]
@@ -391,6 +392,42 @@ async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
             log.error("Benchmark source %s failed", sid, exc_info=result)
             stats["failed"] += 1
             stats["errors"].append(f"{SOURCES[sid].spec.name}: {failure_text(result, PROVIDER_TIMEOUT)[:300]}")
+    return stats
+
+
+# -- spend history ---------------------------------------------------------------------------
+
+
+async def _refresh_usage(run_id: int) -> dict[str, Any]:
+    """Each OpenRouter account's spend history, for the accounts that have a management key."""
+    providers, _settings = await asyncio.to_thread(_load_providers_and_settings)
+    stats: dict[str, Any] = {"ok": 0, "failed": 0, "partial": 0, "errors": [], "rows": 0, "skipped": 0}
+
+    async def one(cfg: ProviderConfig) -> None:
+        resolved = resolve(cfg)
+        if not resolved.mgmt_key:
+            stats["skipped"] += 1  # a normal key cannot read the activity API
+            return
+        events.publish("refresh.progress", {"kind": "usage", "provider": cfg.name})
+        try:
+            base = (resolved.base_url or "https://openrouter.ai/api/v1").rstrip("/")
+            account = await asyncio.wait_for(usage.fetch_account(base, resolved.mgmt_key), PROVIDER_TIMEOUT)
+            stats["rows"] += await asyncio.to_thread(usage.persist, cfg.id, account)
+        except Exception as exc:
+            text = failure_text(exc, PROVIDER_TIMEOUT)
+            msg = text if text.startswith(("GET", "POST")) else f"{type(exc).__name__}: {text}"
+            log.warning("Usage refresh failed for %s: %s", cfg.name, msg)
+            stats["failed"] += 1
+            stats["errors"].append(f"{cfg.name}: {msg[:300]}")
+            return
+        stats["ok"] += 1
+        if account.errors:
+            stats["partial"] += 1
+            stats["errors"].append(f"{cfg.name}: {'; '.join(account.errors)[:300]}")
+
+    targets = [p for p in providers if p.type == "openrouter"]
+    results = await asyncio.gather(*(one(p) for p in targets), return_exceptions=True)
+    _record_crashes(results, [p.name for p in targets], stats)
     return stats
 
 

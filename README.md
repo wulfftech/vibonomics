@@ -61,6 +61,12 @@ tried.
   where a harness has room for it (VS Code Copilot, Continue, OpenCode, Aider, curl, Python); the others say
   they can't pin. A discounted row starts pinned to the provider behind its discount, because that price
   holds only while requests reach that provider.
+- **Spend history.** What an OpenRouter account has spent, in dollars and tokens, by day, model, provider
+  and API key, with the cost of a million tokens and the cache hit rate. OpenRouter only shows the last 30
+  days, so Vibonomics keeps each day it sees.
+- **A best-value preset.** Optionally keeps one OpenRouter preset pointed at the model that gives the most
+  score per dollar today, on its cheapest providers. Preview shows the exact request first. Off by default.
+
 ### A closer look
 
 Every number keeps its source. Open a model and the **Scores** tab lists each leaderboard behind the
@@ -305,10 +311,58 @@ providers underneath, because their catalogues differ (Go covers a subset of Con
 needs its own key. Where both list the same model at the same per-token rate, the table shows one row
 marked **also on Go** rather than the same model twice.
 
+## OpenRouter spend history
+
+The **Usage** page reads an OpenRouter account's activity: spend, prompt and completion tokens, requests and
+cache hits, per day, per model, per provider that served it and per API key. The headline figure is the cost of
+a million tokens, spend over tokens processed, so you can see whether a change (a cheaper model, a warmer
+cache) made the account cheaper to run. Tokens are prompt plus completion, with reasoning counted inside
+completion, as OpenRouter reports it.
+
+It needs a **management key** on the OpenRouter provider: OpenRouter reports activity to nobody else. The
+activity API reaches back 30 finished UTC days and no further, so each pull stores the days it returns and
+the history grows past that window. Each pull replaces the days it fetches, which corrects a figure OpenRouter
+revised. The current day is not in the activity API; the keys list reports it, and the page shows it as
+"so far today" when it was fetched today.
+
+An account is read whole, and then once per API key used in the last 31 days, so spend can be split by key.
+Spend that no listed key accounts for (a key in another workspace, or one since deleted) shows as **Other**
+instead of vanishing. Several OpenRouter providers show as separate accounts, or added together. Pulls run
+every 12 hours (**Settings → Refresh**), at startup and from the Refresh menu.
+
+## A best-value preset on OpenRouter
+
+A preset is a named bundle of model and routing settings that any client selects with
+`model: "@preset/<slug>"`. Vibonomics can keep one preset pointed at the best value of the day, so a harness
+that cannot pin a provider still follows it. Turn it on under **Settings → Presets**.
+
+- **How it picks.** The same score per dollar as the Models page, for the usage profile you choose, among
+  OpenRouter models that pass your filters (minimum score, tool calling, context size, no free or batch
+  offers unless you allow them). A new model replaces the current one only when it is a set percentage
+  better, so the preset does not flap between near ties.
+- **Which providers.** The cheapest endpoints for that task, as many as you ask for, written to
+  `provider.only` and `provider.order`. A discounted endpoint wins on price.
+- **What it leaves alone.** Everything else in the preset: tools, reasoning, other provider filters. Each
+  write to OpenRouter is the whole config, so Vibonomics reads the preset first and sends back what it found.
+  An edit you make in the OpenRouter UI survives. A new preset can start from one of yours (read only).
+- **What it will write.** Only a slug that starts with `vibonomics-` and that it created itself. A preset of
+  that name made by hand is refused. It never deletes: OpenRouter's API has no delete, so remove one in the
+  web UI.
+- **Dry run first.** **Preview** reads the preset from OpenRouter, ranks the models and shows the exact
+  request it would send, the live version number, the version history and what changes. **Apply** sends that
+  plan, and only that plan: if anything moved since you looked, it refuses and asks you to preview again.
+  After a write it reads the preset back and names any key OpenRouter did not keep.
+- **On a schedule.** A separate switch updates the preset every N hours with no one watching. Off by default,
+  and it needs the write switch too.
+
+A preset with a system prompt cannot be updated: the API takes no system prompt, so a new version would
+drop it. Vibonomics reports that instead of writing. The preset calls use your ordinary OpenRouter API key,
+not the management key.
+
 ## Refreshing
 
-The **Refresh** menu on the Models page runs a whole kind — models and prices, balances, or benchmarks —
-across every enabled provider. Each balance card also has its own refresh button, which re-fetches only
+The **Refresh** menu on the Models page runs a whole kind — models and prices, balances, benchmarks or spend
+history — across every enabled provider. Each balance card also has its own refresh button, which re-fetches only
 that card's providers: Anthropic's card refreshes Anthropic, OpenCode's refreshes both Console and Go,
 and a provider with its own card refreshes itself.
 
@@ -360,7 +414,8 @@ address that reaches the app without passing the proxy — a LAN address and por
 Anyone can look; only the password can touch. Set `VIBONOMICS_PASSWORD` and `VIBONOMICS_OPEN_READ=1`, and
 anyone who can reach the instance can look at the models, prices, scores and test results without logging
 in. Changing anything needs the password: the Settings pages, refreshing, running, cancelling or deleting
-tests, fixing unmatched benchmark names and the Claude subscription token. The UI shows visitors those
+tests, fixing unmatched benchmark names, previewing or applying the OpenRouter preset (both call OpenRouter
+with your key) and the Claude subscription token. The UI shows visitors those
 controls disabled, and the Settings page asks for the password. A visitor sees which provider keys are
 set but no part of one, and never the status-line token. `POST /api/models/value` stays open, because it
 only reads.

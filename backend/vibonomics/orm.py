@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -200,11 +201,59 @@ class SubscriptionSnapshot(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class UsageDay(Base):
+    """One day of an OpenRouter account's spend on one model through one upstream provider.
+
+    OpenRouter's activity API reaches back 30 days, so each day it reports is kept here and the history outgrows
+    that window. ``key_hash`` is empty for the whole account, and an API key's hash for the rows of that key alone:
+    sum one kind or the other, never both.
+    """
+
+    __tablename__ = "usage_days"
+    __table_args__ = (
+        UniqueConstraint("provider_config_id", "key_hash", "date", "model", "upstream"),
+        Index("ix_usage_days_scope", "provider_config_id", "key_hash", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider_config_id: Mapped[int] = mapped_column(ForeignKey("provider_configs.id", ondelete="CASCADE"))
+    key_hash: Mapped[str] = mapped_column(String(100), default="")
+    date: Mapped[str] = mapped_column(String(10))  # YYYY-MM-DD, UTC
+    model: Mapped[str] = mapped_column(String(300))
+    upstream: Mapped[str] = mapped_column(String(200), default="")
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)  # reasoning tokens are part of these
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0)  # part of the prompt tokens
+    usage: Mapped[float] = mapped_column(Float, default=0.0)  # USD of OpenRouter credits
+    byok_usage: Mapped[float] = mapped_column(Float, default=0.0)  # USD spent on the operator's own provider keys
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class UsageKey(Base):
+    """An API key of an OpenRouter account, as its management key lists it."""
+
+    __tablename__ = "usage_keys"
+    __table_args__ = (UniqueConstraint("provider_config_id", "key_hash"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider_config_id: Mapped[int] = mapped_column(ForeignKey("provider_configs.id", ondelete="CASCADE"), index=True)
+    key_hash: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(200), default="")
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    usage_total: Mapped[float] = mapped_column(Float, default=0.0)
+    usage_today: Mapped[float] = mapped_column(Float, default=0.0)  # the current UTC day, which the activity API omits
+    usage_month: Mapped[float] = mapped_column(Float, default=0.0)
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
 class RefreshRun(Base):
     __tablename__ = "refresh_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    kind: Mapped[str] = mapped_column(String(30))  # models | benchmarks | balances
+    kind: Mapped[str] = mapped_column(String(30))  # models | benchmarks | balances | usage
     trigger: Mapped[str] = mapped_column(String(20), default="manual")
     started_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

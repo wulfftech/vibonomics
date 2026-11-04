@@ -32,7 +32,7 @@ export function RefreshSection() {
       <Card withBorder padding="md">
         <Stack gap="md">
           <Title order={4}>Schedules</Title>
-          <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
+          <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md">
             <NumberInput
               label="Models & prices"
               description="Hours between refreshes"
@@ -61,6 +61,16 @@ export function RefreshSection() {
               suffix=" h"
               value={refresh.benchmarks_interval_hours}
               onChange={(next) => setRefresh({ benchmarks_interval_hours: toNumber(next) })}
+            />
+            <NumberInput
+              label="Spend history"
+              description="Hours between pulls; needs an OpenRouter management key"
+              min={0}
+              step={1}
+              decimalScale={2}
+              suffix=" h"
+              value={refresh.usage_interval_hours}
+              onChange={(next) => setRefresh({ usage_interval_hours: toNumber(next) })}
             />
           </SimpleGrid>
           <Switch

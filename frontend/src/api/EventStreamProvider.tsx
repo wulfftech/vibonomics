@@ -16,6 +16,7 @@ const KIND_LABELS: Record<string, string> = {
   models: 'Models & prices',
   balances: 'Balances',
   benchmarks: 'Benchmarks',
+  usage: 'Spend history',
 };
 
 function str(value: unknown): string | undefined {
@@ -43,6 +44,9 @@ function invalidateForRefresh(client: QueryClient, kind: string): void {
   if (kind === 'models' || kind === 'benchmarks') {
     void client.invalidateQueries({ queryKey: keys.models });
     void client.invalidateQueries({ queryKey: keys.judges });
+  }
+  if (kind === 'usage') {
+    void client.invalidateQueries({ queryKey: keys.usage });
   }
   if (kind === 'benchmarks') {
     void client.invalidateQueries({ queryKey: keys.settings });
@@ -114,6 +118,9 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
           void client.invalidateQueries({ queryKey: keys.settings });
           void client.invalidateQueries({ queryKey: keys.models });
           void client.invalidateQueries({ queryKey: keys.system });
+          break;
+        case 'presets.changed':
+          void client.invalidateQueries({ queryKey: keys.presetState });
           break;
         case 'subscription.updated':
           void client.invalidateQueries({ queryKey: keys.claudeSubscription });

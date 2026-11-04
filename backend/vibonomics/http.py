@@ -41,6 +41,10 @@ async def close_client() -> None:
 class FetchError(Exception):
     """A fetch failed in a way worth surfacing to the operator (status code, auth, parse)."""
 
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
 
 async def get_json(
     url: str,
@@ -103,7 +107,7 @@ async def request(
             continue
         if resp.status_code >= 400:
             body = scrub_secrets(resp.text[:300].replace("\n", " "), headers, params)
-            raise FetchError(f"{method} {_redact(url)}: HTTP {resp.status_code} {body}")
+            raise FetchError(f"{method} {_redact(url)}: HTTP {resp.status_code} {body}", status=resp.status_code)
         return resp
     raise FetchError(f"{method} {_redact(url)}: {scrub_secrets(str(last_exc), headers, params)}")
 

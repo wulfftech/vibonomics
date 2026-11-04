@@ -146,6 +146,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/presets/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preset State
+         * @description What Vibonomics last wrote and when. Reads the local record only; nothing leaves this instance.
+         */
+        get: operations["preset_state_api_presets_state_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/presets/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preset Plan
+         * @description The dry run: rank the models, read the preset, and show the exact request an update would send.
+         */
+        post: operations["preset_plan_api_presets_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/presets/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preset Apply
+         * @description Write the plan the caller reviewed, if it is still the plan and there is something to write.
+         */
+        post: operations["preset_apply_api_presets_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Spend
+         * @description Spend, tokens and cost per million tokens over the last ``days`` days of stored history.
+         */
+        get: operations["spend_api_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/providers/types": {
         parameters: {
             query?: never;
@@ -569,6 +649,7 @@ export interface components {
             benchmarks?: components["schemas"]["BenchmarkSettings"];
             evals?: components["schemas"]["EvalSettings"];
             subscriptions?: components["schemas"]["SubscriptionSettings"];
+            presets?: components["schemas"]["PresetSettings"];
         };
         /** AuthStatus */
         AuthStatus: {
@@ -1033,6 +1114,304 @@ export interface components {
             /** Is Free */
             is_free: boolean;
         };
+        /** PresetApplyIn */
+        PresetApplyIn: {
+            /**
+             * Digest
+             * @description The digest of the plan that was reviewed
+             */
+            digest: string;
+        };
+        /** PresetApplyOut */
+        PresetApplyOut: {
+            /** Applied */
+            applied: boolean;
+            /** Message */
+            message: string;
+            /** Version */
+            version: number | null;
+            /**
+             * Unsaved
+             * @description Keys OpenRouter did not keep as sent
+             */
+            unsaved: string[];
+            state: components["schemas"]["PresetStateOut"];
+        };
+        /** PresetCandidateOut */
+        PresetCandidateOut: {
+            /** Model Id */
+            model_id: string;
+            /** Name */
+            name: string;
+            /** Score */
+            score: number;
+            /**
+             * Task Cost
+             * @description Estimated USD per task at the current price
+             */
+            task_cost: number;
+            /**
+             * Value
+             * @description Score points per dollar per task
+             */
+            value: number;
+            /** Discount */
+            discount: number | null;
+        };
+        /** PresetChangeOut */
+        PresetChangeOut: {
+            /** Path */
+            path: string;
+            /**
+             * Before
+             * @description The old value as JSON, null when the key is new
+             */
+            before: string | null;
+            /**
+             * After
+             * @description The new value as JSON, null when the key goes
+             */
+            after: string | null;
+        };
+        /** PresetPlanOut */
+        PresetPlanOut: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "create" | "update" | "unchanged" | "blocked";
+            /** Reason */
+            reason: string;
+            /** Slug */
+            slug: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Auto Apply */
+            auto_apply: boolean;
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Profile */
+            profile: string | null;
+            task: components["schemas"]["PresetTaskOut"] | null;
+            /**
+             * Considered
+             * @description Models that pass the filters
+             */
+            considered: number;
+            pick: components["schemas"]["PresetCandidateOut"] | null;
+            /**
+             * Kept Current
+             * @description The best value is not far enough ahead of the current model to switch
+             */
+            kept_current: boolean;
+            /** Providers */
+            providers: components["schemas"]["PresetProviderOut"][];
+            /** Runners Up */
+            runners_up: components["schemas"]["PresetCandidateOut"][];
+            /**
+             * Current Version
+             * @description The version of the preset that is live on OpenRouter now
+             */
+            current_version: number | null;
+            /** Current Config */
+            current_config: {
+                [key: string]: unknown;
+            } | null;
+            /** Versions */
+            versions: components["schemas"]["PresetVersionOut"][];
+            /** Config */
+            config: {
+                [key: string]: unknown;
+            } | null;
+            /** Changes */
+            changes: components["schemas"]["PresetChangeOut"][];
+            request: components["schemas"]["PresetRequestOut"] | null;
+            /**
+             * Digest
+             * @description Names this plan; `apply` refuses a plan that has changed since
+             */
+            digest: string | null;
+            /** Warnings */
+            warnings: string[];
+            state: components["schemas"]["PresetStateOut"];
+        };
+        /** PresetProviderOut */
+        PresetProviderOut: {
+            /**
+             * Tag
+             * @description The provider slug the preset lists, such as `deepinfra/fp8`
+             */
+            tag: string;
+            /** Provider */
+            provider: string | null;
+            /** Input */
+            input: number | null;
+            /** Output */
+            output: number | null;
+            /** Discount */
+            discount: number;
+            /** Quantization */
+            quantization: string | null;
+            /** Task Cost */
+            task_cost: number;
+        };
+        /** PresetRequestOut */
+        PresetRequestOut: {
+            /**
+             * Method
+             * @default POST
+             * @constant
+             */
+            method: "POST";
+            /** Url */
+            url: string;
+            /**
+             * Body
+             * @description Sent exactly as shown; the API requires `messages` and then ignores it
+             */
+            body: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * PresetSettings
+         * @description The OpenRouter preset Vibonomics keeps pointed at the best-value model, and how it picks that model.
+         *
+         *     Off by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts
+         *     with ``vibonomics-``, so a preset the operator made by hand can never be the one that is rewritten.
+         */
+        PresetSettings: {
+            /**
+             * Enabled
+             * @description Let Vibonomics create and update the preset below on OpenRouter
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Auto Apply
+             * @description Also update the preset on a schedule, with no one watching
+             * @default false
+             */
+            auto_apply: boolean;
+            /**
+             * Interval Hours
+             * @description Hours between scheduled updates
+             * @default 24
+             */
+            interval_hours: number;
+            /**
+             * Slug
+             * @default vibonomics-best-value
+             */
+            slug: string;
+            /**
+             * Template Slug
+             * @description An existing preset whose other settings (tools, reasoning, provider filters) the new preset starts from. Read, never changed.
+             */
+            template_slug?: string | null;
+            /**
+             * Profile
+             * @description Usage profile that sets the task the models are costed for
+             */
+            profile?: string | null;
+            /**
+             * Dimension
+             * @default composite
+             * @enum {string}
+             */
+            dimension: "composite" | "intelligence" | "coding" | "agentic";
+            /**
+             * Min Score
+             * @default 60
+             */
+            min_score: number;
+            /**
+             * Require Tool Call
+             * @default true
+             */
+            require_tool_call: boolean;
+            /**
+             * Min Context
+             * @description Smallest context window, in tokens; 0 for any
+             * @default 0
+             */
+            min_context: number;
+            /**
+             * Include Free
+             * @default false
+             */
+            include_free: boolean;
+            /**
+             * Switch Margin Pct
+             * @description A new model replaces the current one only when it gives this much more value
+             * @default 10
+             */
+            switch_margin_pct: number;
+            /**
+             * Max Providers
+             * @description Providers listed for the model, cheapest first
+             * @default 3
+             */
+            max_providers: number;
+        };
+        /** PresetStateOut */
+        PresetStateOut: {
+            /**
+             * Owned
+             * @description Slugs Vibonomics created, the only ones it will ever write
+             */
+            owned: string[];
+            /**
+             * Slug
+             * @description The preset last written
+             */
+            slug?: string | null;
+            /** Model Id */
+            model_id?: string | null;
+            /** Version */
+            version?: number | null;
+            /** Applied At */
+            applied_at?: string | null;
+            /** Last Run At */
+            last_run_at?: string | null;
+            /**
+             * Last Status
+             * @description applied, unchanged, blocked or failed
+             */
+            last_status?: string | null;
+            /** Last Message */
+            last_message?: string | null;
+            /** Last Trigger */
+            last_trigger?: string | null;
+        };
+        /** PresetTaskOut */
+        PresetTaskOut: {
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
+            /** Cache Hit Rate */
+            cache_hit_rate: number;
+        };
+        /** PresetVersionOut */
+        PresetVersionOut: {
+            /** Version */
+            version: number | null;
+            /** Created At */
+            created_at: string | null;
+            /** Model */
+            model: string | null;
+            /** Providers */
+            providers: string[];
+            /**
+             * Live
+             * @description Whether this is the version requests to the preset use now
+             */
+            live: boolean;
+        };
         /** PriceOut */
         PriceOut: {
             /** Input */
@@ -1232,7 +1611,7 @@ export interface components {
         /** RefreshIn */
         RefreshIn: {
             /** Kinds */
-            kinds?: ("models" | "balances" | "benchmarks")[];
+            kinds?: ("models" | "balances" | "benchmarks" | "usage")[];
         };
         /** RefreshRunOut */
         RefreshRunOut: {
@@ -1276,6 +1655,12 @@ export interface components {
              * @default 24
              */
             benchmarks_interval_hours: number;
+            /**
+             * Usage Interval Hours
+             * @description Spend history from OpenRouter; needs a management key
+             * @default 12
+             */
+            usage_interval_hours: number;
             /**
              * Refresh On Startup
              * @default true
@@ -1460,6 +1845,177 @@ export interface components {
             /** Docs Url */
             docs_url?: string | null;
         };
+        /** SpendAccountOut */
+        SpendAccountOut: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /**
+             * Has Management Key
+             * @description Without one, OpenRouter will not report activity
+             */
+            has_management_key: boolean;
+            /** Last Synced */
+            last_synced: string | null;
+            /** First Date */
+            first_date: string | null;
+            /** Last Date */
+            last_date: string | null;
+        };
+        /** SpendBucketOut */
+        SpendBucketOut: {
+            /**
+             * Cost
+             * @description USD of OpenRouter credits
+             */
+            cost: number;
+            /** Requests */
+            requests: number;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /**
+             * Completion Tokens
+             * @description Includes the reasoning tokens
+             */
+            completion_tokens: number;
+            /** Reasoning Tokens */
+            reasoning_tokens: number;
+            /**
+             * Cached Tokens
+             * @description Prompt tokens served from a provider's cache
+             */
+            cached_tokens: number;
+            /**
+             * Tokens
+             * @description Prompt plus completion tokens
+             */
+            tokens: number;
+            /**
+             * Byok Cost
+             * @description USD spent through the operator's own provider keys, not credits
+             */
+            byok_cost: number;
+            /**
+             * Cost Per Mtok
+             * @description USD per million tokens: how efficiently the spend turned into work
+             */
+            cost_per_mtok: number | null;
+            /** Cost Per Request */
+            cost_per_request: number | null;
+            /**
+             * Cache Hit
+             * @description Share of prompt tokens that came from a cache, 0 to 1
+             */
+            cache_hit: number | null;
+        };
+        /** SpendDayOut */
+        SpendDayOut: {
+            /**
+             * Cost
+             * @description USD of OpenRouter credits
+             */
+            cost: number;
+            /** Requests */
+            requests: number;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /**
+             * Completion Tokens
+             * @description Includes the reasoning tokens
+             */
+            completion_tokens: number;
+            /** Reasoning Tokens */
+            reasoning_tokens: number;
+            /**
+             * Cached Tokens
+             * @description Prompt tokens served from a provider's cache
+             */
+            cached_tokens: number;
+            /**
+             * Tokens
+             * @description Prompt plus completion tokens
+             */
+            tokens: number;
+            /**
+             * Byok Cost
+             * @description USD spent through the operator's own provider keys, not credits
+             */
+            byok_cost: number;
+            /**
+             * Cost Per Mtok
+             * @description USD per million tokens: how efficiently the spend turned into work
+             */
+            cost_per_mtok: number | null;
+            /** Cost Per Request */
+            cost_per_request: number | null;
+            /**
+             * Cache Hit
+             * @description Share of prompt tokens that came from a cache, 0 to 1
+             */
+            cache_hit: number | null;
+            /** Date */
+            date: string;
+        };
+        /** SpendKeyOut */
+        SpendKeyOut: {
+            /**
+             * Cost
+             * @description USD of OpenRouter credits
+             */
+            cost: number;
+            /** Requests */
+            requests: number;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /**
+             * Completion Tokens
+             * @description Includes the reasoning tokens
+             */
+            completion_tokens: number;
+            /** Reasoning Tokens */
+            reasoning_tokens: number;
+            /**
+             * Cached Tokens
+             * @description Prompt tokens served from a provider's cache
+             */
+            cached_tokens: number;
+            /**
+             * Tokens
+             * @description Prompt plus completion tokens
+             */
+            tokens: number;
+            /**
+             * Byok Cost
+             * @description USD spent through the operator's own provider keys, not credits
+             */
+            byok_cost: number;
+            /**
+             * Cost Per Mtok
+             * @description USD per million tokens: how efficiently the spend turned into work
+             */
+            cost_per_mtok: number | null;
+            /** Cost Per Request */
+            cost_per_request: number | null;
+            /**
+             * Cache Hit
+             * @description Share of prompt tokens that came from a cache, 0 to 1
+             */
+            cache_hit: number | null;
+            /** Hash */
+            hash: string;
+            /** Name */
+            name: string;
+            /** Disabled */
+            disabled: boolean;
+            /** Last Used At */
+            last_used_at: string | null;
+            /**
+             * Usage Total
+             * @description USD this key has spent over its whole life
+             */
+            usage_total: number;
+        };
         /** SpendLimitOut */
         SpendLimitOut: {
             /** Used Usd */
@@ -1475,6 +2031,87 @@ export interface components {
              * @default monthly
              */
             period: string;
+        };
+        /** SpendNamedOut */
+        SpendNamedOut: {
+            /**
+             * Cost
+             * @description USD of OpenRouter credits
+             */
+            cost: number;
+            /** Requests */
+            requests: number;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /**
+             * Completion Tokens
+             * @description Includes the reasoning tokens
+             */
+            completion_tokens: number;
+            /** Reasoning Tokens */
+            reasoning_tokens: number;
+            /**
+             * Cached Tokens
+             * @description Prompt tokens served from a provider's cache
+             */
+            cached_tokens: number;
+            /**
+             * Tokens
+             * @description Prompt plus completion tokens
+             */
+            tokens: number;
+            /**
+             * Byok Cost
+             * @description USD spent through the operator's own provider keys, not credits
+             */
+            byok_cost: number;
+            /**
+             * Cost Per Mtok
+             * @description USD per million tokens: how efficiently the spend turned into work
+             */
+            cost_per_mtok: number | null;
+            /** Cost Per Request */
+            cost_per_request: number | null;
+            /**
+             * Cache Hit
+             * @description Share of prompt tokens that came from a cache, 0 to 1
+             */
+            cache_hit: number | null;
+            /** Name */
+            name: string;
+        };
+        /** SpendOut */
+        SpendOut: {
+            /** Accounts */
+            accounts: components["schemas"]["SpendAccountOut"][];
+            /** Since */
+            since: string | null;
+            /** Until */
+            until: string | null;
+            /** Days */
+            days: number;
+            /** Provider Id */
+            provider_id: number | null;
+            /** Key */
+            key: string | null;
+            totals: components["schemas"]["SpendBucketOut"];
+            /**
+             * Today Usd
+             * @description Spent so far in the current UTC day, which the history leaves out
+             */
+            today_usd: number | null;
+            /** Today As Of */
+            today_as_of: string | null;
+            /** Daily */
+            daily: components["schemas"]["SpendDayOut"][];
+            /** Models */
+            models: components["schemas"]["SpendNamedOut"][];
+            /** Upstreams */
+            upstreams: components["schemas"]["SpendNamedOut"][];
+            /** Keys */
+            keys: components["schemas"]["SpendKeyOut"][];
+            /** @description Spend no listed key accounts for: a key in another workspace, or one since deleted */
+            other_keys: components["schemas"]["SpendBucketOut"] | null;
         };
         /** SubscriptionSettings */
         SubscriptionSettings: {
@@ -2047,6 +2684,115 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ValueResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preset_state_api_presets_state_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetStateOut"];
+                };
+            };
+        };
+    };
+    preset_plan_api_presets_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetPlanOut"];
+                };
+            };
+        };
+    };
+    preset_apply_api_presets_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PresetApplyIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetApplyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    spend_api_usage_get: {
+        parameters: {
+            query?: {
+                /** @description How many days of history, ending with the latest stored day */
+                days?: number;
+                /** @description One OpenRouter account; all of them when omitted */
+                provider_id?: number | null;
+                /** @description One API key's hash; the whole account when omitted */
+                key?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpendOut"];
                 };
             };
             /** @description Validation Error */

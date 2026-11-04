@@ -26,6 +26,20 @@ export type AppSettings = Schemas['AppSettings'];
 export type BenchmarkSourceOut = Schemas['BenchmarkSourceOut'];
 export type SourceMetric = Schemas['vibonomics__api__settings__MetricOut'];
 
+export type SpendOut = Schemas['SpendOut'];
+export type SpendBucket = Schemas['SpendBucketOut'];
+export type SpendDay = Schemas['SpendDayOut'];
+export type SpendNamed = Schemas['SpendNamedOut'];
+export type SpendKey = Schemas['SpendKeyOut'];
+export type SpendAccount = Schemas['SpendAccountOut'];
+
+export type PresetPlan = Schemas['PresetPlanOut'];
+export type PresetState = Schemas['PresetStateOut'];
+export type PresetApplyResult = Schemas['PresetApplyOut'];
+export type PresetVersion = Schemas['PresetVersionOut'];
+export type PresetProvider = Schemas['PresetProviderOut'];
+export type PresetCandidate = Schemas['PresetCandidateOut'];
+
 export type ClaudeSubscriptionOut = Schemas['ClaudeSubscriptionOut'];
 export type SubscriptionSnapshot = Schemas['SnapshotOut'];
 export type SubscriptionWindow = Schemas['WindowOut'];
@@ -60,6 +74,7 @@ export interface FullSettings {
   scoring: Schemas['ScoringSettings'] & { profiles: UsageProfile[] };
   benchmarks: Schemas['BenchmarkSettings'] & { sources: NonNullable<Schemas['BenchmarkSettings']['sources']> };
   evals: Schemas['EvalSettings'];
+  presets: Schemas['PresetSettings'];
 }
 
 export type SettingsSectionKey = keyof FullSettings;
@@ -71,6 +86,7 @@ export function fullSettings(settings: AppSettings): FullSettings {
       models_interval_hours: 6,
       balances_interval_minutes: 30,
       benchmarks_interval_hours: 24,
+      usage_interval_hours: 12,
       refresh_on_startup: true,
       openrouter_endpoint_discounts: true,
     },
@@ -96,6 +112,20 @@ export function fullSettings(settings: AppSettings): FullSettings {
       concurrency: 2,
       request_timeout_seconds: 180,
       sandbox_mode: 'auto',
+    },
+    presets: {
+      enabled: false,
+      auto_apply: false,
+      interval_hours: 24,
+      slug: 'vibonomics-best-value',
+      dimension: 'composite',
+      min_score: 60,
+      require_tool_call: true,
+      min_context: 0,
+      include_free: false,
+      switch_margin_pct: 10,
+      max_providers: 3,
+      ...settings.presets,
     },
   };
 }

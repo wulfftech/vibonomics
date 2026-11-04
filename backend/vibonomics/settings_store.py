@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from . import crypto
@@ -17,6 +18,7 @@ class RefreshSettings(BaseModel):
     models_interval_hours: float = Field(6, ge=0, description="0 disables scheduled model/price refresh")
     balances_interval_minutes: float = Field(30, ge=0)
     benchmarks_interval_hours: float = Field(24, ge=0)
+    usage_interval_hours: float = Field(12, ge=0, description="Spend history from OpenRouter; needs a management key")
     refresh_on_startup: bool = True
     openrouter_endpoint_discounts: bool = Field(
         True, description="Query OpenRouter's per-provider endpoints to detect discounts (one request per model)"
@@ -120,6 +122,61 @@ class GeneralSettings(BaseModel):
     hide_inactive_models: bool = True
 
 
+PRESET_SLUG_PREFIX = "vibonomics-"
+_PRESET_SLUG = re.compile(rf"^{PRESET_SLUG_PREFIX}[a-z0-9]+(-[a-z0-9]+)*$")
+_TEMPLATE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class PresetSettings(BaseModel):
+    """The OpenRouter preset Vibonomics keeps pointed at the best-value model, and how it picks that model.
+
+    Off by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts
+    with ``vibonomics-``, so a preset the operator made by hand can never be the one that is rewritten.
+    """
+
+    enabled: bool = Field(False, description="Let Vibonomics create and update the preset below on OpenRouter")
+    auto_apply: bool = Field(False, description="Also update the preset on a schedule, with no one watching")
+    interval_hours: float = Field(24, ge=1, le=168, description="Hours between scheduled updates")
+    slug: str = Field(f"{PRESET_SLUG_PREFIX}best-value", max_length=64)
+    template_slug: str | None = Field(
+        None,
+        max_length=100,
+        description="An existing preset whose other settings (tools, reasoning, provider filters) the new preset "
+        "starts from. Read, never changed.",
+    )
+    profile: str | None = Field(None, description="Usage profile that sets the task the models are costed for")
+    dimension: Literal["composite", "intelligence", "coding", "agentic"] = "composite"
+    min_score: float = Field(60, ge=0, le=100)
+    require_tool_call: bool = True
+    min_context: int = Field(0, ge=0, description="Smallest context window, in tokens; 0 for any")
+    include_free: bool = False
+    switch_margin_pct: float = Field(
+        10,
+        ge=0,
+        le=100,
+        description="A new model replaces the current one only when it gives this much more value",
+    )
+    max_providers: int = Field(3, ge=1, le=5, description="Providers listed for the model, cheapest first")
+
+    @field_validator("slug")
+    @classmethod
+    def _own_slug(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not _PRESET_SLUG.match(value):
+            raise ValueError(f"Use lower case letters, digits and hyphens, starting with {PRESET_SLUG_PREFIX}")
+        return value
+
+    @field_validator("template_slug")
+    @classmethod
+    def _template(cls, value: str | None) -> str | None:
+        value = (value or "").strip()
+        if not value:
+            return None
+        if not _TEMPLATE_SLUG.match(value):
+            raise ValueError("A preset slug has letters, digits, dots, hyphens and underscores only")
+        return value
+
+
 class AppSettings(BaseModel):
     general: GeneralSettings = Field(default_factory=GeneralSettings)
     refresh: RefreshSettings = Field(default_factory=RefreshSettings)
@@ -128,6 +185,7 @@ class AppSettings(BaseModel):
     benchmarks: BenchmarkSettings = Field(default_factory=BenchmarkSettings)
     evals: EvalSettings = Field(default_factory=EvalSettings)
     subscriptions: SubscriptionSettings = Field(default_factory=SubscriptionSettings)
+    presets: PresetSettings = Field(default_factory=PresetSettings)
 
     def benchmark_source(self, source_id: str, default_enabled: bool) -> BenchmarkSourceSettings:
         existing = self.benchmarks.sources.get(source_id)

@@ -307,6 +307,177 @@
         }
       }
     },
+    "/api/presets/state": {
+      "get": {
+        "tags": [
+          "presets"
+        ],
+        "summary": "Preset State",
+        "description": "What Vibonomics last wrote and when. Reads the local record only; nothing leaves this instance.",
+        "operationId": "preset_state_api_presets_state_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetStateOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/presets/plan": {
+      "post": {
+        "tags": [
+          "presets"
+        ],
+        "summary": "Preset Plan",
+        "description": "The dry run: rank the models, read the preset, and show the exact request an update would send.",
+        "operationId": "preset_plan_api_presets_plan_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetPlanOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/presets/apply": {
+      "post": {
+        "tags": [
+          "presets"
+        ],
+        "summary": "Preset Apply",
+        "description": "Write the plan the caller reviewed, if it is still the plan and there is something to write.",
+        "operationId": "preset_apply_api_presets_apply_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresetApplyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetApplyOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Spend",
+        "description": "Spend, tokens and cost per million tokens over the last ``days`` days of stored history.",
+        "operationId": "spend_api_usage_get",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 3650,
+              "minimum": 1,
+              "description": "How many days of history, ending with the latest stored day",
+              "default": 30,
+              "title": "Days"
+            },
+            "description": "How many days of history, ending with the latest stored day"
+          },
+          {
+            "name": "provider_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One OpenRouter account; all of them when omitted",
+              "title": "Provider Id"
+            },
+            "description": "One OpenRouter account; all of them when omitted"
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One API key's hash; the whole account when omitted",
+              "title": "Key"
+            },
+            "description": "One API key's hash; the whole account when omitted"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpendOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/providers/types": {
       "get": {
         "tags": [
@@ -1440,6 +1611,9 @@
           },
           "subscriptions": {
             "$ref": "#/components/schemas/SubscriptionSettings"
+          },
+          "presets": {
+            "$ref": "#/components/schemas/PresetSettings"
           }
         },
         "type": "object",
@@ -2863,6 +3037,745 @@
         ],
         "title": "OtherOfferOut"
       },
+      "PresetApplyIn": {
+        "properties": {
+          "digest": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Digest",
+            "description": "The digest of the plan that was reviewed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "digest"
+        ],
+        "title": "PresetApplyIn"
+      },
+      "PresetApplyOut": {
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "title": "Applied"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "unsaved": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unsaved",
+            "description": "Keys OpenRouter did not keep as sent"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PresetStateOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "applied",
+          "message",
+          "version",
+          "unsaved",
+          "state"
+        ],
+        "title": "PresetApplyOut"
+      },
+      "PresetCandidateOut": {
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "task_cost": {
+            "type": "number",
+            "title": "Task Cost",
+            "description": "Estimated USD per task at the current price"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value",
+            "description": "Score points per dollar per task"
+          },
+          "discount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model_id",
+          "name",
+          "score",
+          "task_cost",
+          "value",
+          "discount"
+        ],
+        "title": "PresetCandidateOut"
+      },
+      "PresetChangeOut": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before",
+            "description": "The old value as JSON, null when the key is new"
+          },
+          "after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After",
+            "description": "The new value as JSON, null when the key goes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "before",
+          "after"
+        ],
+        "title": "PresetChangeOut"
+      },
+      "PresetPlanOut": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update",
+              "unchanged",
+              "blocked"
+            ],
+            "title": "Action"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "auto_apply": {
+            "type": "boolean",
+            "title": "Auto Apply"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetTaskOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "considered": {
+            "type": "integer",
+            "title": "Considered",
+            "description": "Models that pass the filters"
+          },
+          "pick": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetCandidateOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kept_current": {
+            "type": "boolean",
+            "title": "Kept Current",
+            "description": "The best value is not far enough ahead of the current model to switch"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/PresetProviderOut"
+            },
+            "type": "array",
+            "title": "Providers"
+          },
+          "runners_up": {
+            "items": {
+              "$ref": "#/components/schemas/PresetCandidateOut"
+            },
+            "type": "array",
+            "title": "Runners Up"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version",
+            "description": "The version of the preset that is live on OpenRouter now"
+          },
+          "current_config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Config"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/PresetVersionOut"
+            },
+            "type": "array",
+            "title": "Versions"
+          },
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/PresetChangeOut"
+            },
+            "type": "array",
+            "title": "Changes"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRequestOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest",
+            "description": "Names this plan; `apply` refuses a plan that has changed since"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PresetStateOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "action",
+          "reason",
+          "slug",
+          "enabled",
+          "auto_apply",
+          "generated_at",
+          "profile",
+          "task",
+          "considered",
+          "pick",
+          "kept_current",
+          "providers",
+          "runners_up",
+          "current_version",
+          "current_config",
+          "versions",
+          "config",
+          "changes",
+          "request",
+          "digest",
+          "warnings",
+          "state"
+        ],
+        "title": "PresetPlanOut"
+      },
+      "PresetProviderOut": {
+        "properties": {
+          "tag": {
+            "type": "string",
+            "title": "Tag",
+            "description": "The provider slug the preset lists, such as `deepinfra/fp8`"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "output": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "discount": {
+            "type": "number",
+            "title": "Discount"
+          },
+          "quantization": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantization"
+          },
+          "task_cost": {
+            "type": "number",
+            "title": "Task Cost"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tag",
+          "provider",
+          "input",
+          "output",
+          "discount",
+          "quantization",
+          "task_cost"
+        ],
+        "title": "PresetProviderOut"
+      },
+      "PresetRequestOut": {
+        "properties": {
+          "method": {
+            "type": "string",
+            "const": "POST",
+            "title": "Method",
+            "default": "POST"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "body": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Body",
+            "description": "Sent exactly as shown; the API requires `messages` and then ignores it"
+          }
+        },
+        "type": "object",
+        "required": [
+          "url",
+          "body"
+        ],
+        "title": "PresetRequestOut"
+      },
+      "PresetSettings": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "description": "Let Vibonomics create and update the preset below on OpenRouter",
+            "default": false
+          },
+          "auto_apply": {
+            "type": "boolean",
+            "title": "Auto Apply",
+            "description": "Also update the preset on a schedule, with no one watching",
+            "default": false
+          },
+          "interval_hours": {
+            "type": "number",
+            "maximum": 168.0,
+            "minimum": 1.0,
+            "title": "Interval Hours",
+            "description": "Hours between scheduled updates",
+            "default": 24
+          },
+          "slug": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Slug",
+            "default": "vibonomics-best-value"
+          },
+          "template_slug": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Slug",
+            "description": "An existing preset whose other settings (tools, reasoning, provider filters) the new preset starts from. Read, never changed."
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile",
+            "description": "Usage profile that sets the task the models are costed for"
+          },
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "composite",
+              "intelligence",
+              "coding",
+              "agentic"
+            ],
+            "title": "Dimension",
+            "default": "composite"
+          },
+          "min_score": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Min Score",
+            "default": 60
+          },
+          "require_tool_call": {
+            "type": "boolean",
+            "title": "Require Tool Call",
+            "default": true
+          },
+          "min_context": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Min Context",
+            "description": "Smallest context window, in tokens; 0 for any",
+            "default": 0
+          },
+          "include_free": {
+            "type": "boolean",
+            "title": "Include Free",
+            "default": false
+          },
+          "switch_margin_pct": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Switch Margin Pct",
+            "description": "A new model replaces the current one only when it gives this much more value",
+            "default": 10
+          },
+          "max_providers": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Max Providers",
+            "description": "Providers listed for the model, cheapest first",
+            "default": 3
+          }
+        },
+        "type": "object",
+        "title": "PresetSettings",
+        "description": "The OpenRouter preset Vibonomics keeps pointed at the best-value model, and how it picks that model.\n\nOff by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts\nwith ``vibonomics-``, so a preset the operator made by hand can never be the one that is rewritten."
+      },
+      "PresetStateOut": {
+        "properties": {
+          "owned": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Owned",
+            "description": "Slugs Vibonomics created, the only ones it will ever write"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug",
+            "description": "The preset last written"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "applied_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied At"
+          },
+          "last_run_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run At"
+          },
+          "last_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Status",
+            "description": "applied, unchanged, blocked or failed"
+          },
+          "last_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Message"
+          },
+          "last_trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Trigger"
+          }
+        },
+        "type": "object",
+        "required": [
+          "owned"
+        ],
+        "title": "PresetStateOut"
+      },
+      "PresetTaskOut": {
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens"
+          },
+          "cache_hit_rate": {
+            "type": "number",
+            "title": "Cache Hit Rate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "cache_hit_rate"
+        ],
+        "title": "PresetTaskOut"
+      },
+      "PresetVersionOut": {
+        "properties": {
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "providers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Providers"
+          },
+          "live": {
+            "type": "boolean",
+            "title": "Live",
+            "description": "Whether this is the version requests to the preset use now"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "created_at",
+          "model",
+          "providers",
+          "live"
+        ],
+        "title": "PresetVersionOut"
+      },
       "PriceOut": {
         "properties": {
           "input": {
@@ -3565,7 +4478,8 @@
               "enum": [
                 "models",
                 "balances",
-                "benchmarks"
+                "benchmarks",
+                "usage"
               ]
             },
             "type": "array",
@@ -3660,6 +4574,13 @@
             "minimum": 0.0,
             "title": "Benchmarks Interval Hours",
             "default": 24
+          },
+          "usage_interval_hours": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Usage Interval Hours",
+            "description": "Spend history from OpenRouter; needs a management key",
+            "default": 12
           },
           "refresh_on_startup": {
             "type": "boolean",
@@ -4206,6 +5127,379 @@
         ],
         "title": "SnippetOut"
       },
+      "SpendAccountOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "has_management_key": {
+            "type": "boolean",
+            "title": "Has Management Key",
+            "description": "Without one, OpenRouter will not report activity"
+          },
+          "last_synced": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced"
+          },
+          "first_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Date"
+          },
+          "last_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Date"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "has_management_key",
+          "last_synced",
+          "first_date",
+          "last_date"
+        ],
+        "title": "SpendAccountOut"
+      },
+      "SpendBucketOut": {
+        "properties": {
+          "cost": {
+            "type": "number",
+            "title": "Cost",
+            "description": "USD of OpenRouter credits"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "title": "Prompt Tokens"
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "title": "Completion Tokens",
+            "description": "Includes the reasoning tokens"
+          },
+          "reasoning_tokens": {
+            "type": "integer",
+            "title": "Reasoning Tokens"
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "title": "Cached Tokens",
+            "description": "Prompt tokens served from a provider's cache"
+          },
+          "tokens": {
+            "type": "integer",
+            "title": "Tokens",
+            "description": "Prompt plus completion tokens"
+          },
+          "byok_cost": {
+            "type": "number",
+            "title": "Byok Cost",
+            "description": "USD spent through the operator's own provider keys, not credits"
+          },
+          "cost_per_mtok": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Mtok",
+            "description": "USD per million tokens: how efficiently the spend turned into work"
+          },
+          "cost_per_request": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Request"
+          },
+          "cache_hit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit",
+            "description": "Share of prompt tokens that came from a cache, 0 to 1"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cost",
+          "requests",
+          "prompt_tokens",
+          "completion_tokens",
+          "reasoning_tokens",
+          "cached_tokens",
+          "tokens",
+          "byok_cost",
+          "cost_per_mtok",
+          "cost_per_request",
+          "cache_hit"
+        ],
+        "title": "SpendBucketOut"
+      },
+      "SpendDayOut": {
+        "properties": {
+          "cost": {
+            "type": "number",
+            "title": "Cost",
+            "description": "USD of OpenRouter credits"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "title": "Prompt Tokens"
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "title": "Completion Tokens",
+            "description": "Includes the reasoning tokens"
+          },
+          "reasoning_tokens": {
+            "type": "integer",
+            "title": "Reasoning Tokens"
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "title": "Cached Tokens",
+            "description": "Prompt tokens served from a provider's cache"
+          },
+          "tokens": {
+            "type": "integer",
+            "title": "Tokens",
+            "description": "Prompt plus completion tokens"
+          },
+          "byok_cost": {
+            "type": "number",
+            "title": "Byok Cost",
+            "description": "USD spent through the operator's own provider keys, not credits"
+          },
+          "cost_per_mtok": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Mtok",
+            "description": "USD per million tokens: how efficiently the spend turned into work"
+          },
+          "cost_per_request": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Request"
+          },
+          "cache_hit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit",
+            "description": "Share of prompt tokens that came from a cache, 0 to 1"
+          },
+          "date": {
+            "type": "string",
+            "title": "Date"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cost",
+          "requests",
+          "prompt_tokens",
+          "completion_tokens",
+          "reasoning_tokens",
+          "cached_tokens",
+          "tokens",
+          "byok_cost",
+          "cost_per_mtok",
+          "cost_per_request",
+          "cache_hit",
+          "date"
+        ],
+        "title": "SpendDayOut"
+      },
+      "SpendKeyOut": {
+        "properties": {
+          "cost": {
+            "type": "number",
+            "title": "Cost",
+            "description": "USD of OpenRouter credits"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "title": "Prompt Tokens"
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "title": "Completion Tokens",
+            "description": "Includes the reasoning tokens"
+          },
+          "reasoning_tokens": {
+            "type": "integer",
+            "title": "Reasoning Tokens"
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "title": "Cached Tokens",
+            "description": "Prompt tokens served from a provider's cache"
+          },
+          "tokens": {
+            "type": "integer",
+            "title": "Tokens",
+            "description": "Prompt plus completion tokens"
+          },
+          "byok_cost": {
+            "type": "number",
+            "title": "Byok Cost",
+            "description": "USD spent through the operator's own provider keys, not credits"
+          },
+          "cost_per_mtok": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Mtok",
+            "description": "USD per million tokens: how efficiently the spend turned into work"
+          },
+          "cost_per_request": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Request"
+          },
+          "cache_hit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit",
+            "description": "Share of prompt tokens that came from a cache, 0 to 1"
+          },
+          "hash": {
+            "type": "string",
+            "title": "Hash"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "disabled": {
+            "type": "boolean",
+            "title": "Disabled"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "usage_total": {
+            "type": "number",
+            "title": "Usage Total",
+            "description": "USD this key has spent over its whole life"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cost",
+          "requests",
+          "prompt_tokens",
+          "completion_tokens",
+          "reasoning_tokens",
+          "cached_tokens",
+          "tokens",
+          "byok_cost",
+          "cost_per_mtok",
+          "cost_per_request",
+          "cache_hit",
+          "hash",
+          "name",
+          "disabled",
+          "last_used_at",
+          "usage_total"
+        ],
+        "title": "SpendKeyOut"
+      },
       "SpendLimitOut": {
         "properties": {
           "used_usd": {
@@ -4260,6 +5554,245 @@
         },
         "type": "object",
         "title": "SpendLimitOut"
+      },
+      "SpendNamedOut": {
+        "properties": {
+          "cost": {
+            "type": "number",
+            "title": "Cost",
+            "description": "USD of OpenRouter credits"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "title": "Prompt Tokens"
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "title": "Completion Tokens",
+            "description": "Includes the reasoning tokens"
+          },
+          "reasoning_tokens": {
+            "type": "integer",
+            "title": "Reasoning Tokens"
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "title": "Cached Tokens",
+            "description": "Prompt tokens served from a provider's cache"
+          },
+          "tokens": {
+            "type": "integer",
+            "title": "Tokens",
+            "description": "Prompt plus completion tokens"
+          },
+          "byok_cost": {
+            "type": "number",
+            "title": "Byok Cost",
+            "description": "USD spent through the operator's own provider keys, not credits"
+          },
+          "cost_per_mtok": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Mtok",
+            "description": "USD per million tokens: how efficiently the spend turned into work"
+          },
+          "cost_per_request": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Request"
+          },
+          "cache_hit": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit",
+            "description": "Share of prompt tokens that came from a cache, 0 to 1"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cost",
+          "requests",
+          "prompt_tokens",
+          "completion_tokens",
+          "reasoning_tokens",
+          "cached_tokens",
+          "tokens",
+          "byok_cost",
+          "cost_per_mtok",
+          "cost_per_request",
+          "cache_hit",
+          "name"
+        ],
+        "title": "SpendNamedOut"
+      },
+      "SpendOut": {
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/SpendAccountOut"
+            },
+            "type": "array",
+            "title": "Accounts"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          },
+          "days": {
+            "type": "integer",
+            "title": "Days"
+          },
+          "provider_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/SpendBucketOut"
+          },
+          "today_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Today Usd",
+            "description": "Spent so far in the current UTC day, which the history leaves out"
+          },
+          "today_as_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Today As Of"
+          },
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/SpendDayOut"
+            },
+            "type": "array",
+            "title": "Daily"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/SpendNamedOut"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "upstreams": {
+            "items": {
+              "$ref": "#/components/schemas/SpendNamedOut"
+            },
+            "type": "array",
+            "title": "Upstreams"
+          },
+          "keys": {
+            "items": {
+              "$ref": "#/components/schemas/SpendKeyOut"
+            },
+            "type": "array",
+            "title": "Keys"
+          },
+          "other_keys": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SpendBucketOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Spend no listed key accounts for: a key in another workspace, or one since deleted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "accounts",
+          "since",
+          "until",
+          "days",
+          "provider_id",
+          "key",
+          "totals",
+          "today_usd",
+          "today_as_of",
+          "daily",
+          "models",
+          "upstreams",
+          "keys",
+          "other_keys"
+        ],
+        "title": "SpendOut"
       },
       "SubscriptionSettings": {
         "properties": {
