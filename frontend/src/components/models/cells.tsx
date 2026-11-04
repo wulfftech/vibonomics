@@ -3,7 +3,14 @@ import { Calculator, FlaskConical, ReceiptText } from 'lucide-react';
 import type { ModelRow, UsageProfile } from '../../api/types';
 import { DASH, discountLabel, money } from '../../lib/format';
 import type { EnrichedModel } from '../../lib/modelTable';
-import { discountTooltip, modelSubline, scoreColor, taskCostExplanation } from '../../lib/modelText';
+import {
+  clientName,
+  discountTooltip,
+  modelSubline,
+  restrictedLabel,
+  scoreColor,
+  taskCostExplanation,
+} from '../../lib/modelText';
 import { blendedColor, profileFormula } from '../../lib/pricing';
 import { providerColor } from '../../lib/providerColors';
 import { tone } from '../../lib/tone';
@@ -23,7 +30,7 @@ export function ScoreNumber({ value, bold = false }: { value: number | null | un
   );
 }
 
-/** The badges after a model's name: New, New discount, Price cut, Free, Inactive. Keep `modelBadgeLabels` in step. */
+/** The badges after a model's name: New, New discount, Price cut, Free, OpenCode only, Inactive. Keep `modelBadgeLabels` in step. */
 export function ModelBadges({ row }: { row: ModelRow }) {
   return (
     <>
@@ -48,6 +55,19 @@ export function ModelBadges({ row }: { row: ModelRow }) {
         <Badge size="xs" color="green" variant="light">
           Free
         </Badge>
+      )}
+      {row.client_restricted && (
+        <Tooltip
+          label={`${clientName(row.client_restricted)} is the only client that can call this free model. Any other client gets HTTP 403, even with a valid key. Paid models and Go work from other clients.`}
+          multiline
+          maw={320}
+          withArrow
+        >
+          {/* Pink text (shade 8 in light, 4 in dark) clears 4.5:1 on its own tint in both schemes; orange and red do not. */}
+          <Badge size="xs" color="pink" variant="light" style={{ color: tone('pink') }}>
+            {restrictedLabel(row.client_restricted)}
+          </Badge>
+        </Tooltip>
       )}
       {!row.active && (
         <Tooltip label="No longer listed by the provider" withArrow>

@@ -311,6 +311,12 @@ providers underneath, because their catalogues differ (Go covers a subset of Con
 needs its own key. Where both list the same model at the same per-token rate, the table shows one row
 marked **also on Go** rather than the same model twice.
 
+Console's free models are OpenCode-client-only: OpenCode's docs say every other harness gets HTTP 403, key or
+not. The table badges them **OpenCode only**, the model details state what the docs say each one does with your
+data (some collect prompts to improve the model; the Nemotron ones are trial use, no personal or confidential
+data), and every other harness's config tab warns that the model will 403. Vibonomics has no way to call them
+from elsewhere, on purpose.
+
 ## OpenRouter spend history
 
 The **Usage** page reads an OpenRouter account's activity: spend, prompt and completion tokens, requests and

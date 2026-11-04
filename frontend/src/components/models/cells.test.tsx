@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { ModelRow } from '../../api/types';
 import { discountLabel } from '../../lib/format';
 import { modelBadgeLabels } from '../../lib/modelText';
+import { tone } from '../../lib/tone';
 import { ModelNameCell } from './cells';
 
 const row: ModelRow = {
@@ -39,6 +40,7 @@ const row: ModelRow = {
   scores: { intelligence: null, coding: null, agentic: null, composite: null, own_test: null, source_count: 0 },
   reported_cost_per_task: null,
   test: null,
+  client_restricted: 'opencode',
 };
 
 function drawn(alsoOnGo: boolean): string {
@@ -56,7 +58,7 @@ describe('ModelNameCell', () => {
     for (const label of modelBadgeLabels(row, true)) {
       expect(text).toContain(label);
     }
-    expect(screen.getAllByText(/^(New|New discount|Price cut|Free|Inactive|also on Go)$/)).toHaveLength(
+    expect(screen.getAllByText(/^(New|New discount|Price cut|Free|OpenCode only|Inactive|also on Go)$/)).toHaveLength(
       modelBadgeLabels(row, true).length,
     );
   });
@@ -64,11 +66,33 @@ describe('ModelNameCell', () => {
   it('leaves the discount to its own column', () => {
     expect(drawn(false)).not.toContain(discountLabel(0.51));
   });
+
+  it('badges a free model that only the OpenCode client can call, in a colour that reads in both schemes', () => {
+    drawn(false);
+    const badge = screen.getByText('OpenCode only').closest('.mantine-Badge-root');
+    expect(badge).not.toBeNull();
+    expect(badge?.getAttribute('style') ?? '').toContain(tone('pink'));
+  });
+
+  it('draws no restriction badge for a model any client can call', () => {
+    render(
+      <MantineProvider>
+        <ModelNameCell row={{ ...row, client_restricted: null }} />
+      </MantineProvider>,
+    );
+    expect(screen.queryByText('OpenCode only')).toBeNull();
+  });
 });
 
 describe('modelBadgeLabels', () => {
   it('lists nothing for a plain model', () => {
     const plain = { ...row, is_new: false, new_discount: false, price_drop: false, is_free: false, active: true };
-    expect(modelBadgeLabels(plain)).toEqual([]);
+    expect(modelBadgeLabels({ ...plain, client_restricted: null })).toEqual([]);
+  });
+
+  it('puts the restriction right after Free, where the badges are drawn', () => {
+    const labels = modelBadgeLabels({ ...row, active: true });
+    expect(labels).toEqual(['New', 'New discount', 'Price cut', 'Free', 'OpenCode only']);
+    expect(modelBadgeLabels({ ...row, client_restricted: undefined })).not.toContain('OpenCode only');
   });
 });
