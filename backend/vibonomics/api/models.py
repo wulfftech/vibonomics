@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -17,7 +17,7 @@ from ..provider_service import resolve
 from ..providers.registry import get_adapter_class
 from ..scoring import ModelScores, compute_scores, own_test_scores, score_key
 from ..settings_store import AppSettings, UsageProfile, load_settings
-from ..snippets import SnippetContext, generate
+from ..snippets import Routing, SnippetContext, generate
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -245,7 +245,7 @@ class ModelDetail(BaseModel):
     attributions: list[str]
 
 
-def build_snippets(m: Model, provider: ProviderConfig) -> list[SnippetOut]:
+def build_snippets(m: Model, provider: ProviderConfig, routing: Routing | None = None) -> list[SnippetOut]:
     cls = get_adapter_class(provider.type)
     if cls is None:
         return []
@@ -270,8 +270,32 @@ def build_snippets(m: Model, provider: ProviderConfig) -> list[SnippetOut]:
         env_key=env_key,
         price_input=m.price_input,
         price_output=m.price_output,
+        routing=routing,
     )
     return [SnippetOut(**s.to_dict()) for s in generate(ctx)]
+
+
+@router.get("/{model_pk}/snippets", response_model=list[SnippetOut])
+def model_snippets(
+    model_pk: int,
+    variant: Literal["floor", "nitro"] | None = None,
+    provider: str | None = None,
+    fallbacks: bool = False,
+    session: Session = Depends(get_session),
+) -> list[SnippetOut]:
+    """The config snippets for an OpenRouter model routed to its cheapest or fastest provider, or pinned to one."""
+    m = session.get(Model, model_pk)
+    if m is None:
+        raise HTTPException(404, "Model not found")
+    if m.provider.type != "openrouter":
+        raise HTTPException(422, "Routing applies to OpenRouter models only")
+    if variant and provider:
+        raise HTTPException(422, "Choose a variant or a provider, not both")
+    if variant and ":" in m.model_id:
+        raise HTTPException(422, "This model id already carries a variant")
+    if provider and provider not in {e.get("tag") for e in (m.extra or {}).get("endpoints") or []}:
+        raise HTTPException(422, "Unknown provider endpoint for this model")
+    return build_snippets(m, m.provider, Routing(variant=variant, provider=provider, allow_fallbacks=fallbacks))
 
 
 @router.get("/{model_pk}", response_model=ModelDetail)

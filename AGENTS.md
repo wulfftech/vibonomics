@@ -40,6 +40,11 @@ docker compose logs -f vibonomics
   token). Tests must use the values in the unsaved form: `POST /api/providers/test` for a draft and
   `POST /api/providers/{id}/test` with overrides for an existing provider, never the stored key alone.
   Return `*_set` and `*_hint`, never a key.
+- **Config snippets** (`backend/vibonomics/snippets.py`): one builder per harness, each checked against that
+  harness's docs, and none may carry a key. OpenRouter routing (`Routing`): a `:floor` or `:nitro` variant rides
+  on the model id and needs nothing from a builder. Pinning a provider is a `provider` request block, so a
+  builder reads `_pinned(ctx)` only where the harness documents a place for extra body fields, and is listed in
+  `_CAN_PIN`; `generate` tells every other harness it can't pin. Don't add a harness to `_CAN_PIN` on a guess.
 - **Benchmark sources** (`backend/vibonomics/benchmarks/`): one module per source, `SourceSpec` with an
   honest licence and attribution, `ScoreRecord`s with model-id hints; register in `registry.py`. Fetch
   at runtime only. Never commit fetched benchmark data; small trimmed fixtures for tests are fine.

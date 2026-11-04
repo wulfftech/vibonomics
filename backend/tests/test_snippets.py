@@ -1,12 +1,13 @@
 import json
 import re
 import tomllib
+from dataclasses import replace
 
 import pytest
 import yaml
 
 from vibonomics.providers.base import ProviderSpec
-from vibonomics.snippets import Snippet, SnippetContext, generate
+from vibonomics.snippets import Routing, Snippet, SnippetContext, generate
 
 OPENROUTER = ProviderSpec(
     type="openrouter",
@@ -74,6 +75,9 @@ CONTEXTS = {
     "custom": make_ctx(CUSTOM, "my-model", context_length=None, max_output=None, tool_call=False, reasoning=None),
     "deepseek": make_ctx(DEEPSEEK, "deepseek-chat", context_length=128_000, max_output=8_000, reasoning=False),
 }
+ROUTED = make_ctx(OPENROUTER, "deepseek/deepseek-v4.1-flash", price_input=0.045, price_output=0.5)
+CONTEXTS["openrouter-pinned"] = replace(ROUTED, routing=Routing(provider="deepinfra/fp8"))
+CONTEXTS["openrouter-floor"] = replace(ROUTED, routing=Routing(variant="floor"))
 
 
 def by_id(snippets: list[Snippet]) -> dict[str, Snippet]:
@@ -335,3 +339,64 @@ def test_codex_on_openai_uses_builtin_provider():
         modelsdev_ids=("openai",),
     )
     assert parse(by_id(generate(make_ctx(spec, "gpt-6.1-sol")))["codex"]) == {"model": "gpt-6.1-sol"}
+
+
+# --- OpenRouter routing ------------------------------------------------------------------------
+
+PIN = {"order": ["deepinfra/fp8"], "allow_fallbacks": False}
+MODEL = "deepseek/deepseek-v4.1-flash"
+
+
+def routed(**routing) -> dict[str, Snippet]:
+    return by_id(generate(replace(ROUTED, routing=Routing(**routing))))
+
+
+def test_a_variant_rides_on_the_model_id_of_every_snippet():
+    snippets = routed(variant="floor")
+    for s in snippets.values():
+        assert f"{MODEL}:floor" in s.content, s.id
+        assert "does not pin" not in (s.notes or ""), s.id
+
+
+def test_pinning_puts_a_provider_block_where_the_harness_has_room():
+    snippets = routed(provider="deepinfra/fp8")
+    body = json.loads(re.search(r"-d '(.*)'", snippets["curl"].content).group(1))
+    assert body["provider"] == PIN
+    assert 'extra_body={"provider": {"order": ["deepinfra/fp8"], "allow_fallbacks": False}}' in (
+        snippets["python"].content
+    )
+    assert parse(snippets["opencode"])["provider"]["openrouter"]["models"][MODEL]["options"] == {"provider": PIN}
+    assert parse(snippets["vscode-copilot"])[0]["models"][0]["modelOptions"] == {"provider": PIN}
+    assert parse(snippets["continue"])["models"][0]["requestOptions"] == {"extraBodyProperties": {"provider": PIN}}
+    assert parse(snippets["aider-routing"]) == [
+        {"name": f"openrouter/{MODEL}", "extra_params": {"extra_body": {"provider": PIN}}}
+    ]
+
+
+def test_a_harness_without_room_says_it_cannot_pin():
+    snippets = routed(provider="deepinfra/fp8")
+    for harness in ("cline", "roo-code", "kilo-code", "claude-code", "codex", "zed", "crush", "goose"):
+        assert "does not pin deepinfra/fp8" in snippets[harness].notes, harness
+    assert "second file" in snippets["aider"].notes
+    for harness in ("vscode-copilot", "continue", "opencode", "aider-routing", "curl", "python"):
+        assert "does not pin" not in snippets[harness].notes, harness
+
+
+def test_allowing_fallbacks_drops_the_flag_that_forbids_them():
+    snippets = routed(provider="deepinfra/fp8", allow_fallbacks=True)
+    assert parse(snippets["opencode"])["provider"]["openrouter"]["models"][MODEL]["options"] == {
+        "provider": {"order": ["deepinfra/fp8"]}
+    }
+    assert "allow_fallbacks" not in snippets["aider-routing"].content
+
+
+def test_default_routing_changes_nothing():
+    plain = generate(ROUTED)
+    assert "aider-routing" not in [s.id for s in plain]
+    assert [s.to_dict() for s in generate(replace(ROUTED, routing=Routing()))] == [s.to_dict() for s in plain]
+
+
+def test_routing_means_nothing_to_another_endpoint():
+    ctx = CONTEXTS["deepseek"]
+    pinned = replace(ctx, routing=Routing(variant="nitro", provider="deepinfra/fp8"))
+    assert [s.to_dict() for s in generate(pinned)] == [s.to_dict() for s in generate(ctx)]

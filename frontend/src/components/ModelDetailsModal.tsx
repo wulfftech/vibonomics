@@ -609,7 +609,7 @@ export function ModelDetailsModal({
               <TestsTab detail={data} />
             </Tabs.Panel>
             <Tabs.Panel value="config" pt="md">
-              <SnippetTabs snippets={data.snippets} />
+              <SnippetTabs key={data.row.id} detail={data} />
             </Tabs.Panel>
           </Tabs>
         </Stack>

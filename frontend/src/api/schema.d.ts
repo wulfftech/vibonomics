@@ -89,6 +89,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/models/{model_pk}/snippets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Model Snippets
+         * @description The config snippets for an OpenRouter model routed to its cheapest or fastest provider, or pinned to one.
+         */
+        get: operations["model_snippets_api_models__model_pk__snippets_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/models/{model_pk}": {
         parameters: {
             query?: never;
@@ -1937,6 +1957,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelsResponse"];
+                };
+            };
+        };
+    };
+    model_snippets_api_models__model_pk__snippets_get: {
+        parameters: {
+            query?: {
+                variant?: ("floor" | "nitro") | null;
+                provider?: string | null;
+                fallbacks?: boolean;
+            };
+            header?: never;
+            path: {
+                model_pk: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

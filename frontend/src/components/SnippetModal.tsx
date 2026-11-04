@@ -14,7 +14,7 @@ export function SnippetModal({ modelId, onClose }: { modelId: number | null; onC
     <Modal opened={modelId !== null} onClose={onClose} title={title} size="lg" fullScreen={mobile}>
       {detail.isPending && <LoadingState />}
       {detail.isError && <ErrorState message={detail.error.message} />}
-      {detail.data && <SnippetTabs snippets={detail.data.snippets} />}
+      {detail.data && <SnippetTabs key={detail.data.row.id} detail={detail.data} />}
     </Modal>
   );
 }

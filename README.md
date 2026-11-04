@@ -56,6 +56,11 @@ tried.
 - **Config snippets.** For each model, a copyable setup for VS Code (Copilot Chat custom endpoint,
   Continue, Cline, Roo Code, Kilo Code), OpenCode, Claude Code, Codex CLI, Aider, Zed, Crush, Goose,
   curl and the OpenAI Python SDK. Keys are referenced through environment variables or placeholders.
+  For an OpenRouter model, **Route via** picks how requests find a provider: OpenRouter's own routing, the
+  cheapest (`:floor`) or fastest (`:nitro`), or one provider pinned through a `provider` block. The block goes
+  where a harness has room for it (VS Code Copilot, Continue, OpenCode, Aider, curl, Python); the others say
+  they can't pin. A discounted row starts pinned to the provider behind its discount, because that price
+  holds only while requests reach that provider.
 ### A closer look
 
 Every number keeps its source. Open a model and the **Scores** tab lists each leaderboard behind the

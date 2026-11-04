@@ -130,6 +130,99 @@
         }
       }
     },
+    "/api/models/{model_pk}/snippets": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Model Snippets",
+        "description": "The config snippets for an OpenRouter model routed to its cheapest or fastest provider, or pinned to one.",
+        "operationId": "model_snippets_api_models__model_pk__snippets_get",
+        "parameters": [
+          {
+            "name": "model_pk",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Model Pk"
+            }
+          },
+          {
+            "name": "variant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "floor",
+                    "nitro"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Variant"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          },
+          {
+            "name": "fallbacks",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Fallbacks"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SnippetOut"
+                  },
+                  "title": "Response Model Snippets Api Models  Model Pk  Snippets Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/models/{model_pk}": {
       "get": {
         "tags": [

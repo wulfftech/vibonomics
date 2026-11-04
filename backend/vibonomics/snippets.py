@@ -15,11 +15,31 @@ import json
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 from urllib.parse import urlparse
 
 from .providers.base import ProviderSpec
+
+
+@dataclass(frozen=True)
+class Routing:
+    """How an OpenRouter request picks its provider. ``SnippetContext.routing`` None means OpenRouter's own routing."""
+
+    variant: str | None = None
+    """``floor`` (cheapest) or ``nitro`` (fastest): a suffix on the model id, so every harness can carry it."""
+    provider: str | None = None
+    """An endpoint slug such as ``deepinfra/fp8``, sent as a ``provider`` block that only some harnesses can carry."""
+    allow_fallbacks: bool = False
+    """Whether OpenRouter may try other providers when the pinned one fails."""
+
+    def provider_block(self) -> dict[str, Any] | None:
+        if not self.provider:
+            return None
+        block: dict[str, Any] = {"order": [self.provider]}
+        if not self.allow_fallbacks:
+            block["allow_fallbacks"] = False
+        return block
 
 
 @dataclass
@@ -61,6 +81,8 @@ class SnippetContext:
     """USD per 1M output tokens."""
     responses_api: bool | None = None
     """Whether ``base_url`` also serves the OpenAI Responses API (Codex needs it). None = infer from the host."""
+    routing: Routing | None = None
+    """An OpenRouter provider choice; ignored for any other endpoint."""
 
 
 # --- helpers -----------------------------------------------------------------------------------
@@ -113,6 +135,17 @@ def _tq(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _py(value: Any) -> str:
+    """A Python literal for JSON-shaped data (``json.dumps`` would write ``false`` where Python needs ``False``)."""
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{_py(k)}: {_py(v)}" for k, v in value.items()) + "}"
+    if isinstance(value, list):
+        return "[" + ", ".join(_py(v) for v in value) + "]"
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _num(value: float) -> str:
     return f"{value:g}"
 
@@ -136,6 +169,11 @@ def _placeholder(ctx: SnippetContext) -> str:
 
 def _is_openrouter(ctx: SnippetContext) -> bool:
     return ctx.spec.type == "openrouter" or _host(ctx.base_url) == "openrouter.ai"
+
+
+def _pinned(ctx: SnippetContext) -> dict[str, Any] | None:
+    """The OpenRouter ``provider`` request block to pin one provider, when the context asks for one."""
+    return ctx.routing.provider_block() if ctx.routing and _is_openrouter(ctx) else None
 
 
 def _anthropic_root(ctx: SnippetContext) -> str | None:
@@ -248,6 +286,9 @@ def _vscode_copilot(ctx: SnippetContext) -> Snippet:
     }
     if ctx.reasoning:
         model["thinking"] = True
+    pin = _pinned(ctx)
+    if pin:
+        model["modelOptions"] = {"provider": pin}
     config = [
         {
             "name": ctx.provider_name,
@@ -268,6 +309,11 @@ def _vscode_copilot(ctx: SnippetContext) -> Snippet:
         notes += " Tool calling is assumed; set toolCalling to false if agent requests fail."
     elif ctx.tool_call is False:
         notes += " This model doesn't support tool calling, so it won't appear for agent sessions."
+    if pin:
+        notes += (
+            " modelOptions holds request parameters sent with every request, but its docs only show temperature and "
+            "top_p: check OpenRouter's Activity page to confirm the provider block arrives."
+        )
     return Snippet(
         id="vscode-copilot",
         harness="VS Code Copilot",
@@ -309,6 +355,24 @@ def _continue(ctx: SnippetContext) -> Snippet:
         f"      contextLength: {context}",
         f"      maxTokens: {min(output, _OUTPUT_CAP)}",
     ]
+    notes = (
+        "Merge the models entry into ~/.continue/config.yaml (Windows: %USERPROFILE%\\.continue\\config.yaml); "
+        "Continue reloads on save. The ${{ secrets.* }} reference is resolved from a .env file: add "
+        f"{ctx.env_key}=... to ~/.continue/.env or <workspace>/.continue/.env."
+    )
+    if pin := _pinned(ctx):
+        lines += [
+            "    requestOptions:",
+            "      extraBodyProperties:",
+            "        provider:",
+            f"          order: [{', '.join(_yq(p) for p in pin['order'])}]",
+        ]
+        if pin.get("allow_fallbacks") is False:
+            lines.append("          allow_fallbacks: false")
+        notes += (
+            " extraBodyProperties is Continue's documented way to merge extra properties into the request body; "
+            "check OpenRouter's Activity page to confirm the provider block arrives."
+        )
     return Snippet(
         id="continue",
         harness="Continue",
@@ -316,12 +380,7 @@ def _continue(ctx: SnippetContext) -> Snippet:
         language="yaml",
         filename="~/.continue/config.yaml",
         content="\n".join(lines) + "\n",
-        notes=(
-            "Merge the models entry into ~/.continue/config.yaml (Windows: %USERPROFILE%\\.continue\\config.yaml); "
-            "Continue reloads on save. The ${{ secrets.* }} reference is resolved from a .env file: add "
-            f"{ctx.env_key}=... to ~/.continue/.env or <workspace>/.continue/.env."
-        )
-        + _guess_note(ctx),
+        notes=notes + _guess_note(ctx),
         docs_url="https://docs.continue.dev/reference",
     )
 
@@ -470,8 +529,12 @@ def _claude_code(ctx: SnippetContext) -> Snippet | None:
 def _opencode(ctx: SnippetContext) -> Snippet:
     native = _native_modelsdev(ctx)
     config: dict[str, Any] = {"$schema": "https://opencode.ai/config.json"}
+    entry = _models_dev_entry(ctx, custom=not native)
+    pin = _pinned(ctx)
+    if pin:
+        entry["options"] = {"provider": pin}
     if native:
-        provider: dict[str, Any] = {"models": {ctx.model_id: _models_dev_entry(ctx, custom=False)}}
+        provider: dict[str, Any] = {"models": {ctx.model_id: entry}}
         if _base_overridden(ctx):
             provider["options"] = {"baseURL": ctx.base_url}
         config["model"] = f"{native}/{ctx.model_id}"
@@ -485,10 +548,12 @@ def _opencode(ctx: SnippetContext) -> Snippet:
                 "npm": "@ai-sdk/openai-compatible",
                 "name": ctx.provider_name,
                 "options": {"baseURL": ctx.base_url, "apiKey": f"{{env:{ctx.env_key}}}"},
-                "models": {ctx.model_id: _models_dev_entry(ctx, custom=True)},
+                "models": {ctx.model_id: entry},
             }
         }
         auth = f"The key is read from {ctx.env_key}."
+    if pin:
+        auth += " The provider block under the model's options is OpenCode's documented OpenRouter routing."
     return Snippet(
         id="opencode",
         harness="OpenCode",
@@ -593,6 +658,35 @@ def _aider(ctx: SnippetContext) -> Snippet:
         content="\n".join(lines) + "\n",
         notes="Put this in ~/.aider.conf.yml or the root of your git repo, or pass the same values as flags. " + notes,
         docs_url=docs,
+    )
+
+
+def _aider_routing(ctx: SnippetContext) -> Snippet | None:
+    """Aider keeps extra request-body fields in a second file, so pinning a provider is its own snippet."""
+    pin = _pinned(ctx)
+    if not pin or ctx.spec.aider_prefix != "openrouter":
+        return None
+    lines = [
+        f"- name: {_yq(f'openrouter/{ctx.model_id}')}",
+        "  extra_params:",
+        "    extra_body:",
+        "      provider:",
+        f"        order: [{', '.join(_yq(p) for p in pin['order'])}]",
+    ]
+    if pin.get("allow_fallbacks") is False:
+        lines.append("        allow_fallbacks: false")
+    return Snippet(
+        id="aider-routing",
+        harness="Aider (provider)",
+        title=".aider.model.settings.yml",
+        language="yaml",
+        filename=".aider.model.settings.yml",
+        content="\n".join(lines) + "\n",
+        notes=(
+            "Save beside .aider.conf.yml, in your home directory or the root of your git repo. Aider adds extra_body "
+            "to every request for this model; the name must match the model line in .aider.conf.yml."
+        ),
+        docs_url="https://aider.chat/docs/llms/openrouter.html",
     )
 
 
@@ -796,8 +890,10 @@ def _goose(ctx: SnippetContext) -> Snippet:
 
 
 def _curl(ctx: SnippetContext) -> Snippet:
-    body = json.dumps({"model": ctx.model_id, "messages": [{"role": "user", "content": "Hello"}]})
-    body = body.replace("'", "'\\''")
+    request: dict[str, Any] = {"model": ctx.model_id, "messages": [{"role": "user", "content": "Hello"}]}
+    if pin := _pinned(ctx):
+        request["provider"] = pin
+    body = json.dumps(request).replace("'", "'\\''")
     content = (
         f"curl {shlex.quote(ctx.base_url + '/chat/completions')} \\\n"
         f'  -H "Authorization: Bearer ${ctx.env_key}" \\\n'
@@ -816,6 +912,7 @@ def _curl(ctx: SnippetContext) -> Snippet:
 
 
 def _python(ctx: SnippetContext) -> Snippet:
+    extra = f"    extra_body={_py({'provider': pin})},\n" if (pin := _pinned(ctx)) else ""
     content = (
         "import os\n"
         "\n"
@@ -828,6 +925,7 @@ def _python(ctx: SnippetContext) -> Snippet:
         "response = client.chat.completions.create(\n"
         f"    model={json.dumps(ctx.model_id)},\n"
         '    messages=[{"role": "user", "content": "Hello"}],\n'
+        f"{extra}"
         ")\n"
         "print(response.choices[0].message.content)\n"
     )
@@ -853,6 +951,7 @@ _BUILDERS: tuple[Builder, ...] = (
     _opencode,
     _codex,
     _aider,
+    _aider_routing,
     _zed,
     _crush,
     _goose,
@@ -861,6 +960,26 @@ _BUILDERS: tuple[Builder, ...] = (
 )
 
 
+# Snippets with a place for the ``provider`` block; every other harness gets a note instead.
+_CAN_PIN = {"vscode-copilot", "continue", "opencode", "aider-routing", "curl", "python"}
+
+
 def generate(ctx: SnippetContext) -> list[Snippet]:
     """Snippets valid for this provider/model, most useful first (VS Code harnesses lead)."""
-    return [s for build in _BUILDERS if (s := build(ctx)) is not None]
+    routing = ctx.routing if _is_openrouter(ctx) else None
+    if routing and routing.variant:
+        # ":floor" and ":nitro" ride on the model id, so every builder carries them without knowing.
+        ctx = replace(ctx, model_id=f"{ctx.model_id}:{routing.variant}")
+    snippets = [s for build in _BUILDERS if (s := build(ctx)) is not None]
+    if pinned := _pinned(ctx):
+        slug = pinned["order"][0]
+        two_files = any(s.id == "aider-routing" for s in snippets)
+        for s in snippets:
+            if s.id == "aider" and two_files:
+                s.notes = (s.notes or "") + " Aider keeps the provider pin in a second file: see the next tab."
+            elif s.id not in _CAN_PIN:
+                s.notes = (s.notes or "") + (
+                    f" This config has no place for a provider setting, so it does not pin {slug}: requests route as "
+                    "OpenRouter decides."
+                )
+    return snippets
