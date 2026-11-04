@@ -18,6 +18,7 @@ import { RunTestsModal } from '../components/RunTestsModal';
 import { SnippetModal } from '../components/SnippetModal';
 import { TestRunsModal } from '../components/TestRunsModal';
 import {
+  applicableFilters,
   buildDisplayRows,
   DEFAULT_FILTERS,
   defaultDir,
@@ -25,9 +26,9 @@ import {
   enrichModels,
   filterModels,
   foldOpenCodeOffers,
-  GROUP_OPTIONS,
-  QUICK_FILTERS,
-  SORT_KEYS,
+  hasOpenCodeKey,
+  MODEL_FILTERS_KEY,
+  sanitizeFilters,
   sortModels,
   type ModelFilters,
   type SortKey,
@@ -40,26 +41,6 @@ const REFRESH_ITEMS: { label: string; kinds: RefreshKind[] }[] = [
   { label: 'Balances', kinds: ['balances'] },
   { label: 'Benchmarks', kinds: ['benchmarks'] },
 ];
-
-/** Repairs filters read back from localStorage (an older build may have stored other values). */
-function sanitizeFilters(filters: ModelFilters): ModelFilters {
-  const chips = new Set<string>(QUICK_FILTERS.map((chip) => chip.value));
-  const groups = new Set<string>(GROUP_OPTIONS.map((group) => group.value));
-  const sortKeys = new Set<string>(SORT_KEYS);
-  return {
-    search: typeof filters.search === 'string' ? filters.search : '',
-    chips: Array.isArray(filters.chips) ? filters.chips.filter((chip) => chips.has(chip)) : [],
-    nonBatchOnly: typeof filters.nonBatchOnly === 'boolean' ? filters.nonBatchOnly : DEFAULT_FILTERS.nonBatchOnly,
-    providers: Array.isArray(filters.providers) ? filters.providers.filter((p) => typeof p === 'string') : [],
-    groupBy: groups.has(filters.groupBy) ? filters.groupBy : 'none',
-    profileId: typeof filters.profileId === 'string' ? filters.profileId : null,
-    minContext: typeof filters.minContext === 'number' ? filters.minContext : 0,
-    sort:
-      filters.sort && sortKeys.has(filters.sort.key) && (filters.sort.dir === 'asc' || filters.sort.dir === 'desc')
-        ? filters.sort
-        : DEFAULT_FILTERS.sort,
-  };
-}
 
 function RefreshMenu() {
   const refresh = useTriggerRefresh();
@@ -105,11 +86,7 @@ export function ModelsPage() {
   const providers = useProviders();
   const settings = useSettings();
 
-  const [filters, setFilters] = usePersistentState<ModelFilters>(
-    'vibonomics.models.filters',
-    DEFAULT_FILTERS,
-    sanitizeFilters,
-  );
+  const [filters, setFilters] = usePersistentState<ModelFilters>(MODEL_FILTERS_KEY, DEFAULT_FILTERS, sanitizeFilters);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [detailId, setDetailId] = useState<number | null>(null);
@@ -134,7 +111,9 @@ export function ModelsPage() {
   );
 
   const search = useDeferredValue(filters.search);
+  const opencodeKey = hasOpenCodeKey(providers.data);
   const { chips, nonBatchOnly, providers: providerFilter, minContext, groupBy } = filters;
+  const { hideRestricted } = applicableFilters(filters, opencodeKey);
   const filtered = useMemo(
     () =>
       filterModels(enriched, {
@@ -142,10 +121,11 @@ export function ModelsPage() {
         search,
         chips,
         nonBatchOnly,
+        hideRestricted,
         providers: providerFilter,
         minContext,
       }),
-    [enriched, search, chips, nonBatchOnly, providerFilter, minContext],
+    [enriched, search, chips, nonBatchOnly, hideRestricted, providerFilter, minContext],
   );
   // Fold the Go copy of a model into its Console row while both providers are in view.
   const folded = useMemo(() => foldOpenCodeOffers(filtered), [filtered]);
@@ -270,6 +250,7 @@ export function ModelsPage() {
         profiles={profiles}
         profile={profile}
         providers={providerOptions}
+        showHideRestricted={opencodeKey}
       />
 
       {models.isPending && <LoadingState label="Loading models…" />}

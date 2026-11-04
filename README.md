@@ -48,6 +48,7 @@ tried.
   are costed at a configurable stand-in price so "free" alone does not top the list.
 - **A sortable table.** Search, quick filters (free, best value, new, discounted, scored, tool calling,
   testable), grouping by provider, creator, model, price band or value tier, and copy-ready model IDs.
+  Once an OpenCode key is set, **Hide OpenCode-only** drops the free models that only the OpenCode client can call.
   Where several providers sell the same model, the canonical model id groups them. OpenCode's two
   catalogues are folded: a model both Console and Go list appears once, marked **also on Go**.
 - **Your own tests.** Pick models, pick a judge model, and run agentic coding, tool-use,
