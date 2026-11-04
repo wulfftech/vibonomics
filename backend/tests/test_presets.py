@@ -19,14 +19,18 @@ from vibonomics.orm import BenchmarkScore, Model, ProviderConfig, Setting
 from vibonomics.presets import (
     PLACEHOLDER_MESSAGES,
     STATE_KEY,
+    Candidate,
     build_config,
     choose_endpoints,
+    current_models,
     diff_config,
+    merge_endpoints,
     rank,
+    select_models,
     unsaved_keys,
 )
 from vibonomics.pricing import Task
-from vibonomics.settings_store import AppSettings, PresetSettings, load_settings, save_settings
+from vibonomics.settings_store import AppSettings, PresetSettings, load_settings, preset_slug, save_settings
 
 BASE = "https://openrouter.ai/api/v1"
 SLUG = "vibonomics-best-value"
@@ -205,7 +209,7 @@ def test_a_config_keeps_everything_but_the_model_and_the_provider_lists():
         "reasoning": {"enabled": True},
         "provider": {"only": ["old"], "order": ["old"], "quantizations": ["fp8"], "allow_fallbacks": False},
     }
-    config = build_config(base, "new/model", ["a/fp8", "b/fp8"])
+    config = build_config(base, ["new/model"], ["a/fp8", "b/fp8"])
     assert config == {
         "model": "new/model",
         "tools": [{"type": "openrouter:web_search"}],
@@ -221,9 +225,9 @@ def test_a_config_keeps_everything_but_the_model_and_the_provider_lists():
 
 
 def test_a_model_with_no_provider_data_drops_lists_left_over_from_another_model():
-    config = build_config({"model": "old/model", "provider": {"only": ["old"], "order": ["old"]}}, "new/model", [])
+    config = build_config({"model": "old/model", "provider": {"only": ["old"], "order": ["old"]}}, ["new/model"], [])
     assert config["provider"] == {"allow_fallbacks": True}
-    assert build_config(None, "m", ["x/fp8"]) == {
+    assert build_config(None, ["m"], ["x/fp8"]) == {
         "model": "m",
         "provider": {"only": ["x/fp8"], "order": ["x/fp8"], "allow_fallbacks": True},
     }
@@ -373,7 +377,7 @@ def test_our_own_preset_is_read_back_with_its_version_and_history(client):
 
 def test_a_preset_that_is_already_right_is_unchanged(client):
     _own()
-    desired = build_config(None, "acme/best", ["novita/fp4", "deepinfra/fp8", "wafer/bf16"])
+    desired = build_config(None, ["acme/best"], ["novita/fp4", "deepinfra/fp8", "wafer/bf16"])
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, desired, version=2)
         plan = _plan(client)
@@ -495,7 +499,7 @@ def test_apply_does_nothing_until_the_operator_allows_writes(client):
 
 def test_apply_writes_nothing_when_the_preset_is_already_right(client):
     _own()
-    desired = build_config(None, "acme/best", ["novita/fp4", "deepinfra/fp8", "wafer/bf16"])
+    desired = build_config(None, ["acme/best"], ["novita/fp4", "deepinfra/fp8", "wafer/bf16"])
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, desired, version=2)
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
@@ -527,15 +531,35 @@ def test_a_failed_write_is_reported_recorded_and_not_retried(client):
 # ---- settings and schedule -----------------------------------------------------------------------------------
 
 
-def test_the_slug_must_be_one_vibonomics_could_own(client):
+def test_a_name_gets_the_prefix_and_is_made_into_a_slug():
+    assert preset_slug("best value") == "vibonomics-best-value"
+    assert preset_slug("  My Coding Preset! ") == "vibonomics-my-coding-preset"
+    assert preset_slug("vibonomics-fast") == "vibonomics-fast"  # not prefixed twice
+    assert preset_slug("Vibonomics Fast") == "vibonomics-fast"
+    for bad in ("", "   ", "!!!", "x" * 80):
+        with pytest.raises(ValueError):
+            preset_slug(bad)
+
+
+def test_the_name_the_operator_types_is_saved_with_the_prefix(client):
     current = client.get("/api/settings").json()["settings"]
-    for slug in ("my-preset", "vibonomics-", "vibonomics-Has Space"):
-        bad = {**current, "presets": {**current["presets"], "slug": slug}}
-        assert client.put("/api/settings", json={"settings": bad}).status_code == 422, slug
-    good = {**current, "presets": {**current["presets"], "slug": "vibonomics-fast-coding"}}
+    for typed in ("", "!!!"):
+        bad = {**current, "presets": {**current["presets"], "slug": typed}}
+        assert client.put("/api/settings", json={"settings": bad}).status_code == 422, typed
+    good = {**current, "presets": {**current["presets"], "slug": "Fast coding"}}
     saved = client.put("/api/settings", json={"settings": good})
     assert saved.status_code == 200
     assert saved.json()["settings"]["presets"]["slug"] == "vibonomics-fast-coding"
+
+
+def test_up_to_ten_models_and_ten_providers_are_allowed_and_no_more(client):
+    current = client.get("/api/settings").json()["settings"]
+    ok = {**current, "presets": {**current["presets"], "max_models": 10, "max_providers": 10}}
+    assert client.put("/api/settings", json={"settings": ok}).status_code == 200
+    for field in ("max_models", "max_providers"):
+        for value in (0, 11):
+            bad = {**current, "presets": {**current["presets"], field: value}}
+            assert client.put("/api/settings", json={"settings": bad}).status_code == 422, (field, value)
 
 
 def test_it_is_off_until_the_operator_turns_it_on():
@@ -559,3 +583,181 @@ async def test_the_scheduler_adds_and_removes_the_preset_job():
         assert scheduler._scheduler.get_job("preset-sync") is None
     finally:
         scheduler.shutdown()
+
+
+# ---- several models ------------------------------------------------------------------------------------------
+
+
+def _cand(model_id: str, value: float, score: float = 70, cost: float = 0.1, endpoints=None) -> Candidate:
+    return Candidate(model_id, model_id, score, cost, value, None, None, endpoints or [])
+
+
+def test_the_lead_model_and_the_fallbacks_are_both_written():
+    config = build_config({"model": "old/m", "models": ["old/m"], "tools": [1]}, ["a/m", "b/m", "c/m"], ["x/fp8"])
+    assert config["model"] == "a/m"
+    assert config["models"] == ["a/m", "b/m", "c/m"]
+    assert config["tools"] == [1]
+    # going back to one model takes the fallback list away rather than leaving dropped models in it
+    assert "models" not in build_config(config, ["a/m"], ["x/fp8"])
+
+
+def test_a_preset_names_its_models_lead_first():
+    assert current_models({"model": "a", "models": ["a", "b", "b", 3, None, "c"]}) == ["a", "b", "c"]
+    assert current_models({"models": ["b", "a"]}) == ["b", "a"]
+    assert current_models({"model": "a", "models": "not a list"}) == ["a"]
+    assert current_models({}) == []
+
+
+def test_the_best_value_models_are_chosen_in_order():
+    ranked = [_cand("a", 100), _cand("b", 90), _cand("c", 80), _cand("d", 70)]
+    picked, kept = select_models(ranked, [], 3, 10)
+    assert [c.model_id for c in picked] == ["a", "b", "c"] and kept is False
+    assert [c.model_id for c in select_models(ranked, [], 10, 10)[0]] == ["a", "b", "c", "d"]
+
+
+def test_a_model_already_in_the_preset_is_kept_unless_beaten_by_the_margin():
+    ranked = [_cand("a", 100), _cand("new", 95), _cand("b", 90), _cand("c", 80)]
+    picked, kept = select_models(ranked, ["a", "b"], 2, 10)
+    assert [c.model_id for c in picked] == ["a", "b"]  # 95 does not beat 90 by 10%
+    assert kept is True
+    picked, kept = select_models(ranked, ["a", "b"], 2, 1)
+    assert [c.model_id for c in picked] == ["a", "new"]  # but it does by 1%, and b falls out
+    assert kept is False
+
+
+def test_the_lead_changes_only_when_another_model_beats_it_by_the_margin():
+    ranked = [_cand("b", 108), _cand("a", 100)]
+    assert [c.model_id for c in select_models(ranked, ["a", "b"], 2, 10)[0]] == ["a", "b"]
+    assert [c.model_id for c in select_models(ranked, ["a", "b"], 2, 5)[0]] == ["b", "a"]
+
+
+def _ep(tag: str) -> dict:
+    return {"tag": tag, "provider": tag, "input": 1, "output": 1, "discount": 0}
+
+
+def test_providers_for_several_models_are_taken_in_turn_and_shared_ones_name_both():
+    merged = merge_endpoints(
+        [("m1", [_ep("a"), _ep("b"), _ep("c")]), ("m2", [_ep("d"), _ep("a"), _ep("e")])],
+        limit=4,
+    )
+    assert [e["tag"] for e in merged] == ["a", "d", "b", "c"]
+    by_tag = {e["tag"]: e["models"] for e in merged}
+    assert by_tag["a"] == ["m1", "m2"]  # m2 lists it too, so it names both and costs no extra slot
+    assert len(merged) == 4
+
+
+def test_the_first_model_cannot_take_every_provider_slot():
+    merged = merge_endpoints([("m1", [_ep(t) for t in "abcdef"]), ("m2", [_ep(t) for t in "uvwxyz"])], limit=4)
+    assert {e["tag"] for e in merged} == {"a", "u", "b", "v"}
+    assert merge_endpoints([], 5) == []
+
+
+def test_a_plan_with_several_models_lists_them_and_their_providers(client):
+    _settings(max_models=3, max_providers=4)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert [c["model_id"] for c in plan["picks"]] == ["acme/best", "acme/steady", "acme/pricey"]
+    assert plan["pick"]["model_id"] == "acme/best"
+    assert plan["config"]["model"] == "acme/best"
+    assert plan["config"]["models"] == ["acme/best", "acme/steady", "acme/pricey"]
+    assert plan["request"]["body"]["models"] == plan["config"]["models"]
+    assert plan["reason"] == f"Creates {SLUG} with 3 models, led by best."
+    # only acme/best has endpoint data, so the providers are its four cheapest
+    assert [p["tag"] for p in plan["providers"]] == ["novita/fp4", "deepinfra/fp8", "wafer/bf16", "slow/fp8"]
+    assert all(p["models"] == ["acme/best"] for p in plan["providers"])
+    assert plan["runners_up"] == []
+
+
+def test_growing_the_lineup_says_which_models_were_added(client):
+    _own()
+    _settings(max_models=2)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "provider": {"allow_fallbacks": True}}, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "update"
+    assert plan["reason"] == "Model list: adds steady. Leads with best."
+    assert {c["path"] for c in plan["changes"]} >= {"models"}
+
+
+def test_shrinking_the_lineup_says_which_models_were_dropped(client):
+    _own()
+    current = {"model": "acme/best", "models": ["acme/best", "acme/steady", "acme/pricey"]}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, current, version=2)
+        plan = _plan(client)
+    assert plan["config"].get("models") is None
+    assert plan["reason"].startswith("Model list: drops acme/steady, acme/pricey.")
+
+
+# ---- archived presets and the template list -------------------------------------------------------------------
+
+
+def test_an_archived_preset_blocks_the_plan_and_says_how_to_go_on(client):
+    _own()
+    with respx.mock(assert_all_called=False) as router:
+        url = f"{BASE}/presets/{SLUG}"
+        payload = _preset(SLUG, {"model": "acme/best"})
+        payload["data"]["status"] = "archived"
+        router.get(url).mock(return_value=httpx.Response(200, json=payload))
+        router.get(f"{url}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+        post = router.post(f"{url}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert post.call_count == 0
+    assert plan["action"] == "blocked"
+    assert "archived" in plan["reason"] and "another name" in plan["reason"]
+    assert plan["request"] is None
+
+
+def _listing(router: respx.Router) -> None:
+    rows = [
+        {"slug": "my-tools", "name": "My tools", "status": "active", "updated_at": "2026-11-03T00:00:00Z"},
+        {"slug": "old-one", "name": "Old", "status": "archived", "updated_at": "2026-10-01T00:00:00Z"},
+        {"slug": SLUG, "name": SLUG, "status": "active", "updated_at": "2026-11-04T00:00:00Z"},
+        {"slug": "ds-fast", "name": "DS fast", "status": "active", "updated_at": "2026-11-04T00:00:00Z"},
+    ]
+    router.get(f"{BASE}/presets").mock(return_value=httpx.Response(200, json={"data": rows, "total_count": 4}))
+    router.get(f"{BASE}/presets/my-tools").mock(
+        return_value=httpx.Response(
+            200, json=_preset("my-tools", {"model": "a/m", "provider": {"only": ["deepinfra"]}}, 3)
+        )
+    )
+    router.get(f"{BASE}/presets/ds-fast").mock(
+        return_value=httpx.Response(200, json=_preset("ds-fast", {"model": "b/m", "models": ["b/m", "c/m"]}, 1))
+    )
+
+
+def test_the_accounts_presets_can_be_listed_to_start_from(client):
+    _own()  # SLUG is one Vibonomics wrote
+    with respx.mock(assert_all_called=False) as router:
+        _listing(router)
+        response = client.post("/api/presets/list")
+    assert response.status_code == 200, response.text
+    assert KEY not in response.text
+    body = response.json()
+    assert body["error"] is None
+    assert [p["slug"] for p in body["presets"]] == ["ds-fast", "my-tools"]  # newest first; ours and archived left out
+    mine = {p["slug"]: p for p in body["presets"]}
+    assert mine["my-tools"]["models"] == ["a/m"] and mine["my-tools"]["providers"] == ["deepinfra"]
+    assert mine["my-tools"]["version"] == 3
+    assert mine["ds-fast"]["models"] == ["b/m", "c/m"]
+
+
+def test_a_preset_whose_detail_cannot_be_read_is_still_listed(client):
+    _own()
+    with respx.mock(assert_all_called=False) as router:
+        _listing(router)
+        router.get(f"{BASE}/presets/my-tools").mock(return_value=httpx.Response(500, json={"error": "boom"}))
+        body = client.post("/api/presets/list").json()
+    row = next(p for p in body["presets"] if p["slug"] == "my-tools")
+    assert row["models"] == [] and row["version"] is None
+
+
+def test_the_list_says_why_it_is_empty(client):
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BASE}/presets").mock(return_value=httpx.Response(401, json={"error": "bad key"}))
+        body = client.post("/api/presets/list").json()
+    assert body["presets"] == [] and "HTTP 401" in body["error"]
+    with session_scope() as session:
+        session.query(ProviderConfig).filter_by(type="openrouter").update({"api_key_enc": None})
+    assert "Add an OpenRouter API key" in client.post("/api/presets/list").json()["error"]

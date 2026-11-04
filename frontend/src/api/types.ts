@@ -33,6 +33,8 @@ export type SpendNamed = Schemas['SpendNamedOut'];
 export type SpendKey = Schemas['SpendKeyOut'];
 export type SpendAccount = Schemas['SpendAccountOut'];
 
+export type PresetList = Schemas['PresetListOut'];
+export type PresetSummary = Schemas['PresetSummaryOut'];
 export type PresetPlan = Schemas['PresetPlanOut'];
 export type PresetState = Schemas['PresetStateOut'];
 export type PresetApplyResult = Schemas['PresetApplyOut'];
@@ -124,6 +126,7 @@ export function fullSettings(settings: AppSettings): FullSettings {
       min_context: 0,
       include_free: false,
       switch_margin_pct: 10,
+      max_models: 1,
       max_providers: 3,
       ...settings.presets,
     },

@@ -1,4 +1,6 @@
-import { Alert, Badge, Code, Group, Stack, Table, Text, Title } from '@mantine/core';
+import { Alert, Badge, Button, Code, Collapse, Group, Stack, Table, Text, Title } from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { CopyIconButton } from '../../components/CopyIconButton';
 import { DASH, dateTime, discountLabel, money, relativeTime } from '../../lib/format';
 import type { PresetPlan } from '../../api/types';
@@ -69,6 +71,8 @@ function Versions({ plan }: { plan: PresetPlan }) {
 export function PresetPlanView({ plan }: { plan: PresetPlan }) {
   const action = ACTIONS[plan.action];
   const body = plan.request ? JSON.stringify(plan.request.body, null, 2) : '';
+  const [open, { toggle }] = useDisclosure(false);
+  const names = new Map(plan.picks.map((c) => [c.model_id, c.name]));
   return (
     <Stack gap="md">
       <Group gap="sm" wrap="nowrap" align="flex-start">
@@ -105,7 +109,7 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
         </Alert>
       ))}
 
-      {plan.pick && (
+      {plan.picks.length === 1 && plan.pick && (
         <Stack gap={4}>
           <Text fw={600} size="sm">
             {plan.kept_current ? 'Staying on' : 'Best value'}
@@ -117,10 +121,44 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
         </Stack>
       )}
 
+      {plan.picks.length > 1 && (
+        <Stack gap={4}>
+          <Text fw={600} size="sm">
+            {plan.kept_current ? 'Models, kept steady' : 'Models'}, in the order OpenRouter tries them
+          </Text>
+          <Table.ScrollContainer minWidth={460}>
+            <Table verticalSpacing={4} withRowBorders={false} aria-label="Models">
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>#</Table.Th>
+                  <Table.Th>Model</Table.Th>
+                  <Table.Th>Score</Table.Th>
+                  <Table.Th>Per task</Table.Th>
+                  <Table.Th>Value</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {plan.picks.map((c, i) => (
+                  <Table.Tr key={c.model_id}>
+                    <Table.Td>{i + 1}</Table.Td>
+                    <Table.Td>
+                      {c.name} <Code>{c.model_id}</Code>
+                    </Table.Td>
+                    <Table.Td>{c.score}</Table.Td>
+                    <Table.Td>{money(c.task_cost)}</Table.Td>
+                    <Table.Td>{Math.round(c.value).toLocaleString()}</Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
+        </Stack>
+      )}
+
       {plan.providers.length > 0 && (
         <Stack gap={4}>
           <Text fw={600} size="sm">
-            Providers, cheapest first
+            Providers, cheapest first{plan.picks.length > 1 ? ', taken in turn from each model' : ''}
           </Text>
           <Table.ScrollContainer minWidth={460}>
             <Table verticalSpacing={4} withRowBorders={false} aria-label="Providers">
@@ -130,6 +168,7 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
                   <Table.Th>Slug</Table.Th>
                   <Table.Th>In / out per 1M</Table.Th>
                   <Table.Th>Per task</Table.Th>
+                  {plan.picks.length > 1 && <Table.Th>For</Table.Th>}
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
@@ -144,6 +183,11 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
                       {p.discount > 0 ? ` (${discountLabel(p.discount)})` : ''}
                     </Table.Td>
                     <Table.Td>{money(p.task_cost)}</Table.Td>
+                    {plan.picks.length > 1 && (
+                      <Table.Td>
+                        <Text size="sm">{p.models.map((id) => names.get(id) ?? id).join(', ')}</Text>
+                      </Table.Td>
+                    )}
                   </Table.Tr>
                 ))}
               </Table.Tbody>
@@ -193,20 +237,31 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
       {plan.request && (
         <Stack gap={4}>
           <Group gap="xs" justify="space-between">
-            <Text fw={600} size="sm">
-              The request, exactly as it would be sent
-            </Text>
-            <CopyIconButton value={body} label="Copy the request body" />
+            <Button
+              variant="subtle"
+              size="compact-sm"
+              leftSection={open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              aria-expanded={open}
+              onClick={toggle}
+            >
+              {open ? 'Hide API call' : 'View API call'}
+            </Button>
+            {open && <CopyIconButton value={body} label="Copy the request body" />}
           </Group>
-          <Text size="xs" c="dimmed">
-            <Code>
-              {plan.request.method} {plan.request.url}
-            </Code>{' '}
-            with your OpenRouter key. OpenRouter requires <Code>messages</Code> and then ignores it.
-          </Text>
-          <Code block aria-label="Request body">
-            {body}
-          </Code>
+          <Collapse expanded={open}>
+            <Stack gap={4}>
+              <Text size="xs" c="dimmed">
+                The request exactly as it would be sent:{' '}
+                <Code>
+                  {plan.request.method} {plan.request.url}
+                </Code>{' '}
+                with your OpenRouter key. OpenRouter requires <Code>messages</Code> and then ignores it.
+              </Text>
+              <Code block aria-label="Request body">
+                {body}
+              </Code>
+            </Stack>
+          </Collapse>
         </Stack>
       )}
 

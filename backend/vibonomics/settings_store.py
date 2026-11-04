@@ -123,21 +123,42 @@ class GeneralSettings(BaseModel):
 
 
 PRESET_SLUG_PREFIX = "vibonomics-"
-_PRESET_SLUG = re.compile(rf"^{PRESET_SLUG_PREFIX}[a-z0-9]+(-[a-z0-9]+)*$")
+PRESET_SLUG_MAX = 64
 _TEMPLATE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def preset_slug(name: str) -> str:
+    """The OpenRouter slug for a name the operator typed: lower case, hyphenated, and always ``vibonomics-`` first.
+
+    The prefix is how Vibonomics knows a preset is one it may write, so the operator does not type it and cannot
+    leave it off. A name that already starts with it is not given a second one.
+    """
+    base = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    if not base:
+        raise ValueError("Give the preset a name")
+    slug = base if base.startswith(PRESET_SLUG_PREFIX) else PRESET_SLUG_PREFIX + base
+    if len(slug) > PRESET_SLUG_MAX:
+        raise ValueError(
+            f"The name is too long: the slug, with {PRESET_SLUG_PREFIX}, is at most {PRESET_SLUG_MAX} long"
+        )
+    return slug
+
+
 class PresetSettings(BaseModel):
-    """The OpenRouter preset Vibonomics keeps pointed at the best-value model, and how it picks that model.
+    """The OpenRouter preset Vibonomics keeps pointed at the best-value models, and how it picks them.
 
     Off by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts
-    with ``vibonomics-``, so a preset the operator made by hand can never be the one that is rewritten.
+    with ``vibonomics-`` (it is added to whatever name is typed), so a preset the operator made by hand can never be
+    the one that is rewritten.
     """
 
     enabled: bool = Field(False, description="Let Vibonomics create and update the preset below on OpenRouter")
     auto_apply: bool = Field(False, description="Also update the preset on a schedule, with no one watching")
     interval_hours: float = Field(24, ge=1, le=168, description="Hours between scheduled updates")
-    slug: str = Field(f"{PRESET_SLUG_PREFIX}best-value", max_length=64)
+    slug: str = Field(
+        f"{PRESET_SLUG_PREFIX}best-value",
+        description=f"The preset's name. {PRESET_SLUG_PREFIX} is put in front of it if it is not already there.",
+    )
     template_slug: str | None = Field(
         None,
         max_length=100,
@@ -154,17 +175,15 @@ class PresetSettings(BaseModel):
         10,
         ge=0,
         le=100,
-        description="A new model replaces the current one only when it gives this much more value",
+        description="A new model replaces one already in the preset only when it gives this much more value",
     )
-    max_providers: int = Field(3, ge=1, le=5, description="Providers listed for the model, cheapest first")
+    max_models: int = Field(1, ge=1, le=10, description="Models listed, best value first; the rest are fallbacks")
+    max_providers: int = Field(3, ge=1, le=10, description="Providers listed, cheapest first")
 
     @field_validator("slug")
     @classmethod
     def _own_slug(cls, value: str) -> str:
-        value = value.strip().lower()
-        if not _PRESET_SLUG.match(value):
-            raise ValueError(f"Use lower case letters, digits and hyphens, starting with {PRESET_SLUG_PREFIX}")
-        return value
+        return preset_slug(value)
 
     @field_validator("template_slug")
     @classmethod

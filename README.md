@@ -64,8 +64,9 @@ tried.
 - **Spend history.** What an OpenRouter account has spent, in dollars and tokens, by day, model, provider
   and API key, with the cost of a million tokens and the cache hit rate. OpenRouter only shows the last 30
   days, so Vibonomics keeps each day it sees.
-- **A best-value preset.** Optionally keeps one OpenRouter preset pointed at the model that gives the most
-  score per dollar today, on its cheapest providers. Preview shows the exact request first. Off by default.
+- **A best-value preset.** Optionally keeps one OpenRouter preset pointed at the models that give the most
+  score per dollar today (up to ten, the rest as fallbacks), on their cheapest providers. Preview shows the
+  exact request first. Off by default.
 
 ### A closer look
 
@@ -275,7 +276,7 @@ posting them. The two used to be separate cards, which read as if the subscripti
 
 - **Live windows.** A status line is a Claude Code setting, not a Vibonomics one: Claude Code runs the
   command you configure every time it redraws its footer, with the session's JSON on stdin, and prints
-  whatever the command returns. That JSON carries the rate-limit windows. In **Settings → Claude**, copy
+  whatever the command returns. That JSON carries the rate-limit windows. In **Settings → Providers → Claude**, copy
   the generated `statusLine` snippet into your user settings file and merge the key into whatever is
   already there:
 
@@ -334,24 +335,34 @@ every 12 hours (**Settings → Refresh**), at startup and from the Refresh menu.
 
 A preset is a named bundle of model and routing settings that any client selects with
 `model: "@preset/<slug>"`. Vibonomics can keep one preset pointed at the best value of the day, so a harness
-that cannot pin a provider still follows it. Turn it on under **Settings → Presets**.
+that cannot pin a provider still follows it. Turn it on under **Settings → Providers → OpenRouter**, the
+second row of tabs under Providers, where settings that belong to one provider live.
 
+- **Its name.** You type a name and Vibonomics puts `vibonomics-` in front of it. That prefix is how it
+  knows a preset is its own, so you can't leave it off and a preset of yours without it is never touched.
 - **How it picks.** The same score per dollar as the Models page, for the usage profile you choose, among
   OpenRouter models that pass your filters (minimum score, tool calling, context size, no free or batch
-  offers unless you allow them). A new model replaces the current one only when it is a set percentage
-  better, so the preset does not flap between near ties.
-- **Which providers.** The cheapest endpoints for that task, as many as you ask for, written to
-  `provider.only` and `provider.order`. A discounted endpoint wins on price.
+  offers unless you allow them). A model already in the preset keeps its place unless another beats it by a
+  set percentage, so the preset does not flap between near ties.
+- **How many models.** One to ten. The best is the lead (`model`) and the list, lead first, is `models`:
+  OpenRouter's fallbacks, tried in order when one fails. OpenRouter's docs say a preset can hold an array
+  of models without naming the field, so after a write Vibonomics reads the preset back and reports any key
+  OpenRouter did not keep.
+- **Which providers.** The cheapest endpoints for that task, up to ten, written to `provider.only` and
+  `provider.order`. With several models each takes a turn at its cheapest endpoint, so the first can't use
+  every slot, and a provider two models share is listed once. A discounted endpoint wins on price.
 - **What it leaves alone.** Everything else in the preset: tools, reasoning, other provider filters. Each
   write to OpenRouter is the whole config, so Vibonomics reads the preset first and sends back what it found.
-  An edit you make in the OpenRouter UI survives. A new preset can start from one of yours (read only).
-- **What it will write.** Only a slug that starts with `vibonomics-` and that it created itself. A preset of
-  that name made by hand is refused. It never deletes: OpenRouter's API has no delete, so remove one in the
-  web UI.
-- **Dry run first.** **Preview** reads the preset from OpenRouter, ranks the models and shows the exact
-  request it would send, the live version number, the version history and what changes. **Apply** sends that
-  plan, and only that plan: if anything moved since you looked, it refuses and asks you to preview again.
-  After a write it reads the preset back and names any key OpenRouter did not keep.
+  An edit you make in the OpenRouter UI survives. A new preset can start from one of yours, picked from the
+  list of presets on your account (read only).
+- **What it will write.** Only a slug it created itself. It never deletes: OpenRouter's API has no delete, so
+  remove one in the web UI, which archives it. An archived preset takes no new versions, so Vibonomics
+  reports that instead of writing; restore it or choose another name.
+- **Dry run first.** **Preview** reads the preset from OpenRouter, ranks the models and shows the live
+  version number, the version history, what changes and the providers. **View API call** opens the exact
+  request it would send. **Apply** sends that plan, and only that plan: if anything moved since you looked,
+  it refuses and asks you to preview again. After a write it reads the preset back and names any key
+  OpenRouter did not keep.
 - **On a schedule.** A separate switch updates the preset every N hours with no one watching. Off by default,
   and it needs the write switch too.
 

@@ -329,6 +329,28 @@
         }
       }
     },
+    "/api/presets/list": {
+      "post": {
+        "tags": [
+          "presets"
+        ],
+        "summary": "Preset List",
+        "description": "The account's own presets, to start a new one from. POST because it calls OpenRouter with the operator's key.",
+        "operationId": "preset_list_api_presets_list_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetListOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/presets/plan": {
       "post": {
         "tags": [
@@ -3181,6 +3203,35 @@
         ],
         "title": "PresetChangeOut"
       },
+      "PresetListOut": {
+        "properties": {
+          "presets": {
+            "items": {
+              "$ref": "#/components/schemas/PresetSummaryOut"
+            },
+            "type": "array",
+            "title": "Presets"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "Why the list could not be read; the list is then empty"
+          }
+        },
+        "type": "object",
+        "required": [
+          "presets",
+          "error"
+        ],
+        "title": "PresetListOut"
+      },
       "PresetPlanOut": {
         "properties": {
           "action": {
@@ -3248,12 +3299,21 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "The model the preset leads with"
+          },
+          "picks": {
+            "items": {
+              "$ref": "#/components/schemas/PresetCandidateOut"
+            },
+            "type": "array",
+            "title": "Picks",
+            "description": "Every model the preset lists, in order, the lead first"
           },
           "kept_current": {
             "type": "boolean",
             "title": "Kept Current",
-            "description": "The best value is not far enough ahead of the current model to switch"
+            "description": "The lineup differs from raw best value because a model already in it is favoured"
           },
           "providers": {
             "items": {
@@ -3364,6 +3424,7 @@
           "task",
           "considered",
           "pick",
+          "picks",
           "kept_current",
           "providers",
           "runners_up",
@@ -3437,6 +3498,14 @@
           "task_cost": {
             "type": "number",
             "title": "Task Cost"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Models",
+            "description": "The listed models this provider serves, by model id"
           }
         },
         "type": "object",
@@ -3447,7 +3516,8 @@
           "output",
           "discount",
           "quantization",
-          "task_cost"
+          "task_cost",
+          "models"
         ],
         "title": "PresetProviderOut"
       },
@@ -3501,8 +3571,8 @@
           },
           "slug": {
             "type": "string",
-            "maxLength": 64,
             "title": "Slug",
+            "description": "The preset's name. vibonomics- is put in front of it if it is not already there.",
             "default": "vibonomics-best-value"
           },
           "template_slug": {
@@ -3570,21 +3640,29 @@
             "maximum": 100.0,
             "minimum": 0.0,
             "title": "Switch Margin Pct",
-            "description": "A new model replaces the current one only when it gives this much more value",
+            "description": "A new model replaces one already in the preset only when it gives this much more value",
             "default": 10
+          },
+          "max_models": {
+            "type": "integer",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Models",
+            "description": "Models listed, best value first; the rest are fallbacks",
+            "default": 1
           },
           "max_providers": {
             "type": "integer",
-            "maximum": 5.0,
+            "maximum": 10.0,
             "minimum": 1.0,
             "title": "Max Providers",
-            "description": "Providers listed for the model, cheapest first",
+            "description": "Providers listed, cheapest first",
             "default": 3
           }
         },
         "type": "object",
         "title": "PresetSettings",
-        "description": "The OpenRouter preset Vibonomics keeps pointed at the best-value model, and how it picks that model.\n\nOff by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts\nwith ``vibonomics-``, so a preset the operator made by hand can never be the one that is rewritten."
+        "description": "The OpenRouter preset Vibonomics keeps pointed at the best-value models, and how it picks them.\n\nOff by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts\nwith ``vibonomics-`` (it is added to whatever name is typed), so a preset the operator made by hand can never be\nthe one that is rewritten."
       },
       "PresetStateOut": {
         "properties": {
@@ -3694,6 +3772,64 @@
           "owned"
         ],
         "title": "PresetStateOut"
+      },
+      "PresetSummaryOut": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "providers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Providers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "name",
+          "version",
+          "updated_at",
+          "models",
+          "providers"
+        ],
+        "title": "PresetSummaryOut"
       },
       "PresetTaskOut": {
         "properties": {

@@ -69,6 +69,7 @@ CHANGES = [
     ("POST", "/api/providers/1/test"),
     ("POST", "/api/providers/refresh"),
     ("POST", "/api/providers/1/refresh"),
+    ("POST", "/api/presets/list"),
     ("POST", "/api/presets/plan"),
     ("POST", "/api/presets/apply"),
     ("POST", "/api/evals/runs"),

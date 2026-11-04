@@ -51,6 +51,7 @@ STATE_KEY = "preset_state"
 PLACEHOLDER_MESSAGES = [{"role": "user", "content": "Vibonomics preset update"}]
 RUNNERS_UP = 5
 VERSIONS_SHOWN = 8
+LISTED_PRESETS = 50
 # Provider filters OpenRouter applies itself, which the endpoint ranking here cannot see.
 UNSEEN_FILTERS = ("zdr", "data_collection", "max_price", "require_parameters")
 
@@ -97,6 +98,7 @@ class Remote:
     config: dict[str, Any]
     system_prompt: str | None
     updated_at: str | None
+    status: str = "active"  # an archived preset takes no new versions
     versions: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -109,7 +111,8 @@ class Plan:
     profile: str | None = None
     task: Task | None = None
     considered: int = 0
-    pick: Candidate | None = None
+    pick: Candidate | None = None  # the model the preset leads with
+    picks: list[Candidate] = field(default_factory=list)  # every model it lists, in order
     kept_current: bool = False
     providers: list[dict[str, Any]] = field(default_factory=list)
     runners_up: list[Candidate] = field(default_factory=list)
@@ -237,10 +240,19 @@ def choose_endpoints(
 # ---- the config ----------------------------------------------------------------------------------------------
 
 
-def build_config(base: dict[str, Any] | None, model_id: str, tags: list[str]) -> dict[str, Any]:
-    """``base`` with the model and the provider lists replaced; every other key is the operator's."""
+def build_config(base: dict[str, Any] | None, model_ids: list[str], tags: list[str]) -> dict[str, Any]:
+    """``base`` with the models and the provider lists replaced; every other key is the operator's.
+
+    One model is ``model``. Several are ``model`` (the lead) and ``models`` (all of them, in order, the lead first),
+    so a preset that keeps only one of the two is still a working preset.
+    """
     config = copy.deepcopy(base) if base else {}
-    config["model"] = model_id
+    config["model"] = model_ids[0]
+    if len(model_ids) > 1:
+        config["models"] = list(model_ids)
+    else:
+        # A fallback list left from an earlier, longer lineup would put models back that were dropped.
+        config.pop("models", None)
     provider = dict(config["provider"]) if isinstance(config.get("provider"), dict) else {}
     if tags:
         provider["only"] = list(tags)
@@ -252,6 +264,58 @@ def build_config(base: dict[str, Any] | None, model_id: str, tags: list[str]) ->
     provider.setdefault("allow_fallbacks", True)
     config["provider"] = provider
     return config
+
+
+def current_models(config: dict[str, Any]) -> list[str]:
+    """The model ids a preset config names, in order: its ``model``, then any ``models`` fallbacks."""
+    listed = config.get("models")
+    found = [config.get("model"), *(listed if isinstance(listed, list) else [])]
+    out: list[str] = []
+    for value in found:
+        if isinstance(value, str) and value and value not in out:
+            out.append(value)
+    return out
+
+
+def select_models(
+    ranked: list[Candidate], incumbents: list[str], count: int, margin_pct: float
+) -> tuple[list[Candidate], bool]:
+    """The ``count`` best-value models, with a model already in the preset favoured by ``margin_pct``.
+
+    A challenger has to beat an incumbent by the margin to displace it, and the incumbent lead has to be beaten by
+    the margin to lose the lead, so near ties do not rewrite the preset every day. Returns the models in order, and
+    whether the margin kept the lineup from being what raw value alone would pick.
+    """
+    boost = 1 + margin_pct / 100
+    chosen = sorted(
+        ranked,
+        key=lambda c: (-(c.value * (boost if c.model_id in incumbents else 1)), -c.score, c.task_cost, c.model_id),
+    )[:count]
+    lead = incumbents[0] if incumbents else None
+    ordered = sorted(
+        chosen,
+        key=lambda c: (-(c.value * (boost if c.model_id == lead else 1)), -c.score, c.task_cost, c.model_id),
+    )
+    return ordered, [c.model_id for c in ordered] != [c.model_id for c in ranked[:count]]
+
+
+def merge_endpoints(per_model: list[tuple[str, list[dict[str, Any]]]], limit: int) -> list[dict[str, Any]]:
+    """One provider list for several models: each model's cheapest endpoint in turn, then its next, up to ``limit``.
+
+    An endpoint two models share is listed once and names both. Round-robin, so the first model cannot use every slot.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for rank in range(max((len(eps) for _model, eps in per_model), default=0)):
+        for model_id, eps in per_model:
+            if rank >= len(eps):
+                continue
+            tag = eps[rank]["tag"]
+            if tag in merged:
+                if model_id not in merged[tag]["models"]:
+                    merged[tag]["models"].append(model_id)
+            elif len(merged) < limit:
+                merged[tag] = {**eps[rank], "models": [model_id]}
+    return list(merged.values())
 
 
 def _json(value: Any) -> str | None:
@@ -351,6 +415,7 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
         config=live.get("config") if isinstance(live.get("config"), dict) else {},
         system_prompt=live.get("system_prompt"),
         updated_at=data.get("updated_at"),
+        status=str(data.get("status") or "active"),
     )
     try:
         listing = (await get_json(f"{path}/versions", headers=_auth(key), timeout=20, retries=1)).get("data") or []
@@ -375,22 +440,78 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
 # ---- planning ------------------------------------------------------------------------------------------------
 
 
+def _access(resolved: list[Any]) -> tuple[str, str | None]:
+    keyed = next((r for r in resolved if r.api_key), None)
+    base = (keyed.base_url if keyed and keyed.base_url else OpenRouterAdapter.spec.default_base_url).rstrip("/")
+    return base, keyed.api_key if keyed else None
+
+
+def _openrouter_providers(s: Session) -> list[ProviderConfig]:
+    return list(
+        s.scalars(
+            select(ProviderConfig)
+            .where(ProviderConfig.type == "openrouter", ProviderConfig.enabled.is_(True))
+            .order_by(ProviderConfig.id)
+        )
+    )
+
+
+def load_access() -> tuple[str, str | None, dict[str, Any]]:
+    """Where to reach OpenRouter, with which key, and what was written before. Ranks nothing."""
+    with session_scope() as s:
+        base, key = _access([resolve(p) for p in _openrouter_providers(s)])
+        return base, key, _load_state(s)
+
+
 def load_inputs() -> Inputs:
     with session_scope() as s:
         settings = load_settings(s)
-        providers = list(
-            s.scalars(
-                select(ProviderConfig)
-                .where(ProviderConfig.type == "openrouter", ProviderConfig.enabled.is_(True))
-                .order_by(ProviderConfig.id)
-            )
-        )
+        providers = _openrouter_providers(s)
         resolved = [resolve(p) for p in providers]
         candidates, task, profile_id = rank(s, settings, [p.id for p in providers])
         state = _load_state(s)
-    keyed = next((r for r in resolved if r.api_key), None)
-    base = (keyed.base_url if keyed and keyed.base_url else OpenRouterAdapter.spec.default_base_url).rstrip("/")
-    return Inputs(settings, candidates, task, profile_id, base, keyed.api_key if keyed else None, state)
+    base, key = _access(resolved)
+    return Inputs(settings, candidates, task, profile_id, base, key, state)
+
+
+async def list_presets(base: str, key: str, owned: list[str]) -> list[dict[str, Any]]:
+    """The account's active presets, newest first, with the models and providers each names.
+
+    Presets Vibonomics wrote are left out: one of them is no use as the template for another.
+    """
+    listing = (await get_json(f"{base}/presets", headers=_auth(key), timeout=20, retries=1)).get("data") or []
+    rows = [
+        p
+        for p in listing
+        if isinstance(p, dict)
+        and isinstance(p.get("slug"), str)
+        and p["slug"] not in owned
+        and p.get("status") != "archived"
+    ][:LISTED_PRESETS]
+    gate = asyncio.Semaphore(6)
+
+    async def one(p: dict[str, Any]) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        async with gate:
+            try:
+                got = await get_json(f"{base}/presets/{quote(p['slug'], safe='')}", headers=_auth(key), timeout=20)
+                data = got.get("data") or {}
+            except FetchError:
+                pass  # the row is still worth listing, without its models
+        live = data.get("designated_version") or {}
+        cfg = live.get("config") if isinstance(live.get("config"), dict) else {}
+        provider = cfg.get("provider") if isinstance(cfg.get("provider"), dict) else {}
+        return {
+            "slug": p["slug"],
+            "name": str(p.get("name") or p["slug"]),
+            "version": live.get("version"),
+            "updated_at": p.get("updated_at"),
+            "models": current_models(cfg),
+            "providers": [x for x in provider.get("only") or [] if isinstance(x, str)],
+        }
+
+    found = await asyncio.gather(*(one(p) for p in rows))
+    return sorted(found, key=lambda r: r["updated_at"] or "", reverse=True)
 
 
 def _blocked(plan: Plan, reason: str) -> Plan:
@@ -423,29 +544,31 @@ async def make_plan(inputs: Inputs | None = None) -> Plan:
     except FetchError as exc:
         return _blocked(plan, f"Could not read the preset from OpenRouter: {exc}")
     plan.current = remote
+    if remote is not None and remote.status == "archived":
+        return _blocked(
+            plan,
+            f"The preset {cfg.slug} is archived on OpenRouter, and an archived preset takes no new versions. "
+            "Restore it in the OpenRouter web UI, or give this one another name.",
+        )
     if remote is not None and not is_owned(inputs.state, cfg.slug):
         return _blocked(
             plan,
             f"A preset called {cfg.slug} already exists on this account and Vibonomics did not create it, so it is "
-            "left alone. Pick another slug, or delete that preset in the OpenRouter web UI.",
+            "left alone. Give this one another name, or archive that preset in the OpenRouter web UI.",
         )
     if remote is not None and remote.system_prompt:
         return _blocked(
             plan,
             "The preset has a system prompt, and OpenRouter's API cannot carry one over to a new version. Clear it "
-            "in the OpenRouter web UI, or use another slug.",
+            "in the OpenRouter web UI, or use another name.",
         )
     if not inputs.candidates:
         return _blocked(plan, "No OpenRouter model passes the filters. Loosen the minimum score or the other filters.")
 
-    best = inputs.candidates[0]
-    pick = best
-    current_model = remote.config.get("model") if remote else None
-    current = next((c for c in inputs.candidates if c.model_id == current_model), None)
-    if current is not None and best is not current and best.value < current.value * (1 + cfg.switch_margin_pct / 100):
-        pick, plan.kept_current = current, True
-    plan.pick = pick
-    plan.runners_up = [c for c in inputs.candidates if c is not pick][:RUNNERS_UP]
+    before = current_models(remote.config) if remote else []
+    plan.picks, plan.kept_current = select_models(inputs.candidates, before, cfg.max_models, cfg.switch_margin_pct)
+    pick = plan.pick = plan.picks[0]
+    plan.runners_up = [c for c in inputs.candidates if c not in plan.picks][:RUNNERS_UP]
 
     base_config = remote.config if remote else None
     if remote is None and cfg.template_slug:
@@ -463,11 +586,17 @@ async def make_plan(inputs: Inputs | None = None) -> Plan:
 
     provider_block = (base_config or {}).get("provider")
     provider_block = provider_block if isinstance(provider_block, dict) else {}
-    plan.providers = choose_endpoints(pick.endpoints, pick.cache_read, inputs.task, provider_block, cfg.max_providers)
+    plan.providers = merge_endpoints(
+        [
+            (c.model_id, choose_endpoints(c.endpoints, c.cache_read, inputs.task, provider_block, cfg.max_providers))
+            for c in plan.picks
+        ],
+        cfg.max_providers,
+    )
     if not plan.providers:
         plan.warnings.append(
-            "No provider data for this model (or none that passes the preset's quantization and ignore filters), so "
-            "the preset names no provider and OpenRouter routes as it decides. Provider data comes from the "
+            "No provider data for these models (or none that passes the preset's quantization and ignore filters), "
+            "so the preset names no provider and OpenRouter routes as it decides. Provider data comes from the "
             "'Check OpenRouter endpoint discounts' refresh option."
         )
     unseen = [k for k in UNSEEN_FILTERS if k in provider_block]
@@ -477,27 +606,52 @@ async def make_plan(inputs: Inputs | None = None) -> Plan:
             "may be filtered out at request time."
         )
 
-    plan.config = build_config(base_config, pick.model_id, [p["tag"] for p in plan.providers])
+    ids = [c.model_id for c in plan.picks]
+    plan.config = build_config(base_config, ids, [p["tag"] for p in plan.providers])
     plan.url = f"{inputs.base_url}/presets/{quote(cfg.slug, safe='')}/chat/completions"
     plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
     plan.digest = digest_of(cfg.slug, plan.config)
     plan.changes = diff_config(remote.config if remote else None, plan.config)
 
     if remote is None:
-        plan.action, plan.reason = "create", f"Creates {cfg.slug} pointing at {pick.name}."
+        plan.action = "create"
+        plan.reason = (
+            f"Creates {cfg.slug} pointing at {pick.name}."
+            if len(ids) == 1
+            else f"Creates {cfg.slug} with {len(ids)} models, led by {pick.name}."
+        )
     elif plan.config == remote.config:
         plan.action = "unchanged"
+        best = inputs.candidates[0]
         plan.reason = "Already up to date." + (
-            f" {best.name} scores higher on value, but by less than {cfg.switch_margin_pct:g}%, so the model stays."
+            f" {best.name} scores higher on value, but by less than {cfg.switch_margin_pct:g}%, so the lineup stays."
             if plan.kept_current
             else ""
         )
-    elif current_model != pick.model_id:
-        gain = f", {_percent(pick.value, current.value)}% more value" if current is not None else ""
-        plan.action, plan.reason = "update", f"Switches {current_model} to {pick.name}{gain}."
+    elif before != ids:
+        plan.action, plan.reason = "update", _model_change(before, plan.picks, inputs.candidates)
     else:
-        plan.action, plan.reason = "update", f"Same model, {pick.name}; the provider list changed."
+        plan.action = "update"
+        plan.reason = f"Same {'model' if len(ids) == 1 else 'models'}, {pick.name}; the provider list changed."
     return plan
+
+
+def _model_change(before: list[str], picks: list[Candidate], candidates: list[Candidate]) -> str:
+    """One sentence on how the model lineup changes."""
+    ids = [c.model_id for c in picks]
+    if len(ids) == 1 and len(before) == 1:
+        old = next((c for c in candidates if c.model_id == before[0]), None)
+        gain = f", {_percent(picks[0].value, old.value)}% more value" if old is not None else ""
+        return f"Switches {before[0]} to {picks[0].name}{gain}."
+    names = {c.model_id: c.name for c in candidates}
+    parts = []
+    if added := [names.get(i, i) for i in ids if i not in before]:
+        parts.append("adds " + ", ".join(added))
+    if dropped := [i for i in before if i not in ids]:
+        parts.append("drops " + ", ".join(dropped))
+    if parts:
+        return f"Model list: {'; '.join(parts)}. Leads with {picks[0].name}."
+    return f"Same models in a new order, leading with {picks[0].name}."
 
 
 # ---- applying ------------------------------------------------------------------------------------------------

@@ -47,12 +47,16 @@ docker compose logs -f vibonomics
   `_CAN_PIN`; `generate` tells every other harness it can't pin. Don't add a harness to `_CAN_PIN` on a guess.
 - **Best-value preset** (`presets.py`, `api/presets.py`): the only code that writes to an OpenRouter account.
   It writes a slug that starts with `vibonomics-` and that it created itself (`owned` in the `preset_state`
-  setting), never a preset made by hand, and never deletes (the API cannot). OpenRouter keeps no partial update,
-  so every write is the whole config: read the live one, change only `model` and `provider.only`/`order`, send the
-  rest back, then read the response and report the keys it dropped. The dry run and the apply build the plan with
+  setting), never a preset made by hand, and never deletes (the API cannot). The prefix is added to the name
+  the operator types (`preset_slug()`), never asked for, so it can't be left off. An archived preset takes no new
+  versions and blocks the plan. OpenRouter keeps no partial update, so every write is the whole config: read the
+  live one, change only `model`, `models` and `provider.only`/`order`, send the rest back, then read the
+  response and report the keys it dropped. A model already in the preset is favoured by the switch margin
+  (`select_models`), so near ties do not rewrite it daily. The dry run and the apply build the plan with
   the same function, and apply takes the plan's digest and refuses a plan that has changed. The create call
-  is never retried: a retry would leave a second version. Both routes are POSTs, so a visitor to an open-read
-  instance cannot make them call out with the operator's key.
+  is never retried: a retry would leave a second version. The routes (`plan`, `apply`, and `list`, which
+  fills the template picker) are POSTs, so a visitor to an open-read instance cannot make them call out with the
+  operator's key.
 - **Usage history** (`usage.py`, `api/usage.py`, the `usage` refresh kind): OpenRouter's activity API needs a
   management key and returns 30 finished UTC days, so every day it returns is stored in `usage_days` and the
   history outgrows that. `key_hash` is empty for whole-account rows and a key's hash for that key's rows: sum one

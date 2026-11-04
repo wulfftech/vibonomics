@@ -7,6 +7,16 @@ export function usePresetState(enabled = true) {
   return useQuery({ queryKey: keys.presetState, queryFn: () => api.get('/api/presets/state'), enabled });
 }
 
+/** The account's own presets, to start a new one from. Reads OpenRouter, so it asks once a minute at most. */
+export function usePresetList() {
+  return useQuery({
+    queryKey: keys.presetList,
+    queryFn: () => api.post('/api/presets/list'),
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
 /** The dry run: reads from OpenRouter, ranks the models, writes nothing. */
 export function usePresetPlan() {
   return useMutation({ mutationFn: () => api.post('/api/presets/plan') });

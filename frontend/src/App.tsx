@@ -28,6 +28,7 @@ const ROUTES: RouteObject[] = [
       { path: 'usage', element: <UsagePage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: 'settings/:section', element: <SettingsPage /> },
+      { path: 'settings/:section/:sub', element: <SettingsPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],
   },

@@ -9,6 +9,7 @@ export const keys = {
   providerTypes: ['providers', 'types'] as const,
   settings: ['settings'] as const,
   presetState: ['presets', 'state'] as const,
+  presetList: ['presets', 'list'] as const,
   usage: ['usage'] as const,
   spend: (days: number, provider: number | null, key: string | null) => ['usage', days, provider, key] as const,
   refreshStatus: ['refresh', 'status'] as const,

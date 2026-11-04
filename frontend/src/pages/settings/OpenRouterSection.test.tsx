@@ -1,0 +1,372 @@
+import { MantineProvider } from '@mantine/core';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PresetList, PresetPlan } from '../../api/types';
+import { OpenRouterSection } from './OpenRouterSection';
+import { PresetPlanView } from './PresetPlanView';
+
+function plan(over: Partial<PresetPlan> = {}): PresetPlan {
+  const pick = {
+    model_id: 'deepseek/flash',
+    name: 'Flash',
+    score: 71.4,
+    task_cost: 0.055,
+    value: 1298,
+    discount: 0.3,
+  };
+  return {
+    action: 'update',
+    reason: 'Switches deepseek/old to Flash, 31% more value.',
+    slug: 'vibonomics-best-value',
+    enabled: true,
+    auto_apply: false,
+    generated_at: '2026-11-04T10:00:00Z',
+    profile: 'agentic',
+    task: { input_tokens: 600000, output_tokens: 20000, cache_hit_rate: 0.8 },
+    considered: 42,
+    pick,
+    picks: [pick],
+    kept_current: false,
+    providers: [
+      {
+        tag: 'deepinfra/fp8',
+        provider: 'DeepInfra',
+        input: 0.1,
+        output: 0.4,
+        discount: 0.3,
+        quantization: 'fp8',
+        task_cost: 0.068,
+        models: ['deepseek/flash'],
+      },
+    ],
+    runners_up: [{ model_id: 'acme/steady', name: 'Steady', score: 70, task_cost: 0.07, value: 1100, discount: null }],
+    current_version: 4,
+    current_config: { model: 'deepseek/old' },
+    versions: [
+      { version: 4, created_at: '2026-11-04T07:36:33Z', model: 'deepseek/old', providers: ['deepinfra'], live: true },
+      { version: 3, created_at: '2026-11-03T07:36:33Z', model: 'deepseek/older', providers: [], live: false },
+    ],
+    config: { model: 'deepseek/flash', provider: { only: ['deepinfra/fp8'] } },
+    changes: [{ path: 'model', before: '"deepseek/old"', after: '"deepseek/flash"' }],
+    request: {
+      method: 'POST',
+      url: 'https://openrouter.ai/api/v1/presets/vibonomics-best-value/chat/completions',
+      body: { model: 'deepseek/flash', messages: [{ role: 'user', content: 'Vibonomics preset update' }] },
+    },
+    digest: 'abc123',
+    warnings: ['No provider data for one runner-up.'],
+    state: { owned: ['vibonomics-best-value'] },
+    ...over,
+  };
+}
+
+describe('PresetPlanView', () => {
+  it('shows what would happen, the live version and the versions behind it', () => {
+    render(
+      <MantineProvider>
+        <PresetPlanView plan={plan()} />
+      </MantineProvider>,
+    );
+    expect(screen.getByText('Update')).toBeInTheDocument();
+    expect(screen.getByText('Switches deepseek/old to Flash, 31% more value.')).toBeInTheDocument();
+    expect(screen.getByText('Live version').parentElement).toHaveTextContent('v4');
+    expect(screen.getByText('@preset/vibonomics-best-value')).toBeInTheDocument();
+    expect(screen.getByText('No provider data for one runner-up.')).toBeInTheDocument();
+    const versions = within(screen.getByRole('table', { name: 'Preset versions' }));
+    expect(versions.getByText('v3')).toBeInTheDocument();
+    expect(versions.getByText('live')).toBeInTheDocument();
+    expect(within(screen.getByRole('table', { name: 'Changes' })).getByText('"deepseek/flash"')).toBeInTheDocument();
+  });
+
+  it('keeps the API call out of the way until it is asked for', async () => {
+    const user = userEvent.setup();
+    render(
+      <MantineProvider>
+        <PresetPlanView plan={plan()} />
+      </MantineProvider>,
+    );
+    const toggle = screen.getByRole('button', { name: 'View API call' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByLabelText('Request body')).not.toBeVisible();
+
+    await user.click(toggle);
+    expect(screen.getByRole('button', { name: 'Hide API call' })).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(screen.getByLabelText('Request body')).toBeVisible());
+    expect(screen.getByLabelText('Request body')).toHaveTextContent('"model": "deepseek/flash"');
+    expect(screen.getByLabelText('Request body')).toHaveTextContent('"messages"');
+
+    await user.click(screen.getByRole('button', { name: 'Hide API call' }));
+    await waitFor(() => expect(screen.getByLabelText('Request body')).not.toBeVisible());
+  });
+
+  it('says a preset that does not exist yet is not created, and offers no API call when blocked', () => {
+    render(
+      <MantineProvider>
+        <PresetPlanView
+          plan={plan({
+            action: 'blocked',
+            reason: 'A preset called vibonomics-best-value already exists.',
+            current_version: null,
+            versions: [],
+            request: null,
+            changes: [],
+            digest: null,
+          })}
+        />
+      </MantineProvider>,
+    );
+    expect(screen.getByText('Blocked')).toBeInTheDocument();
+    expect(screen.getByText('Not created yet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'View API call' })).toBeNull();
+    expect(screen.queryByRole('table', { name: 'Preset versions' })).toBeNull();
+  });
+
+  it('lists several models in order, and the models each provider is there for', () => {
+    const second = { model_id: 'z-ai/glm', name: 'GLM', score: 66, task_cost: 0.07, value: 940, discount: null };
+    const first = plan().picks[0];
+    render(
+      <MantineProvider>
+        <PresetPlanView
+          plan={plan({
+            picks: [first, second],
+            providers: [
+              { ...plan().providers[0], models: ['deepseek/flash', 'z-ai/glm'] },
+              {
+                tag: 'novita/fp4',
+                provider: 'Novita',
+                input: 0.08,
+                output: 0.35,
+                discount: 0,
+                quantization: 'fp4',
+                task_cost: 0.055,
+                models: ['z-ai/glm'],
+              },
+            ],
+          })}
+        />
+      </MantineProvider>,
+    );
+    const models = within(screen.getByRole('table', { name: 'Models' }));
+    expect(models.getAllByRole('row').map((r) => r.textContent)).toEqual([
+      '#ModelScorePer taskValue',
+      '1Flash deepseek/flash71.4$0.0551,298',
+      '2GLM z-ai/glm66$0.07940',
+    ]);
+    const providers = within(screen.getByRole('table', { name: 'Providers' }));
+    expect(providers.getByText('Flash, GLM')).toBeInTheDocument();
+    expect(providers.getByText('GLM')).toBeInTheDocument();
+  });
+});
+
+const fetchMock = vi.fn();
+
+function settingsBody(enabled: boolean, slug = 'vibonomics-best-value') {
+  return {
+    settings: {
+      scoring: {
+        default_profile: 'agentic',
+        profiles: [
+          {
+            id: 'agentic',
+            name: 'Agentic coding',
+            input_weight: 20,
+            output_weight: 1,
+            cache_hit_rate: 0.8,
+            task_input_tokens: 600000,
+            task_output_tokens: 20000,
+          },
+        ],
+      },
+      presets: { enabled, slug },
+    },
+    sources: [],
+    sandbox: { effective_mode: 'disabled', sidecar_url_set: false },
+    auth_enabled: true,
+    secret_key_from_env: false,
+  };
+}
+
+const LISTED: PresetList = {
+  error: null,
+  presets: [
+    {
+      slug: 'my-tools',
+      name: 'My tools',
+      version: 3,
+      updated_at: '2026-11-03T00:00:00Z',
+      models: ['deepseek/ds'],
+      providers: ['deepinfra'],
+    },
+    { slug: 'plain', name: 'plain', version: 1, updated_at: '2026-11-01T00:00:00Z', models: [], providers: [] },
+  ],
+};
+
+function serve(opts: { enabled?: boolean; plan?: PresetPlan; list?: PresetList | { status: number } } = {}) {
+  const enabled = opts.enabled ?? true;
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    const json = (body: unknown, status = 200) =>
+      Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
+    if (url === 'api/settings' && init?.method === 'PUT') {
+      const sent = JSON.parse(init.body as string) as { settings: { presets: { slug: string } } };
+      return json(settingsBody(enabled, sent.settings.presets.slug));
+    }
+    if (url === 'api/settings') {
+      return json(settingsBody(enabled));
+    }
+    if (url === 'api/presets/state') {
+      return json({ owned: [], last_run_at: null });
+    }
+    if (url === 'api/presets/list') {
+      const list = opts.list ?? LISTED;
+      return 'status' in list ? json({ detail: 'nope' }, list.status) : json(list);
+    }
+    if (url === 'api/presets/plan') {
+      return json(opts.plan ?? plan());
+    }
+    if (url === 'api/presets/apply') {
+      return json({
+        applied: true,
+        message: 'Updated vibonomics-best-value as version 5.',
+        version: 5,
+        unsaved: [],
+        state: { owned: [] },
+      });
+    }
+    return json({ detail: `unexpected ${init?.method ?? 'GET'} ${url}` }, 500);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+}
+
+function renderSection() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <MantineProvider>
+        <OpenRouterSection />
+      </MantineProvider>
+    </QueryClientProvider>,
+  );
+}
+
+const calls = (url: string) => fetchMock.mock.calls.filter(([u]) => u === url);
+
+/** The presets settings the section last PUT, as the server received them. */
+function savedPresets(): Record<string, unknown> | undefined {
+  const put = calls('api/settings').find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT');
+  if (put === undefined) {
+    return undefined;
+  }
+  return (JSON.parse((put[1] as RequestInit).body as string) as { settings: { presets: Record<string, unknown> } })
+    .settings.presets;
+}
+
+describe('OpenRouterSection', () => {
+  beforeEach(() => fetchMock.mockReset());
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('previews the plan and, once writing is allowed, applies exactly the plan it showed', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Preview' }));
+    expect(await screen.findByText('Switches deepseek/old to Flash, 31% more value.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Apply this plan' }));
+    await waitFor(() => {
+      const applied = calls('api/presets/apply')[0];
+      expect(applied).toBeDefined();
+      expect(JSON.parse((applied[1] as RequestInit).body as string)).toEqual({ digest: 'abc123' });
+    });
+    // the view is refreshed from a new dry run once the write is done
+    await waitFor(() => expect(calls('api/presets/plan')).toHaveLength(2));
+  });
+
+  it('will not apply while writing is switched off, but still previews', async () => {
+    serve({ enabled: false });
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Preview' }));
+    expect(await screen.findByText('Update')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply this plan' })).toBeDisabled();
+    expect(screen.getByText(/Turn on .*Let Vibonomics write this preset/)).toBeInTheDocument();
+    expect(calls('api/presets/apply')).toHaveLength(0);
+  });
+
+  it('offers nothing to apply when the plan is blocked', async () => {
+    serve({
+      plan: plan({ action: 'blocked', reason: 'No OpenRouter model passes the filters.', digest: null, request: null }),
+    });
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Preview' }));
+    expect(await screen.findByText('No OpenRouter model passes the filters.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply this plan' })).toBeDisabled();
+  });
+
+  it('takes a name and adds the prefix itself', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    const name = await screen.findByLabelText('Preset name');
+    expect(name).toHaveValue('best-value'); // the saved slug, without the prefix that is always there
+    await user.clear(name);
+    expect(screen.getByText('Give the preset a name')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    await user.type(name, 'My fast preset');
+    expect(screen.getAllByText(/@preset\/vibonomics-my-fast-preset/, { selector: 'code' }).length).toBeGreaterThan(1);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(savedPresets()?.slug).toBe('My fast preset'));
+  });
+
+  it('lists the presets on the account to start from, and saves the one chosen', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    const picker = await screen.findByRole('combobox', { name: 'Start from preset (optional)' });
+    await user.click(picker);
+    expect(await screen.findByText('deepseek/ds · only deepinfra · v3')).toBeInTheDocument();
+    await user.click(screen.getByText('My tools (my-tools)'));
+    expect(picker).toHaveValue('My tools (my-tools)');
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(savedPresets()?.template_slug).toBe('my-tools'));
+  });
+
+  it('falls back to typing a slug, and says why, when OpenRouter cannot list the presets', async () => {
+    serve({ list: { error: 'Add an OpenRouter API key under Settings, Providers first.', presets: [] } });
+    renderSection();
+    const field = await screen.findByLabelText(/Start from preset/);
+    expect(field).toHaveAttribute('placeholder', 'my-preset');
+    expect(screen.getByText(/The list of your presets is unavailable: Add an OpenRouter API key/)).toBeInTheDocument();
+  });
+
+  it.each([
+    ['Models listed', 'max_models'],
+    ['Providers listed', 'max_providers'],
+  ])('saves at most ten for %s', async (label, key) => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    const field = await screen.findByLabelText(label);
+    await user.clear(field);
+    await user.type(field, '15');
+    await user.tab();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(savedPresets()?.[key]).toBe(10));
+  });
+
+  it('saves ten when ten is asked for', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    const field = await screen.findByLabelText('Models listed');
+    await user.clear(field);
+    await user.type(field, '10');
+    await user.tab();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(savedPresets()?.max_models).toBe(10));
+  });
+});

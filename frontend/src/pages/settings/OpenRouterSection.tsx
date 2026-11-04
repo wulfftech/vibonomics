@@ -13,9 +13,10 @@ import {
   Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { useApplyPreset, usePresetPlan, usePresetState } from '../../api/presets';
+import { useApplyPreset, usePresetList, usePresetPlan, usePresetState } from '../../api/presets';
 import { ErrorState, LoadingState } from '../../components/DataState';
 import { dateTime, relativeTime } from '../../lib/format';
+import { PRESET_PREFIX, presetName, presetSlug } from '../../lib/presets';
 import { PresetPlanView } from './PresetPlanView';
 import { SaveBar } from './SaveBar';
 import { toNumber, useSettingsDraft } from './useSettingsDraft';
@@ -27,7 +28,68 @@ const DIMENSIONS = [
   { value: 'agentic', label: 'Agentic' },
 ];
 
-export function PresetsSection() {
+const TEMPLATE_HELP = 'Its tools, reasoning and provider filters are copied into a new preset. Read only.';
+
+/** The account's own presets to start from. Falls back to typing a slug when OpenRouter cannot be asked. */
+function TemplatePicker({ value, onChange }: { value: string | null; onChange: (slug: string | null) => void }) {
+  const list = usePresetList();
+  const presets = list.data?.presets ?? [];
+  const problem = list.isError ? list.error.message : (list.data?.error ?? null);
+
+  if (problem !== null) {
+    return (
+      <TextInput
+        label="Start from preset (optional)"
+        description={`${TEMPLATE_HELP} The list of your presets is unavailable: ${problem}`}
+        placeholder="my-preset"
+        value={value ?? ''}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+    );
+  }
+
+  const data = presets.map((p) => ({ value: p.slug, label: p.name === p.slug ? p.slug : `${p.name} (${p.slug})` }));
+  if (value && !data.some((d) => d.value === value)) {
+    data.unshift({ value, label: value });
+  }
+  const bySlug = new Map(presets.map((p) => [p.slug, p]));
+  return (
+    <Select
+      label="Start from preset (optional)"
+      description={TEMPLATE_HELP}
+      placeholder={
+        list.isPending ? 'Loading your presets…' : presets.length > 0 ? 'None' : 'No presets on your account'
+      }
+      searchable
+      clearable
+      data={data}
+      value={value}
+      onChange={onChange}
+      renderOption={({ option }) => {
+        const p = bySlug.get(option.value);
+        return (
+          <Stack gap={0}>
+            <Text size="sm">{option.label}</Text>
+            {p !== undefined && (
+              <Text size="xs" c="dimmed">
+                {[
+                  p.models.length > 0 ? p.models.join(', ') : 'no model set',
+                  p.providers.length > 0 ? `only ${p.providers.join(', ')}` : null,
+                  p.version === null || p.version === undefined ? null : `v${p.version}`,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </Text>
+            )}
+          </Stack>
+        );
+      }}
+    />
+  );
+}
+
+/** Settings that apply to OpenRouter alone. For now that is the best-value preset. */
+export function OpenRouterSection() {
   const { query, value, update, dirty, submit, saving, reset } = useSettingsDraft(['presets']);
   const state = usePresetState();
   const plan = usePresetPlan();
@@ -41,6 +103,8 @@ export function PresetsSection() {
   }
   const { presets, scoring } = value;
   const set = (patch: Partial<typeof presets>) => update((old) => ({ ...old, presets: { ...old.presets, ...patch } }));
+  const fullSlug = presetSlug(presets.slug);
+  const nameMissing = fullSlug === '';
 
   const preview = () => plan.mutate();
   const applyPlan = () => {
@@ -71,18 +135,24 @@ export function PresetsSection() {
   return (
     <Stack gap="lg">
       <Stack gap={4}>
-        <Title order={3}>Best-value preset</Title>
+        <Title order={3}>OpenRouter</Title>
         <Text size="sm" c="dimmed">
-          Keeps one OpenRouter preset pointed at the model that gives the most score per dollar, so any client that
-          cannot pin a provider can use <code>@preset/{presets.slug}</code> as its model and follow the best value. Each
-          update is a new version of the preset. Vibonomics only writes a preset it created itself, named{' '}
-          <code>vibonomics-…</code>, and never deletes one.
+          Settings that apply to OpenRouter only. Its keys and models are under All providers.
+        </Text>
+      </Stack>
+
+      <Stack gap={4}>
+        <Title order={4}>Best-value preset</Title>
+        <Text size="sm" c="dimmed">
+          Keeps one OpenRouter preset pointed at the models that give the most score per dollar, so any client that
+          cannot pin a provider can use <code>@preset/{fullSlug || '…'}</code> as its model and follow the best value.
+          Each update is a new version of the preset. Vibonomics only writes a preset it created itself, and never
+          deletes one.
         </Text>
       </Stack>
 
       <Card withBorder padding="md">
         <Stack gap="md">
-          <Title order={4}>Settings</Title>
           <Switch
             label="Let Vibonomics write this preset to my OpenRouter account"
             description="Off by default. With it off you can still preview exactly what would be written."
@@ -91,20 +161,27 @@ export function PresetsSection() {
           />
           <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
             <TextInput
-              label="Preset slug"
-              description="Starts with vibonomics-. A preset of that name you made by hand is never touched."
-              value={presets.slug}
+              label="Preset name"
+              description={
+                <>
+                  It becomes <code>@preset/{fullSlug || '…'}</code>. The <code>{PRESET_PREFIX}</code> prefix is added
+                  for you: it is how Vibonomics knows a preset is its own, so one you made by hand is never touched.
+                </>
+              }
+              leftSection={
+                <Text size="sm" c="dimmed">
+                  {PRESET_PREFIX}
+                </Text>
+              }
+              leftSectionWidth={92}
+              leftSectionPointerEvents="none"
+              value={presetName(presets.slug)}
+              error={nameMissing ? 'Give the preset a name' : undefined}
               onChange={(event) => set({ slug: event.currentTarget.value })}
             />
-            <TextInput
-              label="Start from preset (optional)"
-              description="Its tools, reasoning and provider filters are copied into a new preset. Read only."
-              placeholder="my-preset"
-              value={presets.template_slug ?? ''}
-              onChange={(event) => set({ template_slug: event.currentTarget.value })}
-            />
+            <TemplatePicker value={presets.template_slug ?? null} onChange={(slug) => set({ template_slug: slug })} />
           </SimpleGrid>
-          <Title order={5}>How the model is chosen</Title>
+          <Title order={5}>How the models are chosen</Title>
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
             <Select
               label="Costed for"
@@ -131,17 +208,24 @@ export function PresetsSection() {
               onChange={(next) => set({ min_score: toNumber(next) })}
             />
             <NumberInput
-              label="Minimum context"
-              description="Tokens; 0 for any"
-              min={0}
-              step={32_000}
-              thousandSeparator=","
-              value={presets.min_context}
-              onChange={(next) => set({ min_context: Math.round(toNumber(next)) })}
+              label="Models listed"
+              description="Best value first; the rest are fallbacks. 1 to 10"
+              min={1}
+              max={10}
+              value={presets.max_models}
+              onChange={(next) => set({ max_models: Math.min(10, Math.max(1, Math.round(toNumber(next, 1)))) })}
+            />
+            <NumberInput
+              label="Providers listed"
+              description="Cheapest first, shared across the models. 1 to 10"
+              min={1}
+              max={10}
+              value={presets.max_providers}
+              onChange={(next) => set({ max_providers: Math.min(10, Math.max(1, Math.round(toNumber(next, 1)))) })}
             />
             <NumberInput
               label="Switch only for a gain of"
-              description="Percent more value than the current model"
+              description="Percent more value than a model already listed"
               min={0}
               max={100}
               suffix=" %"
@@ -149,12 +233,13 @@ export function PresetsSection() {
               onChange={(next) => set({ switch_margin_pct: toNumber(next) })}
             />
             <NumberInput
-              label="Providers listed"
-              description="Cheapest first, 1 to 5"
-              min={1}
-              max={5}
-              value={presets.max_providers}
-              onChange={(next) => set({ max_providers: Math.min(5, Math.max(1, Math.round(toNumber(next, 1)))) })}
+              label="Minimum context"
+              description="Tokens; 0 for any"
+              min={0}
+              step={32_000}
+              thousandSeparator=","
+              value={presets.min_context}
+              onChange={(next) => set({ min_context: Math.round(toNumber(next)) })}
             />
           </SimpleGrid>
           <Group gap="xl">
@@ -191,7 +276,7 @@ export function PresetsSection() {
           </Group>
         </Stack>
       </Card>
-      <SaveBar dirty={dirty} saving={saving} onReset={reset} onSave={() => submit()} />
+      <SaveBar dirty={dirty && !nameMissing} saving={saving} onReset={reset} onSave={() => submit()} />
 
       <Card withBorder padding="md">
         <Stack gap="md">

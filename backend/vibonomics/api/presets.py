@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import presets
+from ..http import FetchError
 from ..presets import Applied, Candidate, Plan
 
 router = APIRouter(prefix="/api/presets", tags=["presets"])
@@ -44,6 +45,7 @@ class PresetProviderOut(BaseModel):
     discount: float
     quantization: str | None
     task_cost: float
+    models: list[str] = Field(description="The listed models this provider serves, by model id")
 
 
 class PresetChangeOut(BaseModel):
@@ -88,8 +90,11 @@ class PresetPlanOut(BaseModel):
     profile: str | None
     task: PresetTaskOut | None
     considered: int = Field(description="Models that pass the filters")
-    pick: PresetCandidateOut | None
-    kept_current: bool = Field(description="The best value is not far enough ahead of the current model to switch")
+    pick: PresetCandidateOut | None = Field(description="The model the preset leads with")
+    picks: list[PresetCandidateOut] = Field(description="Every model the preset lists, in order, the lead first")
+    kept_current: bool = Field(
+        description="The lineup differs from raw best value because a model already in it is favoured"
+    )
     providers: list[PresetProviderOut]
     runners_up: list[PresetCandidateOut]
     current_version: int | None = Field(description="The version of the preset that is live on OpenRouter now")
@@ -101,6 +106,20 @@ class PresetPlanOut(BaseModel):
     digest: str | None = Field(description="Names this plan; `apply` refuses a plan that has changed since")
     warnings: list[str]
     state: PresetStateOut
+
+
+class PresetSummaryOut(BaseModel):
+    slug: str
+    name: str
+    version: int | None
+    updated_at: str | None
+    models: list[str]
+    providers: list[str]
+
+
+class PresetListOut(BaseModel):
+    presets: list[PresetSummaryOut]
+    error: str | None = Field(description="Why the list could not be read; the list is then empty")
 
 
 class PresetApplyIn(BaseModel):
@@ -166,6 +185,7 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         else None,
         considered=plan.considered,
         pick=_candidate(plan.pick) if plan.pick else None,
+        picks=[_candidate(c) for c in plan.picks],
         kept_current=plan.kept_current,
         providers=[PresetProviderOut(**p) for p in plan.providers],
         runners_up=[_candidate(c) for c in plan.runners_up],
@@ -185,6 +205,19 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
 async def preset_state() -> PresetStateOut:
     """What Vibonomics last wrote and when. Reads the local record only; nothing leaves this instance."""
     return _state_out(await asyncio.to_thread(presets.read_state))
+
+
+@router.post("/list", response_model=PresetListOut)
+async def preset_list() -> PresetListOut:
+    """The account's own presets, to start a new one from. POST because it calls OpenRouter with the operator's key."""
+    base, key, state = await asyncio.to_thread(presets.load_access)
+    if not key:
+        return PresetListOut(presets=[], error="Add an OpenRouter API key under Settings, Providers first.")
+    try:
+        rows = await presets.list_presets(base, key, list(state.get("owned") or []))
+    except FetchError as exc:
+        return PresetListOut(presets=[], error=f"Could not read your presets from OpenRouter: {exc}")
+    return PresetListOut(presets=[PresetSummaryOut(**row) for row in rows], error=None)
 
 
 @router.post("/plan", response_model=PresetPlanOut)

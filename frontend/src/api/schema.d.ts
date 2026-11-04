@@ -166,6 +166,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/presets/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preset List
+         * @description The account's own presets, to start a new one from. POST because it calls OpenRouter with the operator's key.
+         */
+        post: operations["preset_list_api_presets_list_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/presets/plan": {
         parameters: {
             query?: never;
@@ -1173,6 +1193,16 @@ export interface components {
              */
             after: string | null;
         };
+        /** PresetListOut */
+        PresetListOut: {
+            /** Presets */
+            presets: components["schemas"]["PresetSummaryOut"][];
+            /**
+             * Error
+             * @description Why the list could not be read; the list is then empty
+             */
+            error: string | null;
+        };
         /** PresetPlanOut */
         PresetPlanOut: {
             /**
@@ -1201,10 +1231,16 @@ export interface components {
              * @description Models that pass the filters
              */
             considered: number;
+            /** @description The model the preset leads with */
             pick: components["schemas"]["PresetCandidateOut"] | null;
             /**
+             * Picks
+             * @description Every model the preset lists, in order, the lead first
+             */
+            picks: components["schemas"]["PresetCandidateOut"][];
+            /**
              * Kept Current
-             * @description The best value is not far enough ahead of the current model to switch
+             * @description The lineup differs from raw best value because a model already in it is favoured
              */
             kept_current: boolean;
             /** Providers */
@@ -1257,6 +1293,11 @@ export interface components {
             quantization: string | null;
             /** Task Cost */
             task_cost: number;
+            /**
+             * Models
+             * @description The listed models this provider serves, by model id
+             */
+            models: string[];
         };
         /** PresetRequestOut */
         PresetRequestOut: {
@@ -1278,10 +1319,11 @@ export interface components {
         };
         /**
          * PresetSettings
-         * @description The OpenRouter preset Vibonomics keeps pointed at the best-value model, and how it picks that model.
+         * @description The OpenRouter preset Vibonomics keeps pointed at the best-value models, and how it picks them.
          *
          *     Off by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts
-         *     with ``vibonomics-``, so a preset the operator made by hand can never be the one that is rewritten.
+         *     with ``vibonomics-`` (it is added to whatever name is typed), so a preset the operator made by hand can never be
+         *     the one that is rewritten.
          */
         PresetSettings: {
             /**
@@ -1304,6 +1346,7 @@ export interface components {
             interval_hours: number;
             /**
              * Slug
+             * @description The preset's name. vibonomics- is put in front of it if it is not already there.
              * @default vibonomics-best-value
              */
             slug: string;
@@ -1346,13 +1389,19 @@ export interface components {
             include_free: boolean;
             /**
              * Switch Margin Pct
-             * @description A new model replaces the current one only when it gives this much more value
+             * @description A new model replaces one already in the preset only when it gives this much more value
              * @default 10
              */
             switch_margin_pct: number;
             /**
+             * Max Models
+             * @description Models listed, best value first; the rest are fallbacks
+             * @default 1
+             */
+            max_models: number;
+            /**
              * Max Providers
-             * @description Providers listed for the model, cheapest first
+             * @description Providers listed, cheapest first
              * @default 3
              */
             max_providers: number;
@@ -1386,6 +1435,21 @@ export interface components {
             last_message?: string | null;
             /** Last Trigger */
             last_trigger?: string | null;
+        };
+        /** PresetSummaryOut */
+        PresetSummaryOut: {
+            /** Slug */
+            slug: string;
+            /** Name */
+            name: string;
+            /** Version */
+            version: number | null;
+            /** Updated At */
+            updated_at: string | null;
+            /** Models */
+            models: string[];
+            /** Providers */
+            providers: string[];
         };
         /** PresetTaskOut */
         PresetTaskOut: {
@@ -2713,6 +2777,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PresetStateOut"];
+                };
+            };
+        };
+    };
+    preset_list_api_presets_list_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetListOut"];
                 };
             };
         };
