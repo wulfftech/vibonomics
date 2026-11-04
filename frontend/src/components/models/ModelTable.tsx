@@ -6,11 +6,20 @@ import type { UsageProfile } from '../../api/types';
 import { layoutColumns, type ColumnSpec } from '../../lib/autoWidths';
 import { compactTokens, DASH, money, relativeTime } from '../../lib/format';
 import type { DisplayRow, EnrichedModel, GroupSummary, SortKey, SortState } from '../../lib/modelTable';
+import { modelBadgeLabels, modelSubline } from '../../lib/modelText';
 import { CopyIconButton } from '../CopyIconButton';
 import { EmptyState } from '../DataState';
 import { providerTextColor } from '../../lib/providerColors';
 import { ProviderDot } from '../ProviderDot';
-import { BlendedCell, CompositeCell, DiscountCell, ModelNameCell, ScoreNumber, TaskCostCell, ValueCell } from './cells';
+import {
+  BlendedCell,
+  CompositeCell,
+  DiscountCell,
+  ModelNameCell,
+  ScoreNumber,
+  TaskCostCell,
+  ValueCell,
+} from './cells';
 
 interface Column extends ColumnSpec {
   label?: string;
@@ -19,7 +28,7 @@ interface Column extends ColumnSpec {
 
 const COLUMNS: Column[] = [
   { id: 'select', min: 40, max: 40 },
-  { id: 'model', label: 'Model', sort: 'name', min: 250, max: 470, grow: 0.55 },
+  { id: 'model', label: 'Model', sort: 'name', min: 250, max: 640, grow: 0.55 },
   { id: 'provider', label: 'Provider', sort: 'provider', min: 110, max: 210, grow: 0.1 },
   { id: 'modelId', label: 'Model ID', min: 145, max: 330, grow: 0.3 },
   { id: 'blended', label: 'Blended $/1M', sort: 'blended', min: 122, max: 175, grow: 0.05 },
@@ -63,17 +72,28 @@ function widest(values: Iterable<string>, mono = false, weight = 400): number {
   return width;
 }
 
+const BADGE_GAP = 6;
+/** Mantine's xs badge: 6px of padding either side and a 1px border. */
+const BADGE_CHROME = 14;
+const CELL_PADDING = 24;
+
+/** The widest of a model's name line (name plus its badges) and its subline, as drawn by `ModelNameCell`. */
+function modelCellWidth(model: EnrichedModel): number {
+  const { row } = model;
+  const badges = modelBadgeLabels(row, model.alsoOnGo).reduce(
+    (sum, label) => sum + BADGE_GAP + textWidth(label, false, 700, 9) + BADGE_CHROME,
+    0,
+  );
+  const nameLine = textWidth(row.name, false, 500, 14) + badges;
+  return Math.max(nameLine, textWidth(modelSubline(row), false, 400, 12)) + CELL_PADDING;
+}
+
 /** Content-sized widths for the table, measured once per data set. */
 function measureColumns(models: EnrichedModel[]): Record<string, number> {
   const rows = models.map((model) => model.row);
   return {
     select: 40,
-    model:
-      widest(
-        rows.map((row) => row.name),
-        false,
-        500,
-      ) + 56,
+    model: models.reduce((width, model) => Math.max(width, modelCellWidth(model)), 0),
     provider: widest(rows.map((row) => row.provider_name)) + 30,
     modelId:
       widest(

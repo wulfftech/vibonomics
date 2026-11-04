@@ -7,6 +7,33 @@ export function scoreColor(value: number): string {
   return value >= 80 ? 'green' : value >= 60 ? 'teal' : value >= 40 ? 'yellow' : 'gray';
 }
 
+/**
+ * The labels `ModelBadges` and `ModelNameCell` draw after a model's name, in order. The table measures
+ * them to size the Model column. The discount has its own column and no badge.
+ */
+export function modelBadgeLabels(row: ModelRow, alsoOnGo = false): string[] {
+  const labels: string[] = [];
+  if (row.is_new) {
+    labels.push('New');
+  }
+  if (row.new_discount) {
+    labels.push('New discount');
+  }
+  if (row.price_drop) {
+    labels.push('Price cut');
+  }
+  if (row.is_free) {
+    labels.push('Free');
+  }
+  if (!row.active) {
+    labels.push('Inactive');
+  }
+  if (alsoOnGo) {
+    labels.push('also on Go');
+  }
+  return labels;
+}
+
 export function discountTooltip(row: ModelRow): string {
   const parts: string[] = [];
   if (row.discount_note) {

@@ -23,7 +23,7 @@ export function ScoreNumber({ value, bold = false }: { value: number | null | un
   );
 }
 
-/** The badges after a model's name: New, discount, New discount, Price cut, Free. */
+/** The badges after a model's name: New, New discount, Price cut, Free, Inactive. Keep `modelBadgeLabels` in step. */
 export function ModelBadges({ row }: { row: ModelRow }) {
   return (
     <>
@@ -31,13 +31,6 @@ export function ModelBadges({ row }: { row: ModelRow }) {
         <Badge size="xs" color="blue" variant="light">
           New
         </Badge>
-      )}
-      {(row.discount ?? 0) > 0 && (
-        <Tooltip label={discountTooltip(row)} multiline maw={320} withArrow>
-          <Badge size="xs" color="green" variant="light">
-            {discountLabel(row.discount ?? 0)}
-          </Badge>
-        </Tooltip>
       )}
       {row.new_discount && (
         <Badge size="xs" color="orange" variant="light">
