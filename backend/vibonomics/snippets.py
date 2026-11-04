@@ -83,6 +83,8 @@ class SnippetContext:
     """Whether ``base_url`` also serves the OpenAI Responses API (Codex needs it). None = infer from the host."""
     routing: Routing | None = None
     """An OpenRouter provider choice; ignored for any other endpoint."""
+    client_restricted: str | None = None
+    """The one harness id (``opencode``) that may call this model; every other client gets HTTP 403."""
 
 
 # --- helpers -----------------------------------------------------------------------------------
@@ -963,6 +965,9 @@ _BUILDERS: tuple[Builder, ...] = (
 # Snippets with a place for the ``provider`` block; every other harness gets a note instead.
 _CAN_PIN = {"vscode-copilot", "continue", "opencode", "aider-routing", "curl", "python"}
 
+# Harness id → display name, for a model that only one client may call (``SnippetContext.client_restricted``).
+_RESTRICTED_CLIENTS = {"opencode": "OpenCode"}
+
 
 def generate(ctx: SnippetContext) -> list[Snippet]:
     """Snippets valid for this provider/model, most useful first (VS Code harnesses lead)."""
@@ -981,5 +986,14 @@ def generate(ctx: SnippetContext) -> list[Snippet]:
                 s.notes = (s.notes or "") + (
                     f" This config has no place for a provider setting, so it does not pin {slug}: requests route as "
                     "OpenRouter decides."
+                )
+    if ctx.client_restricted:
+        # Advice only: nothing here sends another client's identity or routes around the restriction.
+        client = _RESTRICTED_CLIENTS.get(ctx.client_restricted, ctx.client_restricted)
+        for s in snippets:
+            if s.id != ctx.client_restricted:
+                s.notes = (s.notes or "") + (
+                    f" {ctx.model_name} is a free model that works only from the {client} client: "
+                    "any other client gets HTTP 403, even with a valid key. Use a paid or Go model here."
                 )
     return snippets

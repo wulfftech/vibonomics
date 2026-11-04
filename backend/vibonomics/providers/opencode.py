@@ -35,6 +35,34 @@ MARKDOWN = {"Accept": "text/markdown"}
 # Window keys the usage endpoint reports for a Go plan, in the order the console shows them.
 GO_WINDOWS = (("rolling", "5-hour session"), ("weekly", "Weekly"), ("monthly", "Monthly"))
 
+# What OpenCode says it does with your prompts on each free model. Transcribed on 2026-11-04 from the
+# "Free models" and "Privacy" sections of https://opencode.ai/v2/docs/console/models/ and, for the Go-only
+# Iceman, the "Privacy" section of https://opencode.ai/v2/docs/console/go/. Re-check the wording against those
+# pages before adding or changing an entry; a free model missing here gets FREE_DATA_UNKNOWN rather than a guess.
+# Keyed by model id and shared by Console and Go: Beam Free is on both, and both pages describe it the same way.
+FREE_DATA_USE: dict[str, str] = {
+    "glm-5.3-flash-free": "Zero retention, and your data is not used for model training.",
+    "deepseek-v4.1-flash-free": "Zero retention, and your data is not used for model training.",
+    "big-pickle": "During its free period, collected data may be used to improve the model.",
+    "pulse-alpha-free": "During its free period, collected data may be retained and used to improve the model.",
+    "flint-40b-free": "During its free period, collected data may be used to improve the model. "
+    "Data is retained for 30 days.",
+    "mimo-v2.6-flash-free": "During its free period, collected data may be used to improve the model.",
+    "beam-free": "Your data is not used for training. It is retained for 30 days for safety reasons.",
+    "iceman-contributor-free": "Free in exchange for permission to use your prompts and completions to improve "
+    "the model.",
+    **{
+        model_id: "Trial use only: do not submit personal or confidential data. Use is logged for security and to "
+        "improve NVIDIA products and services."
+        for model_id in ("nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "nemotron-3.5-super-vl-free")
+    },
+}
+FREE_DATA_UNKNOWN = "OpenCode's docs don't say how this free model handles your data yet."
+
+# OpenCode's Console docs: "Free-tier chat models require OpenCode; use paid models or Go from other clients."
+# Every other harness gets HTTP 403, even with a valid key. Go's own free ids are not covered by that sentence.
+CLIENT_RESTRICTED = "opencode"
+
 
 def parse_pricing(markdown: str) -> list[PagePrice]:
     """Parse the "Model | Input | Output | Cached Read | Cached Write" tables on the console docs."""
@@ -145,6 +173,9 @@ class _OpenCodeBase(ProviderAdapter):
                         model_id=model_id,
                         name=model_id,
                         canonical_id=self.ctx.catalog.guess_canonical(model_id),
+                        # models.dev can lag a new release; the "-free" suffix is how OpenCode names a free
+                        # model, and it is what offer_from_modelsdev reads too.
+                        is_free=model_id.endswith("-free"),
                         pricing_source="api (no price)",
                         extra={"live": True, "new_from_api": True},
                     )
@@ -169,6 +200,12 @@ class _OpenCodeBase(ProviderAdapter):
                     "Go is a monthly subscription; these per-token rates meter included usage, not extra billing."
                 )
                 offer.pricing_source = "opencode go metered rates"
+        for offer in offers:
+            if not offer.is_free:
+                continue
+            offer.extra["data_use"] = FREE_DATA_USE.get(offer.model_id, FREE_DATA_UNKNOWN)
+            if not self.subscription:
+                offer.extra["client_restricted"] = CLIENT_RESTRICTED
         return offers
 
     async def fetch_balance(self) -> BalanceInfo:

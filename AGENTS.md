@@ -45,6 +45,10 @@ docker compose logs -f vibonomics
   on the model id and needs nothing from a builder. Pinning a provider is a `provider` request block, so a
   builder reads `_pinned(ctx)` only where the harness documents a place for extra body fields, and is listed in
   `_CAN_PIN`; `generate` tells every other harness it can't pin. Don't add a harness to `_CAN_PIN` on a guess.
+  A model with `client_restricted` set (the OpenCode Console's free tier, 403 from every other client) gets a note on
+  every snippet but the allowed client's; that is advice only, and nothing here may add client headers, a proxy or
+  a pass-through to get round it. The per-model data-use text (`FREE_DATA_USE` in `providers/opencode.py`) is
+  transcribed from OpenCode's docs: re-check it against them before editing.
 - **Best-value preset** (`presets.py`, `api/presets.py`): the only code that writes to an OpenRouter account.
   It writes a slug that starts with `vibonomics-` and that it created itself (`owned` in the `preset_state`
   setting), never a preset made by hand, and never deletes (the API cannot). OpenRouter keeps no partial update,

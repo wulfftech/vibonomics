@@ -404,3 +404,85 @@ async def test_opencode_go_test_connection_reads_usage(ctx):
     )
     message = await make(opencode.OpenCodeGoAdapter, ctx, key="k").test_connection()
     assert "1 Go usage window(s)" in message
+
+
+# -- OpenCode free models: client restriction and data use -------------------------------------
+
+
+def _catalog_with(models: dict) -> ModelsDevCatalog:
+    data = js("modelsdev.json")
+    data["opencode"]["models"].update(models)
+    return ModelsDevCatalog(data)
+
+
+@respx.mock
+async def test_opencode_console_free_models_are_client_restricted(ctx):
+    live = ["big-pickle", "glm-5.3", "crouton-alpha-free"]
+    respx.get(opencode.ZEN_MODELS).mock(
+        return_value=httpx.Response(200, json={"object": "list", "data": [{"id": mid} for mid in live]})
+    )
+    respx.get(opencode.ZEN_DOCS).mock(return_value=httpx.Response(200, text=text("opencode_pricing.md")))
+    offers = {o.model_id: o for o in await make(opencode.OpenCodeAdapter, ctx).fetch_models()}
+    pickle = offers["big-pickle"]
+    assert pickle.is_free
+    assert pickle.extra["client_restricted"] == "opencode"
+    assert pickle.extra["data_use"] == opencode.FREE_DATA_USE["big-pickle"]
+    # models.dev lags a new release: a live "-free" id it doesn't know yet is still listed, free and restricted,
+    # and says plainly that OpenCode's docs are silent on its data.
+    crouton = offers["crouton-alpha-free"]
+    assert crouton.is_free
+    assert crouton.extra["client_restricted"] == "opencode"
+    assert crouton.extra["data_use"] == opencode.FREE_DATA_UNKNOWN
+    paid = offers["glm-5.3"]
+    assert not paid.is_free
+    assert "client_restricted" not in paid.extra
+    assert "data_use" not in paid.extra
+
+
+@respx.mock
+async def test_opencode_go_free_models_are_not_flagged_client_restricted(ctx):
+    live = ["beam-free", "iceman-contributor-free", "glm-5.3"]
+    respx.get(opencode.GO_MODELS).mock(return_value=httpx.Response(200, json={"data": [{"id": m} for m in live]}))
+    respx.get(opencode.GO_DOCS).mock(return_value=httpx.Response(200, text=text("opencode_pricing.md")))
+    offers = {o.model_id: o for o in await make(opencode.OpenCodeGoAdapter, ctx).fetch_models()}
+    for model_id in ("beam-free", "iceman-contributor-free"):
+        assert offers[model_id].is_free
+        # Go's docs do not extend the Console's 403 rule to these, so they are not marked.
+        assert "client_restricted" not in offers[model_id].extra
+        assert offers[model_id].extra["data_use"] == opencode.FREE_DATA_USE[model_id]
+    assert "data_use" not in offers["glm-5.3"].extra
+
+
+@respx.mock
+async def test_opencode_lists_live_free_models_and_skips_deprecated_ones(ctx):
+    free = {"cost": {"input": 0, "output": 0}, "limit": {"context": 128000, "output": 8000}}
+    ctx.catalog = _catalog_with(
+        {
+            "fresh-free": {"id": "fresh-free", "name": "Fresh Free", **free},
+            "old-free": {"id": "old-free", "name": "Old Free", "status": "deprecated", **free},
+        }
+    )
+    respx.get(opencode.ZEN_MODELS).mock(return_value=httpx.Response(200, json={"data": [{"id": "fresh-free"}]}))
+    respx.get(opencode.ZEN_DOCS).mock(return_value=httpx.Response(200, text=text("opencode_pricing.md")))
+    offers = {o.model_id: o for o in await make(opencode.OpenCodeAdapter, ctx).fetch_models()}
+    assert offers["fresh-free"].extra["client_restricted"] == "opencode"
+    assert "old-free" not in offers
+
+
+def test_opencode_data_use_table_follows_the_docs():
+    use = opencode.FREE_DATA_USE
+    for model_id in ("glm-5.3-flash-free", "deepseek-v4.1-flash-free"):
+        assert "Zero retention" in use[model_id]
+        assert "not used for model training" in use[model_id]
+    for model_id in ("big-pickle", "pulse-alpha-free", "flint-40b-free", "mimo-v2.6-flash-free"):
+        assert "may be" in use[model_id]
+        assert "improve the model" in use[model_id]
+    assert "30 days" in use["flint-40b-free"]
+    assert "30 days" in use["beam-free"]
+    assert "not used for training" in use["beam-free"]
+    for model_id in ("nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "nemotron-3.5-super-vl-free"):
+        assert use[model_id].startswith("Trial use only")
+        assert "personal or confidential" in use[model_id]
+    assert "improve the model" in use["iceman-contributor-free"]
+    # Only free models belong here: a paid model's terms are not this table's business.
+    assert all(model_id == "big-pickle" or model_id.endswith("-free") for model_id in use)

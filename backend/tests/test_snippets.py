@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from vibonomics.providers.base import ProviderSpec
+from vibonomics.providers.opencode import OpenCodeAdapter
 from vibonomics.snippets import Routing, Snippet, SnippetContext, generate
 
 OPENROUTER = ProviderSpec(
@@ -37,6 +38,7 @@ CUSTOM = ProviderSpec(
     default_base_url="http://localhost:4000/v1",
     custom=True,
 )
+OPENCODE_CONSOLE = OpenCodeAdapter.spec
 DEEPSEEK = ProviderSpec(
     type="deepseek",
     name="DeepSeek",
@@ -400,3 +402,26 @@ def test_routing_means_nothing_to_another_endpoint():
     ctx = CONTEXTS["deepseek"]
     pinned = replace(ctx, routing=Routing(variant="nitro", provider="deepinfra/fp8"))
     assert [s.to_dict() for s in generate(pinned)] == [s.to_dict() for s in generate(ctx)]
+
+
+def test_a_client_restricted_model_tells_every_other_harness_it_returns_403():
+    ctx = make_ctx(OPENCODE_CONSOLE, "big-pickle", model_name="Big Pickle", client_restricted="opencode")
+    snippets = generate(ctx)
+    ids = [s.id for s in snippets]
+    # The Console has no Anthropic or Responses endpoint, so no Claude Code or Codex tab; the rest all appear.
+    assert {"vscode-copilot", "opencode", "aider", "curl", "python"} <= set(ids)
+    for s in snippets:
+        if s.id == "opencode":
+            assert "403" not in (s.notes or "")
+        else:
+            assert "Big Pickle" in s.notes, s.id
+            assert "works only from the OpenCode client" in s.notes, s.id
+            assert "HTTP 403" in s.notes, s.id
+
+
+def test_the_restriction_note_changes_no_snippet_content():
+    ctx = make_ctx(OPENCODE_CONSOLE, "big-pickle", client_restricted="opencode")
+    plain = generate(replace(ctx, client_restricted=None))
+    restricted = generate(ctx)
+    assert [s.content for s in restricted] == [s.content for s in plain]
+    assert not any("403" in (s.notes or "") for s in plain)

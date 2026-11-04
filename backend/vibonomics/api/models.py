@@ -80,6 +80,8 @@ class ModelRow(BaseModel):
     scores: ScoresOut
     reported_cost_per_task: float | None
     test: TestSummaryOut | None
+    client_restricted: str | None = None
+    """The only client that may call this model (``opencode`` for the OpenCode Console's free tier), else None."""
 
 
 class ModelsResponse(BaseModel):
@@ -138,6 +140,7 @@ def _row(
         scores=ScoresOut(**sc.summary()) if sc else ScoresOut(),
         reported_cost_per_task=sc.reported_cost_per_task if sc else None,
         test=TestSummaryOut(**{k: v for k, v in own.items() if k != "canonical_id"}) if own else None,
+        client_restricted=(m.extra or {}).get("client_restricted") or None,
     )
 
 
@@ -235,6 +238,8 @@ class SnippetOut(BaseModel):
 class ModelDetail(BaseModel):
     row: ModelRow
     description: str | None
+    data_use: str | None = None
+    """What the provider says it does with your prompts on this model, when it says (free OpenCode models)."""
     metrics: list[MetricOut]
     reported_cost_sources: list[str]
     price_history: list[PricePointOut]
@@ -271,6 +276,7 @@ def build_snippets(m: Model, provider: ProviderConfig, routing: Routing | None =
         price_input=m.price_input,
         price_output=m.price_output,
         routing=routing,
+        client_restricted=(m.extra or {}).get("client_restricted") or None,
     )
     return [SnippetOut(**s.to_dict()) for s in generate(ctx)]
 
@@ -359,6 +365,7 @@ async def model_detail(model_pk: int) -> ModelDetail:
         return ModelDetail(
             row=row,
             description=description,
+            data_use=(m.extra or {}).get("data_use") or None,
             metrics=metrics,
             reported_cost_sources=sc.reported_cost_sources if sc else [],
             price_history=[PricePointOut.model_validate(h, from_attributes=True) for h in history],
