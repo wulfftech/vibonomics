@@ -33,6 +33,7 @@ export type SpendNamed = Schemas['SpendNamedOut'];
 export type SpendKey = Schemas['SpendKeyOut'];
 export type SpendAccount = Schemas['SpendAccountOut'];
 
+export type PresetSettings = Schemas['PresetSettings'];
 export type PresetList = Schemas['PresetListOut'];
 export type PresetSummary = Schemas['PresetSummaryOut'];
 export type PresetPlan = Schemas['PresetPlanOut'];

@@ -357,8 +357,25 @@
           "presets"
         ],
         "summary": "Preset Plan",
-        "description": "The dry run: rank the models, read the preset, and show the exact request an update would send.",
+        "description": "The dry run: rank the models, read the preset, and show the exact request an update would send.\n\nWith ``settings`` it previews those, unsaved, so a change can be tried before it is kept.",
         "operationId": "preset_plan_api_presets_plan_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PresetPlanIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -366,6 +383,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PresetPlanOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -3232,6 +3259,23 @@
         ],
         "title": "PresetListOut"
       },
+      "PresetPlanIn": {
+        "properties": {
+          "settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetSettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Preset settings to preview in place of the saved ones, to try them out. Nothing is saved, and a plan made from them cannot be applied."
+          }
+        },
+        "type": "object",
+        "title": "PresetPlanIn"
+      },
       "PresetPlanOut": {
         "properties": {
           "action": {
@@ -3259,6 +3303,11 @@
           "auto_apply": {
             "type": "boolean",
             "title": "Auto Apply"
+          },
+          "draft": {
+            "type": "boolean",
+            "title": "Draft",
+            "description": "Made from unsaved settings: a preview only, not something to apply"
           },
           "generated_at": {
             "type": "string",
@@ -3419,6 +3468,7 @@
           "slug",
           "enabled",
           "auto_apply",
+          "draft",
           "generated_at",
           "profile",
           "task",
@@ -3629,6 +3679,32 @@
             "title": "Min Context",
             "description": "Smallest context window, in tokens; 0 for any",
             "default": 0
+          },
+          "max_task_cost": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Task Cost",
+            "description": "Most a model may cost for one task of the chosen usage profile, in USD; none for no limit"
+          },
+          "min_value": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Value",
+            "description": "Least value a model may give, in score points per dollar of one task; none for no limit"
           },
           "include_free": {
             "type": "boolean",

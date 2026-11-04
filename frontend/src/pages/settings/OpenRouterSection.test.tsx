@@ -22,6 +22,7 @@ function plan(over: Partial<PresetPlan> = {}): PresetPlan {
     slug: 'vibonomics-best-value',
     enabled: true,
     auto_apply: false,
+    draft: false,
     generated_at: '2026-11-04T10:00:00Z',
     profile: 'agentic',
     task: { input_tokens: 600000, output_tokens: 20000, cache_hit_rate: 0.8 },
@@ -162,7 +163,7 @@ describe('PresetPlanView', () => {
 
 const fetchMock = vi.fn();
 
-function settingsBody(enabled: boolean, slug = 'vibonomics-best-value') {
+function settingsBody(enabled: boolean, slug = 'vibonomics-best-value', extra: Record<string, unknown> = {}) {
   return {
     settings: {
       scoring: {
@@ -179,7 +180,7 @@ function settingsBody(enabled: boolean, slug = 'vibonomics-best-value') {
           },
         ],
       },
-      presets: { enabled, slug },
+      presets: { enabled, slug, ...extra },
     },
     sources: [],
     sandbox: { effective_mode: 'disabled', sidecar_url_set: false },
@@ -203,7 +204,14 @@ const LISTED: PresetList = {
   ],
 };
 
-function serve(opts: { enabled?: boolean; plan?: PresetPlan; list?: PresetList | { status: number } } = {}) {
+function serve(
+  opts: {
+    enabled?: boolean;
+    plan?: PresetPlan;
+    list?: PresetList | { status: number };
+    saved?: Record<string, unknown>;
+  } = {},
+) {
   const enabled = opts.enabled ?? true;
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
     const json = (body: unknown, status = 200) =>
@@ -213,7 +221,7 @@ function serve(opts: { enabled?: boolean; plan?: PresetPlan; list?: PresetList |
       return json(settingsBody(enabled, sent.settings.presets.slug));
     }
     if (url === 'api/settings') {
-      return json(settingsBody(enabled));
+      return json(settingsBody(enabled, undefined, opts.saved));
     }
     if (url === 'api/presets/state') {
       return json({ owned: [], last_run_at: null });
@@ -251,6 +259,12 @@ function renderSection() {
 }
 
 const calls = (url: string) => fetchMock.mock.calls.filter(([u]) => u === url);
+
+/** The body of the last preview request. */
+function previewBody(): { settings?: Record<string, unknown> } {
+  const sent = calls('api/presets/plan').at(-1);
+  return JSON.parse((sent?.[1] as RequestInit).body as string) as { settings?: Record<string, unknown> };
+}
 
 /** The presets settings the section last PUT, as the server received them. */
 function savedPresets(): Record<string, unknown> | undefined {
@@ -368,5 +382,87 @@ describe('OpenRouterSection', () => {
     await user.tab();
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(savedPresets()?.max_models).toBe(10));
+  });
+
+  it('previews the saved settings, and says nothing of settings, when nothing was changed', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Preview' }));
+    await screen.findByText('Update');
+    expect(previewBody()).toEqual({});
+  });
+
+  it('previews changes that are not saved, and will not apply that preview', async () => {
+    serve({ plan: plan({ draft: true }) });
+    const user = userEvent.setup();
+    renderSection();
+    const field = await screen.findByLabelText('Minimum score');
+    await user.clear(field);
+    await user.type(field, '80');
+    expect(screen.getByText(/You have unsaved changes\. Preview tries them out/)).toBeInTheDocument();
+
+    const button = screen.getByRole('button', { name: 'Preview' });
+    expect(button).toBeEnabled(); // an unsaved change no longer stops a preview
+    await user.click(button);
+    expect(await screen.findByText('Unsaved settings')).toBeInTheDocument();
+    expect(previewBody().settings?.min_score).toBe(80);
+    expect(screen.getByRole('button', { name: 'Apply this plan' })).toBeDisabled();
+    expect(
+      calls('api/settings').filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT'),
+    ).toHaveLength(0);
+  });
+
+  it('asks for a preview again once the previewed changes are saved, before it will apply', async () => {
+    serve({ plan: plan({ draft: true }) });
+    const user = userEvent.setup();
+    renderSection();
+    const field = await screen.findByLabelText('Minimum score');
+    await user.clear(field);
+    await user.type(field, '80');
+    await user.click(screen.getByRole('button', { name: 'Preview' }));
+    await screen.findByText('Unsaved settings');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/made from settings that were not saved/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply this plan' })).toBeDisabled();
+  });
+
+  it('does not offer a preview with no name to preview', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    await user.clear(await screen.findByLabelText('Preset name'));
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
+  });
+
+  it('saves a cost limit and a value floor, and saves none when they are cleared', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    const cost = await screen.findByLabelText('Maximum cost per task');
+    const value = screen.getByLabelText('Minimum value');
+    expect(cost).toHaveValue('');
+    expect(value).toHaveValue('');
+    await user.type(cost, '0.05');
+    await user.type(value, '2000');
+    await user.tab();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(savedPresets()?.max_task_cost).toBe(0.05));
+    expect(savedPresets()?.min_value).toBe(2000);
+  });
+
+  it('shows saved limits and clears them to no limit', async () => {
+    serve({ saved: { max_task_cost: 0.05, min_value: 2000 } });
+    const user = userEvent.setup();
+    renderSection();
+    const cost = await screen.findByLabelText('Maximum cost per task');
+    expect(cost).toHaveValue('$0.05');
+    expect(screen.getByLabelText('Minimum value')).toHaveValue('2,000');
+    await user.clear(cost);
+    await user.clear(screen.getByLabelText('Minimum value'));
+    await user.tab();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(savedPresets()?.max_task_cost).toBeNull());
+    expect(savedPresets()?.min_value).toBeNull();
   });
 });

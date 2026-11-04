@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from .. import presets
 from ..http import FetchError
 from ..presets import Applied, Candidate, Plan
+from ..settings_store import PresetSettings
 
 router = APIRouter(prefix="/api/presets", tags=["presets"])
 
@@ -86,6 +87,7 @@ class PresetPlanOut(BaseModel):
     slug: str
     enabled: bool
     auto_apply: bool
+    draft: bool = Field(description="Made from unsaved settings: a preview only, not something to apply")
     generated_at: datetime
     profile: str | None
     task: PresetTaskOut | None
@@ -120,6 +122,14 @@ class PresetSummaryOut(BaseModel):
 class PresetListOut(BaseModel):
     presets: list[PresetSummaryOut]
     error: str | None = Field(description="Why the list could not be read; the list is then empty")
+
+
+class PresetPlanIn(BaseModel):
+    settings: PresetSettings | None = Field(
+        None,
+        description="Preset settings to preview in place of the saved ones, to try them out. Nothing is saved, "
+        "and a plan made from them cannot be applied.",
+    )
 
 
 class PresetApplyIn(BaseModel):
@@ -174,6 +184,7 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         slug=plan.slug,
         enabled=cfg.enabled,
         auto_apply=cfg.auto_apply,
+        draft=plan.draft,
         generated_at=plan.generated_at,
         profile=plan.profile,
         task=PresetTaskOut(
@@ -221,9 +232,12 @@ async def preset_list() -> PresetListOut:
 
 
 @router.post("/plan", response_model=PresetPlanOut)
-async def preset_plan() -> PresetPlanOut:
-    """The dry run: rank the models, read the preset, and show the exact request an update would send."""
-    return _plan_out(await presets.make_plan())
+async def preset_plan(body: PresetPlanIn | None = None) -> PresetPlanOut:
+    """The dry run: rank the models, read the preset, and show the exact request an update would send.
+
+    With ``settings`` it previews those, unsaved, so a change can be tried before it is kept.
+    """
+    return _plan_out(await presets.make_plan(draft=body.settings if body else None))
 
 
 @router.post("/apply", response_model=PresetApplyOut)

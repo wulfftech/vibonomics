@@ -106,7 +106,8 @@ export function OpenRouterSection() {
   const fullSlug = presetSlug(presets.slug);
   const nameMissing = fullSlug === '';
 
-  const preview = () => plan.mutate();
+  // Unsaved changes are previewed as they stand, so they can be tried before they are kept.
+  const preview = () => plan.mutate(dirty ? presets : undefined);
   const applyPlan = () => {
     const digest = plan.data?.digest;
     if (!digest) {
@@ -119,17 +120,23 @@ export function OpenRouterSection() {
           color: result.unsaved.length > 0 ? 'yellow' : result.applied ? 'green' : 'blue',
           autoClose: result.unsaved.length > 0 ? 12000 : 5000,
         });
-        plan.mutate();
+        plan.mutate(undefined);
       },
       onError: (error) => {
         notifications.show({ message: error.message, color: 'red' });
-        plan.mutate();
+        plan.mutate(undefined);
       },
     });
   };
 
   const current = plan.data;
-  const canApply = current !== undefined && ['create', 'update'].includes(current.action) && presets.enabled && !dirty;
+  // Apply plans from what is saved, so only a plan made from saved settings can be applied.
+  const canApply =
+    current !== undefined &&
+    ['create', 'update'].includes(current.action) &&
+    presets.enabled &&
+    !dirty &&
+    !current.draft;
   const last = state.data;
 
   return (
@@ -241,6 +248,27 @@ export function OpenRouterSection() {
               value={presets.min_context}
               onChange={(next) => set({ min_context: Math.round(toNumber(next)) })}
             />
+            <NumberInput
+              label="Maximum cost per task"
+              description="Most a model may cost for one task of the usage profile. Empty for no limit"
+              placeholder="No limit"
+              min={0}
+              step={0.01}
+              decimalScale={4}
+              prefix="$"
+              value={presets.max_task_cost ?? ''}
+              onChange={(next) => set({ max_task_cost: next === '' ? null : toNumber(next) })}
+            />
+            <NumberInput
+              label="Minimum value"
+              description="Score points per dollar of one task, the figure in the preview. Empty for no limit"
+              placeholder="No limit"
+              min={0}
+              step={100}
+              thousandSeparator=","
+              value={presets.min_value ?? ''}
+              onChange={(next) => set({ min_value: next === '' ? null : toNumber(next) })}
+            />
           </SimpleGrid>
           <Group gap="xl">
             <Switch
@@ -288,7 +316,7 @@ export function OpenRouterSection() {
               </Text>
             </Stack>
             <Group gap="xs">
-              <Button variant="default" loading={plan.isPending} disabled={dirty} onClick={preview}>
+              <Button variant="default" loading={plan.isPending} disabled={nameMissing} onClick={preview}>
                 Preview
               </Button>
               <Button loading={apply.isPending} disabled={!canApply} onClick={applyPlan}>
@@ -298,12 +326,17 @@ export function OpenRouterSection() {
           </Group>
           {dirty && (
             <Alert color="blue" variant="light" py="xs">
-              Save your changes first: the preview uses the saved settings.
+              You have unsaved changes. Preview tries them out without saving them; save them to be able to apply.
             </Alert>
           )}
           {!dirty && current !== undefined && !presets.enabled && ['create', 'update'].includes(current.action) && (
             <Alert color="blue" variant="light" py="xs">
               Turn on &ldquo;Let Vibonomics write this preset&rdquo; and save to be able to apply it.
+            </Alert>
+          )}
+          {!dirty && current?.draft === true && (
+            <Alert color="blue" variant="light" py="xs">
+              This preview was made from settings that were not saved. Preview again to be able to apply.
             </Alert>
           )}
           {plan.isError && <ErrorState message={plan.error.message} />}

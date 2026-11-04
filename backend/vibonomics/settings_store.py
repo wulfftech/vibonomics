@@ -170,6 +170,16 @@ class PresetSettings(BaseModel):
     min_score: float = Field(60, ge=0, le=100)
     require_tool_call: bool = True
     min_context: int = Field(0, ge=0, description="Smallest context window, in tokens; 0 for any")
+    max_task_cost: float | None = Field(
+        None,
+        ge=0,
+        description="Most a model may cost for one task of the chosen usage profile, in USD; none for no limit",
+    )
+    min_value: float | None = Field(
+        None,
+        ge=0,
+        description="Least value a model may give, in score points per dollar of one task; none for no limit",
+    )
     include_free: bool = False
     switch_margin_pct: float = Field(
         10,

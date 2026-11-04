@@ -198,6 +198,8 @@ export interface paths {
         /**
          * Preset Plan
          * @description The dry run: rank the models, read the preset, and show the exact request an update would send.
+         *
+         *     With ``settings`` it previews those, unsaved, so a change can be tried before it is kept.
          */
         post: operations["preset_plan_api_presets_plan_post"];
         delete?: never;
@@ -1203,6 +1205,11 @@ export interface components {
              */
             error: string | null;
         };
+        /** PresetPlanIn */
+        PresetPlanIn: {
+            /** @description Preset settings to preview in place of the saved ones, to try them out. Nothing is saved, and a plan made from them cannot be applied. */
+            settings?: components["schemas"]["PresetSettings"] | null;
+        };
         /** PresetPlanOut */
         PresetPlanOut: {
             /**
@@ -1218,6 +1225,11 @@ export interface components {
             enabled: boolean;
             /** Auto Apply */
             auto_apply: boolean;
+            /**
+             * Draft
+             * @description Made from unsaved settings: a preview only, not something to apply
+             */
+            draft: boolean;
             /**
              * Generated At
              * Format: date-time
@@ -1382,6 +1394,16 @@ export interface components {
              * @default 0
              */
             min_context: number;
+            /**
+             * Max Task Cost
+             * @description Most a model may cost for one task of the chosen usage profile, in USD; none for no limit
+             */
+            max_task_cost?: number | null;
+            /**
+             * Min Value
+             * @description Least value a model may give, in score points per dollar of one task; none for no limit
+             */
+            min_value?: number | null;
             /**
              * Include Free
              * @default false
@@ -2808,7 +2830,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PresetPlanIn"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -2817,6 +2843,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PresetPlanOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

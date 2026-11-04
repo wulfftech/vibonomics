@@ -80,6 +80,11 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
           {action.label}
         </Badge>
         <Text size="sm">{plan.reason}</Text>
+        {plan.draft && (
+          <Badge color="gray" variant="light" style={{ flexShrink: 0 }}>
+            Unsaved settings
+          </Badge>
+        )}
       </Group>
 
       <Group gap="xl">

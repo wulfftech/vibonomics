@@ -53,7 +53,9 @@ docker compose logs -f vibonomics
   live one, change only `model`, `models` and `provider.only`/`order`, send the rest back, then read the
   response and report the keys it dropped. A model already in the preset is favoured by the switch margin
   (`select_models`), so near ties do not rewrite it daily. The dry run and the apply build the plan with
-  the same function, and apply takes the plan's digest and refuses a plan that has changed. The create call
+  the same function, and apply takes the plan's digest and refuses a plan that has changed. `plan` may be given
+  unsaved settings to preview (`draft`); apply never is, so a draft plan's digest applies only if it equals the
+  saved plan, and the UI does not offer it. The create call
   is never retried: a retry would leave a second version. The routes (`plan`, `apply`, and `list`, which
   fills the template picker) are POSTs, so a visitor to an open-read instance cannot make them call out with the
   operator's key.

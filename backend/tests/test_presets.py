@@ -761,3 +761,125 @@ def test_the_list_says_why_it_is_empty(client):
     with session_scope() as session:
         session.query(ProviderConfig).filter_by(type="openrouter").update({"api_key_enc": None})
     assert "Add an OpenRouter API key" in client.post("/api/presets/list").json()["error"]
+
+
+# ---- cost and value limits ------------------------------------------------------------------------------------
+
+
+def _ranked(**patch) -> list[str]:
+    with session_scope() as session:
+        settings = load_settings(session).model_copy(deep=True)
+        for key, value in patch.items():
+            setattr(settings.presets, key, value)
+        ids = [p.id for p in session.query(ProviderConfig).filter_by(type="openrouter")]
+        return [c.model_id for c in rank(session, settings, ids)[0]]
+
+
+def test_there_is_no_cost_or_value_limit_until_one_is_set(client):
+    assert PresetSettings().max_task_cost is None and PresetSettings().min_value is None
+    assert _ranked() == ["acme/best", "acme/steady", "acme/pricey"]
+
+
+def test_a_cost_limit_leaves_out_models_that_cost_more_for_one_task(client):
+    # a task of the default profile costs acme/best $0.068, acme/steady $0.0714 and acme/pricey $0.68
+    assert _ranked(max_task_cost=0.07) == ["acme/best"]
+    assert _ranked(max_task_cost=0.0714) == ["acme/best", "acme/steady"]
+    assert _ranked(max_task_cost=5) == ["acme/best", "acme/steady", "acme/pricey"]
+    assert _ranked(max_task_cost=0.01) == []
+
+
+def test_a_value_floor_leaves_out_models_that_give_less_score_per_dollar(client):
+    # acme/best gives 80 / 0.068 = 1176 points per dollar, acme/steady 1120 and acme/pricey 132
+    assert _ranked(min_value=1150) == ["acme/best"]
+    assert _ranked(min_value=1000) == ["acme/best", "acme/steady"]
+    assert _ranked(min_value=0) == ["acme/best", "acme/steady", "acme/pricey"]
+    assert _ranked(min_value=5000) == []
+
+
+def test_the_two_limits_apply_together(client):
+    assert _ranked(max_task_cost=0.5, min_value=1000) == ["acme/best", "acme/steady"]
+    assert _ranked(max_task_cost=0.07, min_value=1150) == ["acme/best"]
+    assert _ranked(max_task_cost=0.07, min_value=1500) == []
+
+
+def test_the_limits_are_saved_and_can_be_cleared(client):
+    current = client.get("/api/settings").json()["settings"]
+    on = {**current, "presets": {**current["presets"], "max_task_cost": 0.05, "min_value": 2000}}
+    saved = client.put("/api/settings", json={"settings": on}).json()["settings"]["presets"]
+    assert (saved["max_task_cost"], saved["min_value"]) == (0.05, 2000)
+    off = {**current, "presets": {**current["presets"], "max_task_cost": None, "min_value": None}}
+    cleared = client.put("/api/settings", json={"settings": off}).json()["settings"]["presets"]
+    assert cleared["max_task_cost"] is None and cleared["min_value"] is None
+    for field in ("max_task_cost", "min_value"):
+        bad = {**current, "presets": {**current["presets"], field: -1}}
+        assert client.put("/api/settings", json={"settings": bad}).status_code == 422, field
+
+
+def test_a_plan_with_nothing_left_after_the_limits_names_them(client):
+    _settings(min_value=5000)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and plan["considered"] == 0
+    assert "value floor" in plan["reason"] and "cost limit" in plan["reason"]
+
+
+# ---- previewing settings that are not saved -------------------------------------------------------------------
+
+
+def _saved_presets(client: TestClient) -> dict:
+    return client.get("/api/settings").json()["settings"]["presets"]
+
+
+def test_a_plan_from_the_saved_settings_says_it_is_not_a_draft(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        assert _plan(client)["draft"] is False
+
+
+def test_settings_can_be_previewed_without_saving_them(client):
+    saved = _saved_presets(client)
+    draft = {**saved, "max_models": 3}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        response = client.post("/api/presets/plan", json={"settings": draft})
+        assert post.call_count == 0
+    assert response.status_code == 200, response.text
+    assert KEY not in response.text
+    plan = response.json()
+    assert plan["draft"] is True
+    assert [c["model_id"] for c in plan["picks"]] == ["acme/best", "acme/steady", "acme/pricey"]
+    assert _saved_presets(client)["max_models"] == saved["max_models"] == 1  # nothing was kept
+    assert client.get("/api/presets/state").json()["owned"] == []
+
+
+def test_a_draft_is_tried_with_its_own_limits_and_name(client):
+    saved = _saved_presets(client)
+    draft = {**saved, "max_task_cost": 0.07, "slug": "Try this"}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "vibonomics-try-this", None)
+        plan = client.post("/api/presets/plan", json={"settings": draft}).json()
+    assert plan["slug"] == "vibonomics-try-this"
+    assert plan["action"] == "create"
+    assert [c["model_id"] for c in plan["picks"]] == ["acme/best"]
+    assert _saved_presets(client)["slug"] == SLUG
+
+
+def test_a_draft_that_is_not_valid_is_refused(client):
+    saved = _saved_presets(client)
+    for patch in ({"slug": ""}, {"max_models": 11}, {"min_value": -5}):
+        response = client.post("/api/presets/plan", json={"settings": {**saved, **patch}})
+        assert response.status_code == 422, patch
+
+
+def test_a_draft_plan_cannot_be_applied_because_apply_plans_from_what_is_saved(client):
+    saved = _saved_presets(client)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        draft = client.post("/api/presets/plan", json={"settings": {**saved, "max_models": 3}}).json()
+        response = client.post("/api/presets/apply", json={"digest": draft["digest"]})
+        assert post.call_count == 0
+    assert response.status_code == 409
+    assert "changed" in response.json()["detail"]

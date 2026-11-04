@@ -342,8 +342,11 @@ second row of tabs under Providers, where settings that belong to one provider l
   knows a preset is its own, so you can't leave it off and a preset of yours without it is never touched.
 - **How it picks.** The same score per dollar as the Models page, for the usage profile you choose, among
   OpenRouter models that pass your filters (minimum score, tool calling, context size, no free or batch
-  offers unless you allow them). A model already in the preset keeps its place unless another beats it by a
-  set percentage, so the preset does not flap between near ties.
+  offers unless you allow them), and two optional limits: the most a model may cost for one task of the usage
+  profile, and the least value it may give, in score points per dollar of one task (the figure the preview
+  shows; the Models page's 0 to 100 index is relative to whatever is on screen, so it makes a poor fixed
+  floor). A model already in the preset keeps its place unless another beats it by a set percentage, so the
+  preset does not flap between near ties.
 - **How many models.** One to ten. The best is the lead (`model`) and the list, lead first, is `models`:
   OpenRouter's fallbacks, tried in order when one fails. OpenRouter's docs say a preset can hold an array
   of models without naming the field, so after a write Vibonomics reads the preset back and reports any key
@@ -359,7 +362,8 @@ second row of tabs under Providers, where settings that belong to one provider l
   remove one in the web UI, which archives it. An archived preset takes no new versions, so Vibonomics
   reports that instead of writing; restore it or choose another name.
 - **Dry run first.** **Preview** reads the preset from OpenRouter, ranks the models and shows the live
-  version number, the version history, what changes and the providers. **View API call** opens the exact
+  version number, the version history, what changes and the providers. It previews unsaved changes as they
+  stand, so you can try settings before keeping them; such a preview is marked, and cannot be applied. **View API call** opens the exact
   request it would send. **Apply** sends that plan, and only that plan: if anything moved since you looked,
   it refuses and asks you to preview again. After a write it reads the preset back and names any key
   OpenRouter did not keep.

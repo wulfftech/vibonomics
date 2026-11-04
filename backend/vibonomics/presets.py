@@ -124,6 +124,7 @@ class Plan:
     changes: list[Change] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
+    draft: bool = False  # made from unsaved settings, so it cannot be applied
     generated_at: datetime = field(default_factory=utcnow)
 
 
@@ -143,6 +144,7 @@ class Inputs:
     base_url: str
     api_key: str | None
     state: dict[str, Any]
+    draft: bool = False  # the settings are unsaved ones, offered for a preview
 
 
 # ---- ranking -------------------------------------------------------------------------------------------------
@@ -177,9 +179,13 @@ def rank(session: Session, settings: AppSettings, provider_ids: list[int]) -> tu
         cost = task_cost(m.price_input, m.price_output, m.price_cache_read, task, m.is_free)
         if score is None or cost is None or score < cfg.min_score:
             continue
+        if cfg.max_task_cost is not None and cost > cfg.max_task_cost:
+            continue
         value_cost = task_cost(free_cost, free_cost, free_cost, task) if m.is_free else cost
         value = value_of(score, value_cost)
         if value is None or not math.isfinite(value):
+            continue
+        if cfg.min_value is not None and value < cfg.min_value:
             continue
         found = Candidate(
             model_id=m.model_id,
@@ -463,15 +469,18 @@ def load_access() -> tuple[str, str | None, dict[str, Any]]:
         return base, key, _load_state(s)
 
 
-def load_inputs() -> Inputs:
+def load_inputs(draft: PresetSettings | None = None) -> Inputs:
+    """What a plan needs from this instance. ``draft`` stands in for the saved preset settings, to try them out."""
     with session_scope() as s:
         settings = load_settings(s)
+        if draft is not None:
+            settings = settings.model_copy(update={"presets": draft})
         providers = _openrouter_providers(s)
         resolved = [resolve(p) for p in providers]
         candidates, task, profile_id = rank(s, settings, [p.id for p in providers])
         state = _load_state(s)
     base, key = _access(resolved)
-    return Inputs(settings, candidates, task, profile_id, base, key, state)
+    return Inputs(settings, candidates, task, profile_id, base, key, state, draft=draft is not None)
 
 
 async def list_presets(base: str, key: str, owned: list[str]) -> list[dict[str, Any]]:
@@ -523,9 +532,12 @@ def _percent(better: float, worse: float) -> int:
     return round((better / worse - 1) * 100) if worse > 0 else 0
 
 
-async def make_plan(inputs: Inputs | None = None) -> Plan:
-    """What the next update would do. Reads from OpenRouter, writes nothing."""
-    inputs = inputs or await asyncio.to_thread(load_inputs)
+async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None = None) -> Plan:
+    """What the next update would do. Reads from OpenRouter, writes nothing.
+
+    ``draft`` previews settings that are not saved. Applying never uses one: it always plans from what is saved.
+    """
+    inputs = inputs or await asyncio.to_thread(load_inputs, draft)
     cfg = inputs.settings.presets
     plan = Plan(
         slug=cfg.slug,
@@ -536,6 +548,7 @@ async def make_plan(inputs: Inputs | None = None) -> Plan:
         task=inputs.task,
         considered=len(inputs.candidates),
         state=inputs.state,
+        draft=inputs.draft,
     )
     if not inputs.api_key:
         return _blocked(plan, "Add an OpenRouter API key under Settings, Providers first.")
@@ -563,7 +576,11 @@ async def make_plan(inputs: Inputs | None = None) -> Plan:
             "in the OpenRouter web UI, or use another name.",
         )
     if not inputs.candidates:
-        return _blocked(plan, "No OpenRouter model passes the filters. Loosen the minimum score or the other filters.")
+        return _blocked(
+            plan,
+            "No OpenRouter model passes the filters. Loosen the minimum score, the value floor, the cost limit or the "
+            "other filters.",
+        )
 
     before = current_models(remote.config) if remote else []
     plan.picks, plan.kept_current = select_models(inputs.candidates, before, cfg.max_models, cfg.switch_margin_pct)
