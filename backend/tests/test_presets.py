@@ -711,13 +711,25 @@ def test_a_plan_with_several_models_lists_them_and_their_providers(client):
     assert any("steady, pricey" in w and "no provider data" in w for w in plan["warnings"])
 
 
-def _give_endpoints(model_id: str, specs: list[tuple[str, float, float]]) -> None:
+def _give_endpoints(model_id: str, specs: list[tuple]) -> None:
+    """Endpoints for a model, as (tag, input, output) or (tag, input, output, uptime_1d)."""
     rows = [
-        {"provider": tag.split("/")[0], "tag": tag, "quantization": "fp8", "input": i, "output": o, "uptime_1d": 99}
-        for tag, i, o in specs
+        {
+            "provider": tag.split("/")[0],
+            "tag": tag,
+            "quantization": "fp8",
+            "input": i,
+            "output": o,
+            "uptime_1d": rest[0] if rest else 99,
+        }
+        for tag, i, o, *rest in specs
     ]
+    _set_extra(model_id, {"endpoints": rows})
+
+
+def _set_extra(model_id: str, extra: dict[str, Any]) -> None:
     with session_scope() as session:
-        session.query(Model).filter_by(model_id=model_id).one().extra = {"endpoints": rows}
+        session.query(Model).filter_by(model_id=model_id).one().extra = extra
 
 
 def test_every_model_in_the_preset_keeps_a_provider_of_its_own_even_past_the_limit(client):
@@ -1355,3 +1367,89 @@ def test_a_base_url_override_on_the_provider_row_never_receives_the_key(client):
         assert write.call_count == 1 and write.calls[0].request.headers["authorization"] == f"Bearer {KEY}"
     assert plan["request"]["url"].startswith(BASE)
     assert any("Base URL" in w and "gateway.example.net" in w for w in plan["warnings"])
+
+
+# ---- churn: equal prices, and a lookup that failed -------------------------------------------------------------
+
+
+def _tags(chosen: list[dict[str, Any]]) -> list[str]:
+    return [e["tag"] for e in chosen]
+
+
+def test_endpoints_that_cost_the_same_keep_the_order_the_preset_already_has():
+    a = {"tag": "a/x", "input": 1, "output": 1, "uptime_1d": 99}
+    b = {"tag": "b/x", "input": 1, "output": 1, "uptime_1d": 60}
+    cheaper = {"tag": "c/x", "input": 0.5, "output": 1, "uptime_1d": 10}
+    assert _tags(choose_endpoints([a, b], None, TASK, {}, 2)) == ["a/x", "b/x"]  # no history: the steadier first
+    assert _tags(choose_endpoints([a, b], None, TASK, {}, 2, current=["b/x", "a/x"])) == ["b/x", "a/x"]
+    assert _tags(choose_endpoints([a, b], None, TASK, {}, 2, current=["b/x"])) == ["b/x", "a/x"]
+    # a price difference still wins over the history
+    assert _tags(choose_endpoints([a, b, cheaper], None, TASK, {}, 3, current=["b/x", "a/x"]))[0] == "c/x"
+
+
+def test_a_models_refresh_that_reorders_equal_priced_providers_writes_no_new_version(client):
+    _own_as(KEY)
+    _give_endpoints("acme/best", [("a/fp8", 0.1, 0.4, 99), ("b/fp8", 0.1, 0.4, 60)])
+    live = {"model": "acme/best", "provider": {"only": ["b/fp8", "a/fp8"], "order": ["b/fp8", "a/fp8"]}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and plan["config"]["provider"]["order"] == ["b/fp8", "a/fp8"]
+
+
+def _stores(account: _Account):
+    def post(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        return httpx.Response(200, json=_preset(SLUG, account.written, version=1, id="p-1"))
+
+    return post
+
+
+def test_a_failed_endpoint_lookup_does_not_unpin_the_preset(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="p-1")
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_stores(account))
+        plan = _plan(client)
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()["applied"] is True
+    pinned = account.written["provider"]
+    assert pinned["only"] and _state()["pins"] == {SLUG: ["acme/best"]}
+
+    _set_extra("acme/best", {})  # the next refresh could not read the endpoints
+    with respx.mock(assert_all_called=False) as router:
+        _Account(router, account.written, id="p-1")
+        write = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["action"] == "unchanged" and plan["changes"] == []
+        assert plan["config"] == account.written  # what stays live, not an unpinned copy of it
+        assert any(
+            "best" in w and "provider data" in w and "keeps its current providers" in w for w in plan["warnings"]
+        )
+        body = client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()
+        assert body["applied"] is False and "provider data" in body["message"]
+        assert write.call_count == 0
+    assert client.get("/api/presets/state").json()["last_status"] == "unchanged"
+    assert _state()["pins"] == {SLUG: ["acme/best"]}  # still remembered, for when the data is back
+
+    _set_extra("acme/best", {"endpoints": ENDPOINTS})  # and the next good refresh puts it back
+    with respx.mock(assert_all_called=False) as router:
+        _Account(router, account.written, id="p-1")
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and not plan["warnings"]
+
+
+def test_a_model_that_never_had_provider_data_does_not_hold_the_preset_pinned(client):
+    _settings(max_models=2)
+    _own_as(KEY)
+    live = {
+        "model": "acme/best",
+        "models": ["acme/best", "acme/steady"],
+        "provider": {"only": ["novita/fp4"], "order": ["novita/fp4"]},
+    }
+    for pins in (None, {SLUG: ["acme/best"]}):  # an older write, and a write that knew steady had no data
+        with session_scope() as session:
+            session.merge(Setting(key=STATE_KEY, value={**_state(), **({"pins": pins} if pins else {})}))
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, live, version=3)
+            plan = _plan(client)
+        assert plan["action"] == "update", pins  # `only` would keep steady from being served: unpin it
+        assert "provider" not in plan["config"] or "only" not in plan["config"]["provider"]

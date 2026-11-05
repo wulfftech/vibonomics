@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -129,6 +130,8 @@ class Plan:
     state: dict[str, Any] = field(default_factory=dict)
     draft: bool = False  # made from unsaved settings, so it cannot be applied
     fingerprint: str | None = None  # which key and host the plan was made for
+    # The listed models whose providers the preset names once this plan stands; None when nothing is to be recorded.
+    pinned: list[str] | None = None
     generated_at: datetime = field(default_factory=utcnow)
 
 
@@ -213,11 +216,21 @@ def choose_endpoints(
     task: Task,
     provider_block: dict[str, Any],
     limit: int,
+    *,
+    current: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
-    """The cheapest endpoints for one task that the preset's own provider filters would still let through."""
+    """The cheapest endpoints for one task that the preset's own provider filters would still let through.
+
+    Endpoints that cost the same go in the order ``current`` (the tags the live preset lists) already has them, and
+    only then by uptime, which changes on every refresh: left to it, equal prices would flip ``order`` and write a
+    new version each time.
+    """
     quantizations = {q.lower() for q in provider_block.get("quantizations") or [] if isinstance(q, str)}
     ignored = {s.lower() for s in provider_block.get("ignore") or [] if isinstance(s, str)}
-    usable: list[tuple[float, float, str, dict[str, Any]]] = []
+    position: dict[str, int] = {}
+    for i, tag in enumerate(current):
+        position.setdefault(tag, i)
+    usable: list[tuple[float, int, float, str, dict[str, Any]]] = []
     seen: set[str] = set()
     for ep in endpoints:
         tag, price_in, price_out = ep.get("tag"), ep.get("input"), ep.get("output")
@@ -232,8 +245,10 @@ def choose_endpoints(
             continue
         seen.add(tag)
         uptime = ep.get("uptime_1d")
-        usable.append((cost, -(uptime if isinstance(uptime, int | float) else 0), tag, ep))
-    usable.sort(key=lambda u: u[:3])
+        usable.append(
+            (cost, position.get(tag, len(position)), -(uptime if isinstance(uptime, int | float) else 0), tag, ep)
+        )
+    usable.sort(key=lambda u: u[:4])
     return [
         {
             "tag": tag,
@@ -244,7 +259,7 @@ def choose_endpoints(
             "quantization": ep.get("quantization"),
             "task_cost": round(cost, 6),
         }
-        for cost, _uptime, tag, ep in usable[:limit]
+        for cost, _position, _uptime, tag, ep in usable[:limit]
     ]
 
 
@@ -421,7 +436,10 @@ def _update_state(
     with session_scope() as s:
         row = s.get(Setting, STATE_KEY)
         state = dict(row.value) if row is not None and row.value else {}
+        pins = {**(state.get("pins") or {}), **(patch.get("pins") or {})}
         state.update(patch)
+        if pins:
+            state["pins"] = pins
         if own and own not in state.get("owned", []):
             state["owned"] = [*state.get("owned", []), own]
         if own and owner is not None and not (keep_owner and own in (state.get("owners") or {})):
@@ -769,8 +787,16 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
 
     provider_block = (base_config or {}).get("provider")
     provider_block = provider_block if isinstance(provider_block, dict) else {}
+    live_provider = remote.config.get("provider") if remote else None
+    live_provider = live_provider if isinstance(live_provider, dict) else {}
+    live_tags = [t for key in ("order", "only") for t in live_provider.get(key) or [] if isinstance(t, str)]
     per_pick = [
-        (c.model_id, choose_endpoints(c.endpoints, c.cache_read, inputs.task, provider_block, cfg.max_providers))
+        (
+            c.model_id,
+            choose_endpoints(
+                c.endpoints, c.cache_read, inputs.task, provider_block, cfg.max_providers, current=live_tags
+            ),
+        )
         for c in plan.picks
     ]
     bare = [c.name for c, (_id, eps) in zip(plan.picks, per_pick, strict=True) if not eps]
@@ -808,6 +834,10 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
     plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
     plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None)
     plan.changes = diff_config(remote.config if remote else None, plan.config)
+    plan.pinned = ids if plan.providers else []
+    # The models whose providers the live preset named when it was last in step with a plan, and that have none now.
+    known = (inputs.state.get("pins") or {}).get(cfg.slug) or []
+    lost = [c.name for c in plan.picks if c.model_id in known and not c.endpoints]
 
     if remote is None:
         plan.action = "create"
@@ -824,6 +854,21 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
             if plan.kept_current
             else ""
         )
+    elif lost and (live_provider.get("only") or live_provider.get("order")):
+        # A failed endpoint lookup, or the option switched off, leaves a model with no data for a while. Writing now
+        # would unpin the preset, and the next good refresh would pin it again: two versions for nothing.
+        names = ", ".join(lost)
+        plan.action = "unchanged"
+        plan.reason = f"Kept as it is: provider data for {names} is missing right now."
+        plan.warnings.append(
+            f"{names} had provider data when the preset was last written and has none now (the endpoint lookup may "
+            "have failed, or 'Check OpenRouter endpoint discounts' is off), so the preset keeps its current providers "
+            "instead of being unpinned. Nothing is written until the data is back."
+        )
+        plan.config = copy.deepcopy(remote.config)
+        plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
+        plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version)
+        plan.changes, plan.pinned = [], None
     elif before != ids:
         plan.action, plan.reason = "update", _model_change(before, plan.picks, inputs.candidates)
     else:
@@ -905,7 +950,8 @@ async def _settle(
     }
     # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
     owner = _claim_record(plan, inputs.state, version, preset_id, created_at)
-    await asyncio.to_thread(_update_state, {"applied": applied}, slug, owner)
+    pins = {"pins": {slug: plan.pinned or []}}
+    await asyncio.to_thread(_update_state, {"applied": applied, **pins}, slug, owner)
     await asyncio.to_thread(_record_run, slug, "applied", message, trigger)
     return Applied(version=version, unsaved=unsaved, message=message)
 
@@ -939,7 +985,9 @@ async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]
         if digest is not None and plan.digest != digest:
             raise PlanChanged("The plan changed since you looked at it. Preview it again.")
         if plan.action not in ("create", "update") or plan.body is None or plan.url is None or plan.config is None:
-            await asyncio.to_thread(_record_run, cfg.slug, plan.action, plan.reason, trigger)
+            # An unchanged preset is in step with this plan, so what it pins is known now.
+            known = {"pins": {cfg.slug: plan.pinned}} if plan.pinned is not None else None
+            await asyncio.to_thread(_record_run, cfg.slug, plan.action, plan.reason, trigger, known)
             return plan, None
         assert inputs.api_key is not None
         headers = {**_auth(inputs.api_key), "Content-Type": "application/json"}
