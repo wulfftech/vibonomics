@@ -37,27 +37,50 @@ _WINDOWS = (
 )
 
 
+def _finite(value: object) -> float | None:
+    """A float, or None for anything that is not one: text, infinity, NaN, or an integer too big for a float.
+
+    JSON allows ``1e999`` and 400-digit integers, which become ``inf`` or raise ``OverflowError``.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _text(value: object, limit: int) -> str | None:
+    """Short display text from a field a caller controls; an object, a list or a bool is not text."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return str(value).strip()[:limit] or None
+
+
+def clean_model(value: object) -> str | None:
+    return _text(value, 80)
+
+
+def clean_version(value: object) -> str | None:
+    return _text(value, 40)
+
+
 def _percent(value: Any) -> float | None:
     """A status-line ``used_percentage``: Claude Code documents it as 0-100 (above 100 once a limit is exceeded).
 
     It is never rescaled, because 1 is one percent: guessing a fraction made a fresh window read as full.
     """
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(number) or number < 0:
+    number = _finite(value)
+    if number is None or number < 0:
         return None
     return round(number, 2)
 
 
 def _usage(value: Any) -> float | None:
     """The usage endpoint's ``utilization``. Its unit is undocumented, so a value up to 1.5 is read as a fraction."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(number) or number < 0:
+    number = _finite(value)
+    if number is None or number < 0:
         return None
     return round(number * 100, 2) if number <= 1.5 else round(number, 2)
 
@@ -67,7 +90,9 @@ def _iso(value: Any) -> str | None:
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)):
-        seconds = float(value)
+        seconds = _finite(value)
+        if seconds is None:
+            return None
         if seconds > 1e11:  # milliseconds
             seconds /= 1000.0
         try:
@@ -76,8 +101,8 @@ def _iso(value: Any) -> str | None:
             return None
     if isinstance(value, str):
         text = value.strip()
-        if text.isdigit():
-            return _iso(int(text))
+        if text.isdecimal() and text.isascii():
+            return _iso(int(text)) if len(text) < 20 else None
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
@@ -109,31 +134,25 @@ def _spend(node: object) -> dict[str, float | str | None] | None:
     limit = _num(node.get("limit_usd"))
     percent = _percent(node.get("used_percentage"))
     if percent is None and used is not None and limit:
-        percent = round(used / limit * 100, 2)
+        percent = _percent(used / limit * 100)
     return {
         "used_usd": used,
         "limit_usd": limit,
         "used_percentage": percent,
         "resets_at": _iso(node.get("resets_at")),
-        "period": str(node.get("period") or "monthly"),
+        "period": _text(node.get("period"), 20) or "monthly",
     }
 
 
 def _num(value: object) -> float | None:
-    try:
-        number = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return round(number, 2) if number == number else None
+    number = _finite(value)
+    return None if number is None else round(number, 2)
 
 
 def _money(value: object) -> float | None:
     """Per-session cost is often a fraction of a cent, so it keeps four decimals."""
-    try:
-        number = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return round(number, 4) if number == number else None
+    number = _finite(value)
+    return None if number is None else round(number, 4)
 
 
 def _int(value: object) -> int | None:
@@ -205,9 +224,9 @@ def normalize_statusline(payload: dict[str, Any]) -> dict[str, Any]:
         "extra_usage": None,
         "plan": None,
         "source": "claude-code",
-        "model": model.get("display_name") or model.get("id"),
-        "session_id": payload.get("session_id"),
-        "version": payload.get("version"),
+        "model": clean_model(model.get("display_name")) or clean_model(model.get("id")),
+        "session_id": _text(payload.get("session_id"), 64),
+        "version": clean_version(payload.get("version")),
         "session": _session(payload),
         "received_at": utcnow().isoformat(),
     }

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from vibonomics.api import subscriptions as api
-from vibonomics.db import init_db
-from vibonomics.subscriptions import normalize_statusline, normalize_usage
+from vibonomics.db import init_db, session_scope
+from vibonomics.orm import SubscriptionSnapshot, utcnow
+from vibonomics.subscriptions import latest_snapshot, normalize_statusline, normalize_usage
 
 STATUSLINE = {
     "session_id": "abc123",
@@ -290,3 +293,96 @@ def test_a_status_line_that_mixes_small_and_large_percentages_agrees_with_itself
         "spend_limit": 23.5,
     }
     assert data["session"]["context_used_percentage"] == 1.5
+
+
+def _post(client: TestClient, body: bytes | dict) -> object:
+    token = client.get("/api/subscription/claude").json()["ingest_token"]
+    content = body if isinstance(body, bytes) else json.dumps(body).encode()
+    return client.post(
+        "/api/subscription/ingest/claude",
+        content=content,
+        headers={"X-Vibonomics-Token": token, "Content-Type": "application/json"},
+    )
+
+
+def test_ingest_keeps_model_session_and_version_as_short_strings():
+    client = _client()
+    body = {
+        "model": {"display_name": {"x": 1}, "id": "claude-opus-5-5"},
+        "version": 3,
+        "session_id": "s" * 400_000,
+        "rate_limits": {"five_hour": {"used_percentage": 5}},
+    }
+    assert _post(client, body).status_code == 202
+    snapshot = client.get("/api/subscription/claude").json()["snapshot"]
+    assert snapshot["model"] == "claude-opus-5-5"
+    assert snapshot["version"] == "3"
+    with session_scope() as session:
+        stored = latest_snapshot(session, "claude")[1]
+    assert len(stored["session_id"]) <= 64
+    assert len(json.dumps(stored)) < 2_000
+
+
+def test_ingest_drops_a_model_and_version_that_are_not_text():
+    client = _client()
+    body = {"model": {"display_name": {"x": 1}}, "version": ["2", 1], "session_id": {"a": 1}}
+    assert _post(client, body).status_code == 202
+    response = client.get("/api/subscription/claude")
+    assert response.status_code == 200
+    snapshot = response.json()["snapshot"]
+    assert (snapshot["model"], snapshot["version"]) == (None, None)
+
+
+HUGE = "9" * 400  # a valid JSON integer too large for a float
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"cost": {"total_duration_ms": 1e999, "total_cost_usd": 1e999, "total_lines_added": -1e999}}',
+        b'{"context_window": {"used_percentage": 1e999, "context_window_size": 1e999, "total_input_tokens": 1e999}}',
+        b'{"rate_limits": {"five_hour": {"used_percentage": -1e999}, "spend_limit": {"used_usd": 1e999}}}',
+        f'{{"cost": {{"total_lines_added": {HUGE}, "total_cost_usd": {HUGE}}}}}'.encode(),
+        f'{{"rate_limits": {{"five_hour": {{"used_percentage": 5, "resets_at": {HUGE}}}}}}}'.encode(),
+        '{"rate_limits": {"five_hour": {"used_percentage": 5, "resets_at": "²"}}}'.encode(),
+    ],
+    ids=["duration", "context", "windows", "big-ints", "big-reset", "odd-digit"],
+)
+def test_ingest_ignores_numbers_that_are_not_finite_or_too_big(body):
+    client = _client()
+    assert _post(client, body).status_code == 202
+    response = client.get("/api/subscription/claude")
+    assert response.status_code == 200
+    session = response.json()["snapshot"]["session"]
+    assert session is None or all(value in (None, 0.0) for value in session.values())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"[" * 100_000, b'{"a":' * 100_000, b'{"a": ' + b"9" * 5000 + b"}"],
+    ids=["deep-list", "deep-object", "5000-digit-int"],
+)
+def test_ingest_answers_400_for_json_it_cannot_parse(body):
+    client = _client()
+    assert _post(client, body).status_code == 400
+
+
+def test_the_read_survives_a_snapshot_stored_before_ingest_cleaned_it():
+    client = _client()
+    bad = {
+        "windows": [{"key": "five_hour", "label": "5-hour session", "used_percentage": 5.0, "resets_at": None}],
+        "model": {"display_name": {"x": 1}},
+        "version": 3,
+        "session": {"cost_usd": "lots"},
+        "source": "claude-code",
+    }
+    with session_scope() as session:
+        session.add(SubscriptionSnapshot(kind="claude", received_at=utcnow(), payload=bad))
+    try:
+        response = client.get("/api/subscription/claude")
+        assert response.status_code == 200
+        assert response.json()["ingest_token"]
+    finally:
+        with session_scope() as session:
+            for row in session.query(SubscriptionSnapshot).filter(SubscriptionSnapshot.payload == bad):
+                session.delete(row)
