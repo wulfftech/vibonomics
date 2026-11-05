@@ -493,6 +493,83 @@ async def test_arena_reports_the_subsets_it_could_not_load(monkeypatch):
     assert complete.partial_errors == []
 
 
+# -- models.dev down, nothing cached ----------------------------------------------------------
+
+
+def _matched_source(source_id: str, fetched: list[str]) -> type[BenchmarkSource]:
+    class Matched(BenchmarkSource):
+        spec = SourceSpec(
+            id=source_id,
+            name=source_id.title(),
+            homepage="https://example.com",
+            description="",
+            license="test",
+            attribution="test",
+            metrics=(MetricSpec("score", "Score", "coding"),),
+        )
+
+        async def fetch(self) -> list[ScoreRecord]:
+            fetched.append(source_id)
+            return [ScoreRecord(metric="score", source_model="Some Model", value=7.0, model_ids=["acme/m1"])]
+
+    return Matched
+
+
+def _stored_matches(source_id: str) -> list[tuple[str, str | None, str, float]]:
+    with session_scope() as s:
+        rows = s.scalars(select(BenchmarkScore).where(BenchmarkScore.source == source_id))
+        return [(r.source_model, r.canonical_id, r.match_method, r.value) for r in rows]
+
+
+def _last_benchmark_run() -> RefreshRun:
+    with session_scope() as s:
+        run = s.scalars(
+            select(RefreshRun).where(RefreshRun.kind == "benchmarks").order_by(RefreshRun.id.desc())
+        ).first()
+        assert run is not None
+        return run
+
+
+async def test_a_refresh_with_models_dev_down_does_not_rematch_or_delete_the_stored_scores(database, monkeypatch):
+    fetched: list[str] = []
+    catalogues = {"now": _catalog(("acme/m1", "M1"))}
+
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return catalogues["now"]
+
+    monkeypatch.setattr(events, "_loop", None)
+    monkeypatch.setattr(jobs, "SOURCES", {"downtest": _matched_source("downtest", fetched)})
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+    await jobs.run_job("benchmarks")
+    matched = [("Some Model", "acme/m1", "id", 7.0)]
+    assert _stored_matches("downtest") == matched
+
+    catalogues["now"] = ModelsDevCatalog({}, degraded="GET https://models.dev/api.json: ConnectError: no route")
+    await jobs.run_job("benchmarks")
+
+    assert _stored_matches("downtest") == matched  # still matched, not rewritten as unmatched
+    assert fetched == ["downtest"]  # the second run did not even fetch
+    run = _last_benchmark_run()
+    assert run.status == "failed"
+    assert "models.dev is unavailable" in run.message and "no route" in run.message
+
+
+async def test_a_rematch_with_models_dev_down_leaves_the_stored_scores_alone(database, monkeypatch):
+    monkeypatch.setattr(jobs, "SOURCES", {"downtest": _matched_source("downtest", [])})
+    record = ScoreRecord(metric="score", source_model="Some Model", value=7.0, model_ids=["acme/m1"])
+    jobs.persist_scores("downtest", [record], Matcher(_catalog(("acme/m1", "M1"))))
+    assert _stored_matches("downtest") == [("Some Model", "acme/m1", "id", 7.0)]
+
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return ModelsDevCatalog({}, degraded="models.dev: no route")
+
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+    with pytest.raises(FetchError, match=r"models.dev is unavailable"):
+        await jobs.rematch_scores()
+
+    assert _stored_matches("downtest") == [("Some Model", "acme/m1", "id", 7.0)]
+
+
 # -- Aliases edited while a refresh runs ------------------------------------------------------
 
 

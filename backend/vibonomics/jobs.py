@@ -7,6 +7,7 @@ import logging
 import math
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -18,8 +19,9 @@ from . import events, usage
 from .benchmarks.base import BenchContext, ScoreRecord
 from .benchmarks.matching import Matcher
 from .benchmarks.registry import SOURCES
-from .catalog.modelsdev import load_catalog
+from .catalog.modelsdev import ModelsDevCatalog, load_catalog
 from .db import session_scope
+from .http import FetchError
 from .orm import Balance, BenchmarkScore, Model, ModelAlias, PriceHistory, ProviderConfig, RefreshRun
 from .provider_service import build_adapter, resolve
 from .providers.base import BalanceInfo, FetchContext, ModelOffer
@@ -201,6 +203,14 @@ async def _refresh_models(run_id: int, provider_ids: set[int] | None = None) -> 
     catalog = await load_catalog(force=True)
     ctx = FetchContext(catalog=catalog, settings=settings)
     stats: dict[str, Any] = {"ok": 0, "failed": 0, "errors": [], "models": 0}
+    degraded = bool(catalog.degraded)
+    if degraded:
+        # Providers that need no catalogue still refresh, but their offers carry none of its data.
+        stats["partial"] = 1
+        stats["errors"].append(
+            f"models.dev is unavailable ({str(catalog.degraded)[:200]}): the canonical ids, families and release "
+            "dates already stored were kept"
+        )
 
     async def one(cfg: ProviderConfig) -> None:
         adapter = build_adapter(cfg, ctx)
@@ -210,7 +220,7 @@ async def _refresh_models(run_id: int, provider_ids: set[int] | None = None) -> 
         try:
             offers = await asyncio.wait_for(adapter.fetch_models(), PROVIDER_TIMEOUT)
             # Inside the try: a provider deleted mid-refresh fails here, and must not take the others down.
-            count = await asyncio.to_thread(persist_offers, cfg.id, offers)
+            count = await asyncio.to_thread(persist_offers, cfg.id, offers, keep_catalogue_fields=degraded)
         except Exception as exc:
             text = failure_text(exc, PROVIDER_TIMEOUT)
             msg = text if text.startswith(("GET", "POST")) else f"{type(exc).__name__}: {text}"
@@ -251,8 +261,25 @@ def _total(i: float | None, o: float | None) -> float | None:
     return i + o
 
 
-def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
-    """Upsert offers for one provider and record price/discount changes."""
+_CATALOGUE_COLUMNS = ("canonical_id", "creator", "family", "release_date", "open_weights")
+
+
+def _with_stored_catalogue_fields(offer: ModelOffer, row: Model) -> ModelOffer:
+    """``offer`` with the columns models.dev supplies taken from ``row`` wherever it has a value.
+
+    Built while models.dev is down, an offer holds no canonical id, family or open-weights flag and only fallbacks
+    for the creator and the release date. Storing it would blank what the last good refresh found.
+    """
+    kept = {name: getattr(row, name) for name in _CATALOGUE_COLUMNS if getattr(row, name) is not None}
+    return replace(offer, **kept)
+
+
+def persist_offers(provider_id: int, offers: list[ModelOffer], *, keep_catalogue_fields: bool = False) -> int:
+    """Upsert offers for one provider and record price/discount changes.
+
+    ``keep_catalogue_fields`` is for a refresh made without the models.dev catalogue: the stored canonical id,
+    creator, family, release date and open-weights flag are kept instead of being replaced by the offer's empty ones.
+    """
     ts = now()
     with session_scope() as s:
         existing = {m.model_id: m for m in s.scalars(select(Model).where(Model.provider_config_id == provider_id))}
@@ -263,6 +290,8 @@ def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
                 continue
             seen.add(offer.model_id)
             row = existing.get(offer.model_id)
+            if row is not None and keep_catalogue_fields:
+                offer = _with_stored_catalogue_fields(offer, row)
             if row is None:
                 row = Model(
                     provider_config_id=provider_id,
@@ -399,6 +428,11 @@ def _persist_balance(provider_id: int, info: BalanceInfo) -> None:
 async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
     _providers, settings = await asyncio.to_thread(_load_providers_and_settings)
     catalog = await load_catalog()
+    if catalog.degraded:
+        # Against an empty catalogue every score would match nothing, and storing them would replace the
+        # matched rows with unmatched ones.
+        message = f"{_no_catalogue(catalog)}, so the benchmark scores cannot be matched; the stored ones were kept"
+        return {"ok": 0, "failed": 1, "partial": 0, "errors": [message], "records": 0, "matched": 0}
     # The aliases are read again when each source is stored: a refresh can run for minutes, and an alias set
     # meanwhile must not be overwritten by a matcher built before it existed.
     matcher = Matcher(catalog, await asyncio.to_thread(_load_operator_aliases))
@@ -477,6 +511,10 @@ async def _refresh_usage(run_id: int) -> dict[str, Any]:
     results = await asyncio.gather(*(one(p) for p in targets), return_exceptions=True)
     _record_crashes(results, [p.name for p in targets], stats)
     return stats
+
+
+def _no_catalogue(catalog: ModelsDevCatalog) -> str:
+    return f"models.dev is unavailable and there is no earlier copy ({str(catalog.degraded)[:200]})"
 
 
 def _load_operator_aliases() -> dict[tuple[str, str], str | None]:
@@ -573,6 +611,8 @@ async def rematch_scores() -> int:
     between the read and the write, and SQLite reuses ids, so an update by id could land on another row.
     """
     catalog = await load_catalog()
+    if catalog.degraded:
+        raise FetchError(f"{_no_catalogue(catalog)}, so the stored scores cannot be rematched")
     operator_aliases = await asyncio.to_thread(_load_operator_aliases)
     matcher = Matcher(catalog, operator_aliases)
     table = BenchmarkScore.__table__

@@ -268,6 +268,76 @@ async def test_the_startup_refresh_goes_on_after_a_kind_raises(monkeypatch):
     assert ran == ["models", "balances", "benchmarks", "usage", "preset"]
 
 
+# ---- models.dev down, nothing cached --------------------------------------------------------------------------
+
+DOWN = "GET https://models.dev/api.json: ConnectError: no route"
+
+
+def _stored_enrichment(provider_id: int) -> dict[str, tuple]:
+    with session_scope() as s:
+        rows = s.scalars(select(Model).where(Model.provider_config_id == provider_id))
+        return {m.model_id: (m.canonical_id, m.creator, m.family, m.release_date, m.open_weights) for m in rows}
+
+
+class _CatalogueFreeAdapter:
+    """What an adapter that needs no catalogue (OpenRouter's) offers when the catalogue is empty: no enrichment."""
+
+    async def fetch_models(self) -> list[ModelOffer]:
+        return [ModelOffer(model_id="acme/m1", name="M1 renamed", price=Price(input=1.0, output=2.0))]
+
+
+def _seed_enriched_model(provider_id: int) -> None:
+    with session_scope() as s:
+        s.add(
+            Model(
+                provider_config_id=provider_id,
+                model_id="acme/m1",
+                name="M1",
+                canonical_id="acme/m1",
+                creator="acme",
+                family="m",
+                release_date="2026-01-01",
+                open_weights=True,
+                active=True,
+            )
+        )
+
+
+async def test_a_refresh_with_models_dev_down_keeps_the_enrichment_already_stored_and_says_so(monkeypatch):
+    provider_id = _provider("enriched, catalogue down")
+    _seed_enriched_model(provider_id)
+
+    async def down(force: bool = False) -> ModelsDevCatalog:
+        return ModelsDevCatalog({}, degraded=DOWN)
+
+    monkeypatch.setattr(jobs, "load_catalog", down)
+    monkeypatch.setattr(jobs, "build_adapter", lambda cfg, ctx: _CatalogueFreeAdapter())
+    monkeypatch.setattr(jobs, "_load_providers_and_settings", lambda: _enabled([provider_id]))
+
+    await jobs.run_job("models", "test", {provider_id})
+
+    assert _stored_enrichment(provider_id) == {"acme/m1": ("acme/m1", "acme", "m", "2026-01-01", True)}
+    with session_scope() as s:
+        # What the provider itself reports is still taken: only the catalogue's part is held.
+        assert s.scalars(select(Model).where(Model.provider_config_id == provider_id)).one().name == "M1 renamed"
+    run = _last_run("models")
+    assert run.status == "partial"
+    assert "models.dev is unavailable" in run.message and "no route" in run.message
+    assert run.stats["ok"] == 1 and run.stats["partial"] == 1
+
+
+async def test_a_refresh_with_a_working_catalogue_still_replaces_the_enrichment(monkeypatch):
+    provider_id = _provider("enriched, catalogue up")
+    _seed_enriched_model(provider_id)
+    monkeypatch.setattr(jobs, "build_adapter", lambda cfg, ctx: _CatalogueFreeAdapter())
+    monkeypatch.setattr(jobs, "_load_providers_and_settings", lambda: _enabled([provider_id]))
+
+    await jobs.run_job("models", "test", {provider_id})
+
+    assert _stored_enrichment(provider_id) == {"acme/m1": (None, None, None, None, None)}
+    assert _last_run("models").status == "ok"
+
+
 # ---- a provider saved while its kind is running --------------------------------------------------------------
 
 
