@@ -1139,6 +1139,21 @@ def test_a_create_records_the_account_and_what_openrouter_called_the_preset(clie
     assert KEY not in json.dumps(state)
 
 
+def test_a_create_records_the_id_and_time_a_later_read_will_report_not_the_answers_wording(client):
+    def create(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        return httpx.Response(200, json=_preset(SLUG, account.written, version=1, id="create-1", created_at="t0"))
+
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="get-1", created_at="2026-11-05T00:00:01Z")
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=create)
+        plan = _plan(client)
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+        owner = _state()["owners"][SLUG]
+        assert (owner["preset_id"], owner["created_at"]) == ("get-1", "2026-11-05T00:00:01Z")
+        assert _plan(client)["action"] == "unchanged"  # and our own preset is not blocked as replaced
+
+
 def test_the_digest_names_the_account_and_the_version_it_was_planned_against(client):
     config = {"model": "acme/best"}
     assert digest_of(SLUG, config, "aaaa", 1) != digest_of(SLUG, config, "bbbb", 1)

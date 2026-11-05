@@ -978,6 +978,24 @@ async def _settle(
     return Applied(version=version, unsaved=unsaved, message=message)
 
 
+async def _identity(
+    inputs: Inputs, slug: str, fallback: tuple[str | None, str | None]
+) -> tuple[str | None, str | None]:
+    """The id and creation time of a new preset as a plain read reports them, which is what later plans compare.
+
+    The create answer may word them another way. A record that no read can match would block our own preset on
+    every plan from then on.
+    """
+    assert inputs.api_key is not None
+    try:
+        seen = await fetch_remote(inputs.base_url, inputs.api_key, slug)
+    except FetchError:
+        return fallback
+    if seen is None or not seen.readable:
+        return fallback
+    return seen.preset_id or fallback[0], seen.created_at or fallback[1]
+
+
 async def _read_back(plan: Plan, inputs: Inputs, trigger: str) -> Applied | None:
     """After a write whose outcome is unknown, claim it if the preset now holds exactly what the plan sent.
 
@@ -1039,7 +1057,10 @@ async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]
             message = scrub_secrets(f"OpenRouter did not take the update: {exc}", headers)
             await asyncio.to_thread(_record_run, cfg.slug, "failed", message, trigger)
             raise PresetWriteError(message) from exc
-        return plan, await _settle(plan, inputs, trigger, version, stored, *_stable_id(data))
+        ident = _stable_id(data)
+        if plan.action == "create":
+            ident = await _identity(inputs, cfg.slug, ident)
+        return plan, await _settle(plan, inputs, trigger, version, stored, *ident)
 
 
 async def sync(trigger: str = "schedule") -> None:
