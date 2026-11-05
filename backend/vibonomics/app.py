@@ -34,15 +34,21 @@ from .evals import runner
 from .http import close_client
 from .jobs import KINDS, recover_interrupted_runs, run_job, spawn
 from .provider_service import seed_providers
-from .settings_store import load_settings
+from .settings_store import AppSettings, load_settings
 
 log = logging.getLogger("vibonomics")
 
 
-async def _startup_refresh() -> None:
-    await asyncio.sleep(2)
-    for kind in KINDS:
-        await run_job(kind, "startup")
+async def _startup_work(settings: AppSettings, delay: float = 2) -> None:
+    await asyncio.sleep(delay)
+    if settings.refresh.refresh_on_startup:
+        for kind in KINDS:
+            try:
+                await run_job(kind, "startup")
+            except Exception:  # one kind failing must not drop the rest
+                log.exception("Startup refresh of %s could not run", kind)
+    # After the refresh, so a catch-up run ranks fresh prices.
+    await scheduler.catch_up_preset(settings)
 
 
 @asynccontextmanager
@@ -57,8 +63,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if not await sandbox_guard.refresh():
         spawn(sandbox_guard.keep_trying())
     scheduler.start(app_settings)
-    if app_settings.refresh.refresh_on_startup:
-        spawn(_startup_refresh())
+    spawn(_startup_work(app_settings))
     cfg = get_config()
     if not cfg.password and not cfg.allowed_hosts:
         log.warning(

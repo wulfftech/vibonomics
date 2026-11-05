@@ -165,7 +165,9 @@ def put_settings(body: SettingsIn, session: Session = Depends(get_session)) -> S
     if new.scoring.default_profile not in {p.id for p in new.scoring.profiles}:
         new.scoring.default_profile = new.scoring.profiles[0].id
     save_settings(session, new)
-    session.flush()
+    # Committed here, not when the session closes: a listener that refetches on the event must read the new
+    # settings, and the schedule must not change for a save that failed.
+    session.commit()
     events.publish("settings.changed", {})
     from ..scheduler import reschedule
 

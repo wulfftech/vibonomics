@@ -205,6 +205,7 @@ def clear_claude_snapshot(session: Session = Depends(get_session)) -> None:
     """Forget received snapshots (for example after testing the status-line command)."""
     for row in session.scalars(select(SubscriptionSnapshot).where(SubscriptionSnapshot.kind == "claude")):
         session.delete(row)
+    session.commit()  # before the event, so the refetch it triggers does not read the old rows
     events.publish("subscription.updated", {"kind": "claude"})
 
 

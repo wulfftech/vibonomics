@@ -251,6 +251,7 @@ class UsageKey(Base):
 
 class RefreshRun(Base):
     __tablename__ = "refresh_runs"
+    __table_args__ = (Index("ix_refresh_runs_kind_id", "kind", "id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     kind: Mapped[str] = mapped_column(String(30))  # models | benchmarks | balances | usage

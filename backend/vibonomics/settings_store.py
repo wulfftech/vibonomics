@@ -2,23 +2,40 @@
 
 from __future__ import annotations
 
+import copy
+import logging
 import re
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from . import crypto
 from .orm import Setting
 
+log = logging.getLogger(__name__)
+
 _KEY = "app"
+# One year: far past any useful schedule, and well inside what a timer can hold (1e12 hours overflows it).
+_YEAR_HOURS = 24 * 365
+_YEAR_MINUTES = _YEAR_HOURS * 60
+# Weights only matter relative to each other, so this is generous.
+_MAX_WEIGHT = 1000
 
 
 class RefreshSettings(BaseModel):
-    models_interval_hours: float = Field(6, ge=0, description="0 disables scheduled model/price refresh")
-    balances_interval_minutes: float = Field(30, ge=0)
-    benchmarks_interval_hours: float = Field(24, ge=0)
-    usage_interval_hours: float = Field(12, ge=0, description="Spend history from OpenRouter; needs a management key")
+    models_interval_hours: float = Field(
+        6, ge=0, le=_YEAR_HOURS, allow_inf_nan=False, description="0 disables scheduled model/price refresh"
+    )
+    balances_interval_minutes: float = Field(30, ge=0, le=_YEAR_MINUTES, allow_inf_nan=False)
+    benchmarks_interval_hours: float = Field(24, ge=0, le=_YEAR_HOURS, allow_inf_nan=False)
+    usage_interval_hours: float = Field(
+        12,
+        ge=0,
+        le=_YEAR_HOURS,
+        allow_inf_nan=False,
+        description="Spend history from OpenRouter; needs a management key",
+    )
     refresh_on_startup: bool = True
     openrouter_endpoint_discounts: bool = Field(
         True, description="Query OpenRouter's per-provider endpoints to detect discounts (one request per model)"
@@ -35,11 +52,18 @@ class UsageProfile(BaseModel):
 
     id: str
     name: str
-    input_weight: float = Field(ge=0)
-    output_weight: float = Field(ge=0)
+    input_weight: float = Field(ge=0, le=_MAX_WEIGHT, allow_inf_nan=False)
+    output_weight: float = Field(ge=0, le=_MAX_WEIGHT, allow_inf_nan=False)
     cache_hit_rate: float = Field(0, ge=0, le=1)
     task_input_tokens: int = Field(ge=0)
     task_output_tokens: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> UsageProfile:
+        # With no tokens every task costs nothing, so every value is undefined and every score ranks first.
+        if self.task_input_tokens + self.task_output_tokens == 0:
+            raise ValueError("a task needs some input or output tokens")
+        return self
 
 
 DEFAULT_PROFILES = [
@@ -74,15 +98,21 @@ DEFAULT_PROFILES = [
 
 
 class ScoringSettings(BaseModel):
-    intelligence_weight: float = Field(0.3, ge=0)
-    coding_weight: float = Field(0.35, ge=0)
-    agentic_weight: float = Field(0.35, ge=0)
+    intelligence_weight: float = Field(0.3, ge=0, le=_MAX_WEIGHT, allow_inf_nan=False)
+    coding_weight: float = Field(0.35, ge=0, le=_MAX_WEIGHT, allow_inf_nan=False)
+    agentic_weight: float = Field(0.35, ge=0, le=_MAX_WEIGHT, allow_inf_nan=False)
     own_tests_weight: float = Field(
-        1.0, ge=0, description="Weight of Vibonomics's own test results vs third-party data"
+        1.0,
+        ge=0,
+        le=_MAX_WEIGHT,
+        allow_inf_nan=False,
+        description="Weight of Vibonomics's own test results vs third-party data",
     )
     free_model_cost: float = Field(
         0.01,
         ge=0,
+        le=_MAX_WEIGHT,
+        allow_inf_nan=False,
         description="Assumed blended USD per 1M tokens for free models when ranking value (they would otherwise "
         "have infinite value)",
     )
@@ -227,11 +257,46 @@ class AppSettings(BaseModel):
         return crypto.decrypt(src.api_key_enc) if src else None
 
 
+def _drop(data: Any, loc: tuple[int | str, ...]) -> bool:
+    """Remove what ``loc`` points at, so its field falls back to the default, or the whole list item it sits in."""
+    node = data
+    for i, part in enumerate(loc):
+        if isinstance(node, list) and isinstance(part, int) and part < len(node):
+            del node[part]
+            return True
+        if not isinstance(node, dict) or part not in node:
+            return False
+        if i == len(loc) - 1:
+            del node[part]
+            return True
+        node = node[part]
+    return False
+
+
+def _validate_stored(raw: Any) -> AppSettings:
+    """The stored settings, minus any value that this release no longer accepts.
+
+    Validation gets stricter between releases, and a value saved under the old rules must not stop the app from
+    starting, nor take the keys and token stored beside it down with it. Each one is logged and reset to its default.
+    """
+    data = copy.deepcopy(raw)
+    for _ in range(100):
+        try:
+            return AppSettings.model_validate(data)
+        except ValidationError as exc:
+            error = exc.errors()[0]
+            where = ".".join(str(part) for part in error["loc"])
+            log.error("Stored setting %s is no longer valid (%s); using its default", where or "(all)", error["msg"])
+            if not _drop(data, error["loc"]):
+                break
+    return AppSettings()
+
+
 def load_settings(session: Session) -> AppSettings:
     row = session.get(Setting, _KEY)
     if row is None or not row.value:
         return AppSettings()
-    return AppSettings.model_validate(row.value)
+    return _validate_stored(row.value)
 
 
 def save_settings(session: Session, settings: AppSettings) -> None:

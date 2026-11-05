@@ -6,19 +6,18 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
+from pathlib import Path
 
+from fastapi import Depends
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import get_config
 
 
-@lru_cache(maxsize=1)
-def get_engine() -> Engine:
-    cfg = get_config()
-    cfg.config_dir.mkdir(parents=True, exist_ok=True)
+def make_engine(db_path: Path) -> Engine:
     engine = create_engine(
-        f"sqlite:///{cfg.db_path}",
+        f"sqlite:///{db_path}",
         connect_args={"check_same_thread": False, "timeout": 60},
         pool_pre_ping=True,
     )
@@ -33,6 +32,13 @@ def get_engine() -> Engine:
         cur.close()
 
     return engine
+
+
+@lru_cache(maxsize=1)
+def get_engine() -> Engine:
+    cfg = get_config()
+    cfg.config_dir.mkdir(parents=True, exist_ok=True)
+    return make_engine(cfg.db_path)
 
 
 @lru_cache(maxsize=1)
@@ -53,10 +59,19 @@ def session_scope() -> Iterator[Session]:
         session.close()
 
 
-def get_session() -> Iterator[Session]:
-    """FastAPI dependency."""
+def _request_session() -> Iterator[Session]:
     with session_scope() as session:
         yield session
+
+
+def get_session(session: Session = Depends(_request_session, scope="function")) -> Session:
+    """FastAPI dependency.
+
+    A dependency that yields is closed after the response has been sent unless it has function scope. Closing is
+    where this one commits, so with the default scope a failed commit still reached the client as a 2xx and the
+    rows were silently not stored.
+    """
+    return session
 
 
 def init_db() -> None:

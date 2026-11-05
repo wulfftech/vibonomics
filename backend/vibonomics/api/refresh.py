@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,6 +14,8 @@ from sqlalchemy.orm import Session
 from ..db import get_session
 from ..jobs import KINDS, is_running, run_job, spawn
 from ..orm import RefreshRun
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/refresh", tags=["refresh"])
 
@@ -42,7 +45,10 @@ class RefreshStatus(BaseModel):
 async def _run_sequence(kinds: list[str]) -> None:
     # Models first so balances/benchmarks see fresh catalogue data.
     for kind in [k for k in KINDS if k in kinds]:
-        await run_job(kind, "manual")
+        try:
+            await run_job(kind, "manual")
+        except Exception:  # one kind failing must not drop the rest of the sequence
+            log.exception("Refresh %s could not run", kind)
 
 
 @router.post("", status_code=202, response_model=RefreshStatus)
@@ -64,6 +70,6 @@ def refresh_status(session: Session = Depends(get_session)) -> RefreshStatus:
 
 
 @router.get("/runs", response_model=list[RefreshRunOut])
-def refresh_runs(limit: int = 50, session: Session = Depends(get_session)) -> list[RefreshRunOut]:
-    runs = session.scalars(select(RefreshRun).order_by(RefreshRun.id.desc()).limit(min(limit, 500))).all()
+def refresh_runs(limit: int = Query(50, ge=1, le=500), session: Session = Depends(get_session)) -> list[RefreshRunOut]:
+    runs = session.scalars(select(RefreshRun).order_by(RefreshRun.id.desc()).limit(limit)).all()
     return [RefreshRunOut.model_validate(r, from_attributes=True) for r in runs]
