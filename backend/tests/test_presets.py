@@ -24,7 +24,9 @@ from vibonomics.presets import (
     choose_endpoints,
     current_models,
     diff_config,
+    digest_of,
     merge_endpoints,
+    owner_fingerprint,
     rank,
     select_models,
     unsaved_keys,
@@ -151,9 +153,13 @@ def client(monkeypatch) -> TestClient:
     get_config.cache_clear()
 
 
-def _preset(slug: str, config: dict[str, Any], version: int = 1, system_prompt: str | None = None) -> dict[str, Any]:
+def _preset(
+    slug: str, config: dict[str, Any], version: int = 1, system_prompt: str | None = None, **data: Any
+) -> dict[str, Any]:
     live = {"version": version, "config": config, "system_prompt": system_prompt}
-    return {"data": {"slug": slug, "name": slug, "updated_at": "2026-11-04T07:36:33Z", "designated_version": live}}
+    return {
+        "data": {"slug": slug, "name": slug, "updated_at": "2026-11-04T07:36:33Z", "designated_version": live, **data}
+    }
 
 
 def _remote(router: respx.Router, slug: str, config: dict[str, Any] | None, **kwargs: Any) -> None:
@@ -905,3 +911,121 @@ def test_a_draft_plan_cannot_be_applied_because_apply_plans_from_what_is_saved(c
         assert post.call_count == 0
     assert response.status_code == 409
     assert "changed" in response.json()["detail"]
+
+
+# ---- who owns a preset ----------------------------------------------------------------------------------------
+
+OTHER_KEY = "sk-or-test-other-key-0987654321"
+
+
+def _state() -> dict[str, Any]:
+    with session_scope() as session:
+        row = session.get(Setting, STATE_KEY)
+        return dict(row.value) if row is not None and row.value else {}
+
+
+def _own_as(key: str = KEY, slug: str = SLUG, **record: Any) -> None:
+    """Record ``slug`` as created under ``key``, the way a successful write now does."""
+    owner = {"fingerprint": owner_fingerprint(BASE, key), "version_at_create": 1, **record}
+    with session_scope() as session:
+        session.merge(Setting(key=STATE_KEY, value={"owned": [slug], "owners": {slug: owner}}))
+
+
+def _use_key(key: str) -> None:
+    with session_scope() as session:
+        session.query(ProviderConfig).filter_by(type="openrouter").update({"api_key_enc": crypto.encrypt(key)})
+
+
+def test_a_preset_made_under_another_key_is_left_alone(client):
+    _own_as(KEY)
+    _use_key(OTHER_KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "someone/elses"}, version=3)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = client.post("/api/presets/plan").json()
+        assert post.call_count == 0
+    assert plan["action"] == "blocked"
+    assert "different OpenRouter key or account" in plan["reason"]
+    assert plan["request"] is None and plan["digest"] is None
+    assert OTHER_KEY not in json.dumps(plan) and KEY not in json.dumps(plan)
+
+
+def test_a_preset_made_under_the_key_in_use_is_still_ours(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/steady"}, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "update"
+    assert plan["digest"]
+
+
+def test_a_slug_recorded_before_accounts_were_tracked_is_trusted_once_and_then_tied_to_the_key(client, caplog):
+    _own()  # the form the live instance holds: a bare slug and no record
+    with caplog.at_level("INFO", logger="vibonomics.presets"), respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/steady"}, version=3)
+        assert _plan(client)["action"] == "update"
+    assert _state()["owners"][SLUG]["fingerprint"] == owner_fingerprint(BASE, KEY)
+    assert any("adopt" in r.getMessage() and SLUG in r.getMessage() for r in caplog.records)
+    assert KEY not in json.dumps(_state())
+    # the trust is spent: a different key no longer reaches it
+    _use_key(OTHER_KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "someone/elses"}, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "different OpenRouter key or account" in plan["reason"]
+
+
+def test_a_preset_deleted_and_made_again_by_hand_is_no_longer_ours(client):
+    _own_as(KEY, preset_id="p-1", created_at="2026-11-01T00:00:00Z")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "by/hand"}, version=1, id="p-2", created_at="2026-11-04T00:00:00Z")
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "no longer the one Vibonomics created" in plan["reason"]
+    # the same id is the same preset, and a creation time written another way is the same instant
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/steady"}, version=4, id="p-1", created_at="2026-11-01T00:00:00+00:00")
+        assert _plan(client)["action"] == "update"
+    # a creation time alone is enough to tell them apart
+    _own_as(KEY, created_at="2026-11-01T00:00:00Z")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "by/hand"}, version=1, created_at="2026-11-04T00:00:00Z")
+        assert _plan(client)["action"] == "blocked"
+
+
+def test_a_response_with_no_id_or_creation_time_leaves_the_key_to_decide(client):
+    _own_as(KEY, preset_id="p-1", created_at="2026-11-01T00:00:00Z")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/steady"}, version=2)  # the live preset names neither
+        assert _plan(client)["action"] == "update"
+
+
+def test_a_create_records_the_account_and_what_openrouter_called_the_preset(client):
+    def create(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(SLUG, sent, version=1, id="p-1", created_at="2026-11-05T00:00:00Z"))
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=create)
+        plan = _plan(client)
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+    state = _state()
+    assert state["owned"] == [SLUG]
+    owner = state["owners"][SLUG]
+    assert owner["fingerprint"] == owner_fingerprint(BASE, KEY)
+    assert (owner["version_at_create"], owner["preset_id"], owner["created_at"]) == (1, "p-1", "2026-11-05T00:00:00Z")
+    assert KEY not in json.dumps(state)
+
+
+def test_the_digest_names_the_account_and_the_version_it_was_planned_against(client):
+    config = {"model": "acme/best"}
+    assert digest_of(SLUG, config, "aaaa", 1) != digest_of(SLUG, config, "bbbb", 1)
+    assert digest_of(SLUG, config, "aaaa", 1) != digest_of(SLUG, config, "aaaa", 2)
+    _own_as(KEY)
+    digests = []
+    for version in (2, 3):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, {"model": "acme/steady"}, version=version)
+            digests.append(_plan(client)["digest"])
+    assert digests[0] != digests[1]  # someone made a version in between, so the reviewed plan is stale

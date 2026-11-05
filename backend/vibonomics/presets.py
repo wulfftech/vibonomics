@@ -28,7 +28,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -100,6 +100,8 @@ class Remote:
     updated_at: str | None
     status: str = "active"  # an archived preset takes no new versions
     versions: list[dict[str, Any]] = field(default_factory=list)
+    preset_id: str | None = None  # whatever stable id the account gave it; None when the response names none
+    created_at: str | None = None
 
 
 @dataclass
@@ -125,6 +127,7 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     draft: bool = False  # made from unsaved settings, so it cannot be applied
+    fingerprint: str | None = None  # which key and host the plan was made for
     generated_at: datetime = field(default_factory=utcnow)
 
 
@@ -356,9 +359,24 @@ def unsaved_keys(desired: dict[str, Any], stored: dict[str, Any]) -> list[str]:
     return out
 
 
-def digest_of(slug: str, config: dict[str, Any]) -> str:
-    raw = json.dumps({"slug": slug, "config": config}, sort_keys=True, separators=(",", ":"))
+def digest_of(slug: str, config: dict[str, Any], fingerprint: str | None = None, version: int | None = None) -> str:
+    """Names a plan. The account and the live version are in it, so a plan reviewed against one account, or before
+    someone made another version, is refused by apply."""
+    raw = json.dumps(
+        {"slug": slug, "config": config, "account": fingerprint, "version": version},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def owner_fingerprint(base_url: str, api_key: str) -> str:
+    """Stands for the account a key reaches, for telling one account's preset from another's.
+
+    A hash of the host and the key, cut short: it can say two keys differ without being a way back to either.
+    """
+    host = urlsplit(base_url).netloc.rpartition("@")[2].lower()
+    return hashlib.sha256(f"vibonomics-preset-owner\0{host}\0{api_key}".encode()).hexdigest()[:16]
 
 
 # ---- state ---------------------------------------------------------------------------------------------------
@@ -375,13 +393,19 @@ def read_state() -> dict[str, Any]:
         return _load_state(s)
 
 
-def _update_state(patch: dict[str, Any], own: str | None = None) -> None:
+def _update_state(
+    patch: dict[str, Any], own: str | None = None, owner: dict[str, Any] | None = None, keep_owner: bool = False
+) -> None:
+    """Merge ``patch`` into the stored state. ``own`` adds a slug to ``owned`` and ``owner`` is its account record;
+    ``keep_owner`` leaves a record that is already there alone."""
     with session_scope() as s:
         row = s.get(Setting, STATE_KEY)
         state = dict(row.value) if row is not None and row.value else {}
         state.update(patch)
         if own and own not in state.get("owned", []):
             state["owned"] = [*state.get("owned", []), own]
+        if own and owner is not None and not (keep_owner and own in (state.get("owners") or {})):
+            state["owners"] = {**(state.get("owners") or {}), own: owner}
         if row is None:
             s.add(Setting(key=STATE_KEY, value=state))
         else:
@@ -396,6 +420,74 @@ def _record_run(slug: str, status: str, message: str, trigger: str, patch: dict[
 
 def is_owned(state: dict[str, Any], slug: str) -> bool:
     return slug in (state.get("owned") or [])
+
+
+def _same_instant(a: str, b: str) -> bool:
+    try:
+        return datetime.fromisoformat(a.replace("Z", "+00:00")) == datetime.fromisoformat(b.replace("Z", "+00:00"))
+    except ValueError:
+        return a == b
+
+
+def ownership(state: dict[str, Any], slug: str, fingerprint: str, remote: Remote) -> str:
+    """Whether the preset the key reaches under ``slug`` is the one Vibonomics created.
+
+    ``ours``; ``legacy`` (recorded as owned before accounts were tracked, so trusted this once); ``unknown`` (never
+    ours); ``other_account`` (made under another key or host); or ``replaced`` (the same account, but the live preset
+    carries another id or creation time than the one that was created, so it was deleted and made again).
+    """
+    if not is_owned(state, slug):
+        return "unknown"
+    record = (state.get("owners") or {}).get(slug)
+    if not isinstance(record, dict) or not record.get("fingerprint"):
+        return "legacy"
+    if record["fingerprint"] != fingerprint:
+        return "other_account"
+    if record.get("preset_id") and remote.preset_id and str(record["preset_id"]) != remote.preset_id:
+        return "replaced"
+    if (
+        record.get("created_at")
+        and remote.created_at
+        and not _same_instant(str(record["created_at"]), remote.created_at)
+    ):
+        return "replaced"
+    return "ours"
+
+
+def _owner_record(
+    fingerprint: str, version_at_create: int | None, preset_id: str | None, created_at: str | None
+) -> dict[str, Any]:
+    return {
+        "fingerprint": fingerprint,
+        "version_at_create": version_at_create,
+        "preset_id": preset_id,
+        "created_at": created_at,
+        "recorded_at": utcnow().isoformat(),
+    }
+
+
+def _claim_record(plan: Plan, state: dict[str, Any], version: int | None, data: dict[str, Any]) -> dict[str, Any]:
+    """The account record to keep once a write has gone through; an update keeps what the create recorded."""
+    preset_id, created_at = _stable_id(data)
+    if plan.action == "create":
+        return _owner_record(plan.fingerprint or "", version, preset_id, created_at)
+    old = (state.get("owners") or {}).get(plan.slug)
+    if isinstance(old, dict) and old.get("fingerprint") == plan.fingerprint:
+        return {
+            **old,
+            "preset_id": old.get("preset_id") or preset_id,
+            "created_at": old.get("created_at") or created_at,
+        }
+    return _owner_record(plan.fingerprint or "", None, preset_id, created_at)
+
+
+def _stable_id(data: dict[str, Any]) -> tuple[str | None, str | None]:
+    """The id and the creation time a preset response carries, if it carries them."""
+    raw_id, created = data.get("id"), data.get("created_at")
+    return (
+        str(raw_id) if isinstance(raw_id, str | int) and not isinstance(raw_id, bool) and str(raw_id) else None,
+        created if isinstance(created, str) and created else None,
+    )
 
 
 # ---- OpenRouter ----------------------------------------------------------------------------------------------
@@ -415,6 +507,7 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
             return None
         raise
     live = data.get("designated_version") or {}
+    preset_id, created_at = _stable_id(data)
     remote = Remote(
         slug=slug,
         version=live.get("version"),
@@ -422,6 +515,8 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
         system_prompt=live.get("system_prompt"),
         updated_at=data.get("updated_at"),
         status=str(data.get("status") or "active"),
+        preset_id=preset_id,
+        created_at=created_at,
     )
     try:
         listing = (await get_json(f"{path}/versions", headers=_auth(key), timeout=20, retries=1)).get("data") or []
@@ -552,6 +647,7 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
     )
     if not inputs.api_key:
         return _blocked(plan, "Add an OpenRouter API key under Settings, Providers first.")
+    plan.fingerprint = owner_fingerprint(inputs.base_url, inputs.api_key)
     try:
         remote = await fetch_remote(inputs.base_url, inputs.api_key, cfg.slug)
     except FetchError as exc:
@@ -563,12 +659,33 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
             f"The preset {cfg.slug} is archived on OpenRouter, and an archived preset takes no new versions. "
             "Restore it in the OpenRouter web UI, or give this one another name.",
         )
-    if remote is not None and not is_owned(inputs.state, cfg.slug):
-        return _blocked(
-            plan,
-            f"A preset called {cfg.slug} already exists on this account and Vibonomics did not create it, so it is "
-            "left alone. Give this one another name, or archive that preset in the OpenRouter web UI.",
-        )
+    if remote is not None:
+        owner = ownership(inputs.state, cfg.slug, plan.fingerprint, remote)
+        if owner == "unknown":
+            return _blocked(
+                plan,
+                f"A preset called {cfg.slug} already exists on this account and Vibonomics did not create it, so it "
+                "is left alone. Give this one another name, or archive that preset in the OpenRouter web UI.",
+            )
+        if owner == "other_account":
+            return _blocked(
+                plan,
+                f"A preset called {cfg.slug} exists on this account, but Vibonomics created that name under a "
+                "different OpenRouter key or account than the one in use now, so it is left alone. Give this one "
+                "another name, or archive that preset in the OpenRouter web UI.",
+            )
+        if owner == "replaced":
+            return _blocked(
+                plan,
+                f"The preset {cfg.slug} is no longer the one Vibonomics created: it has another id or creation time, "
+                "so it was deleted and made again. It is left alone. Give this one another name, or archive that "
+                "preset in the OpenRouter web UI.",
+            )
+        if owner == "legacy":
+            # Older state named the slug with no account. Trust it this once, and tie it to the key in use now.
+            log.info("Preset %s was recorded as ours before accounts were tracked; adopting it for this key", cfg.slug)
+            record = _owner_record(plan.fingerprint, None, remote.preset_id, remote.created_at)
+            await asyncio.to_thread(_update_state, {}, cfg.slug, record, True)
     if remote is not None and remote.system_prompt:
         return _blocked(
             plan,
@@ -627,7 +744,7 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
     plan.config = build_config(base_config, ids, [p["tag"] for p in plan.providers])
     plan.url = f"{inputs.base_url}/presets/{quote(cfg.slug, safe='')}/chat/completions"
     plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
-    plan.digest = digest_of(cfg.slug, plan.config)
+    plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None)
     plan.changes = diff_config(remote.config if remote else None, plan.config)
 
     if remote is None:
@@ -717,7 +834,8 @@ async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]
             "at": datetime.now(UTC).isoformat(),
         }
         # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
-        await asyncio.to_thread(_update_state, {"applied": applied}, cfg.slug)
+        owner = _claim_record(plan, inputs.state, version, data)
+        await asyncio.to_thread(_update_state, {"applied": applied}, cfg.slug, owner)
         await asyncio.to_thread(_record_run, cfg.slug, "applied", message, trigger)
         return plan, Applied(version=version, unsaved=unsaved, message=message)
 
