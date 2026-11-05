@@ -250,7 +250,7 @@ def create_provider(body: ProviderIn, session: Session = Depends(get_session)) -
         extra_key_enc=_apply_secret(None, body.extra_key),
     )
     session.add(p)
-    session.flush()
+    session.commit()  # before the event: a client that refetches on it must find the provider
     events.publish("providers.changed", {"id": p.id})
     return _provider_out(p, session)
 
@@ -271,7 +271,7 @@ def update_provider(provider_id: int, body: ProviderUpdate, session: Session = D
     p.api_key_enc = _apply_secret(p.api_key_enc, body.api_key)
     p.mgmt_key_enc = _apply_secret(p.mgmt_key_enc, body.mgmt_key)
     p.extra_key_enc = _apply_secret(p.extra_key_enc, body.extra_key)
-    session.flush()
+    session.commit()
     events.publish("providers.changed", {"id": p.id})
     return _provider_out(p, session)
 
@@ -282,6 +282,7 @@ def delete_provider(provider_id: int, session: Session = Depends(get_session)) -
     if p is None:
         raise HTTPException(404, "Provider not found")
     session.delete(p)
+    session.commit()
     events.publish("providers.changed", {"id": provider_id})
 
 
