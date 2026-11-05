@@ -51,15 +51,17 @@ def endpoint(
     }
 
 
-async def offer_for(model: dict, endpoints: list[dict]):
-    ctx = FetchContext(catalog=ModelsDevCatalog({}), settings=AppSettings())
+async def offer_for(
+    model: dict, endpoints: list[dict], *, lookup: httpx.Response | None = None, settings: AppSettings | None = None
+):
+    ctx = FetchContext(catalog=ModelsDevCatalog({}), settings=settings or AppSettings())
     cfg = ResolvedProvider(
         id=1, type="openrouter", name="OpenRouter", api_key=None, mgmt_key=None, base_url=None, options={}
     )
     with respx.mock:
         respx.get(f"{API}/models").mock(return_value=httpx.Response(200, json={"data": [model]}))
         respx.get(f"{API}/models/{model['id']}/endpoints").mock(
-            return_value=httpx.Response(200, json={"data": {"endpoints": endpoints}})
+            return_value=lookup or httpx.Response(200, json={"data": {"endpoints": endpoints}})
         )
         (offer,) = await OpenRouterAdapter(cfg, ctx).fetch_models()
     return offer
@@ -121,3 +123,20 @@ async def test_each_endpoint_keeps_its_own_cache_read_price_in_the_unit_of_its_i
     assert by_provider["Caches"]["cache_read"] == 0.02
     assert by_provider["Caches"]["input"] == 0.10  # same per-1M unit
     assert by_provider["Plain"]["cache_read"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_offer_says_nothing_about_endpoints_unless_the_lookup_answered():
+    # persist_offers keeps the stored endpoints only when the offer has no "endpoints" key, so the adapter has to
+    # tell "the lookup failed or was off" (no key) from "it answered with none" (an empty list).
+    model = listing("vendor/model", 0.10, 0.40)
+    failed = await offer_for(model, [], lookup=httpx.Response(500, text="down"))
+    assert "endpoints" not in failed.extra
+
+    off = AppSettings()
+    off.refresh.openrouter_endpoint_discounts = False
+    skipped = await offer_for(model, [endpoint("Plain", 0.10, 0.40)], settings=off)
+    assert "endpoints" not in skipped.extra
+
+    answered = await offer_for(model, [])
+    assert answered.extra["endpoints"] == []

@@ -237,6 +237,19 @@ def _total(i: float | None, o: float | None) -> float | None:
     return i + o
 
 
+def _extra_keeping_endpoints(stored: dict[str, Any] | None, offer: ModelOffer) -> dict[str, Any]:
+    """The offer's extra, with the endpoints the model already had when this offer carries none.
+
+    An offer has no ``endpoints`` key when the lookup failed or the discounts setting is off. Dropping them then
+    unpinned the preset until the next good refresh. A lookup that succeeded with no endpoints sets an empty list,
+    which replaces them, and a free model is never looked up, so it has no endpoints to keep.
+    """
+    known = (stored or {}).get("endpoints")
+    if "endpoints" in offer.extra or offer.is_free or not known:
+        return offer.extra
+    return {**offer.extra, "endpoints": known}
+
+
 def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
     """Upsert offers for one provider and record price/discount changes."""
     ts = now()
@@ -289,7 +302,7 @@ def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
             row.discount_until = offer.discount_until
             row.is_free = offer.is_free
             row.pricing_source = offer.pricing_source
-            row.extra = offer.extra
+            row.extra = _extra_keeping_endpoints(row.extra, offer)
             row.last_seen = ts
             row.active = True
 
