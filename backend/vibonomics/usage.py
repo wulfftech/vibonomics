@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from urllib.parse import urlsplit
 from sqlalchemy import delete, false, func, select
 from sqlalchemy.orm import Session
 
@@ -31,12 +32,15 @@ from .http import FetchError, get_json
 from .orm import ProviderConfig, UsageDay, UsageKey, utcnow
 from .provider_service import resolve
 
+from .providers.openrouter import API as OPENROUTER_API
 log = logging.getLogger(__name__)
 
 RECENT_KEY_DAYS = 31
 KEY_PAGES = 10
 KEY_CONCURRENCY = 4
 MODELS_SHOWN = 30
+# Its own budget, apart from the account's fetch: a key that never answers must not cost the rows already stored.
+KEYS_TIMEOUT = 300
 UPSTREAMS_SHOWN = 15
 
 
@@ -133,7 +137,9 @@ async def _list_keys(base_url: str, headers: dict[str, str]) -> list[KeyInfo]:
             fresh += 1
             keys[digest] = KeyInfo(
                 hash=digest,
-                name=str(k.get("name") or k.get("label") or "")[:200],
+                # Never the label: OpenRouter sends it as a masked copy of the key, and the page shows this name to
+                # visitors. A nameless key is shown as "Key <hash>" by the summary.
+                name=str(k.get("name") or "")[:200],
                 disabled=bool(k.get("disabled")),
                 last_used_at=_time(k.get("last_used_at")),
                 usage_total=_num(k.get("usage")),
@@ -146,8 +152,21 @@ async def _list_keys(base_url: str, headers: dict[str, str]) -> list[KeyInfo]:
     return list(keys.values())
 
 
-async def fetch_account(base_url: str, mgmt_key: str) -> Account:
-    """The account's activity, and each recently used key's. A key that fails is skipped and reported."""
+def _only_openrouter(base_url: str) -> None:
+    """Refuse any host but OpenRouter's before the management key is attached to a request.
+
+    The key can create and delete API keys. A provider row's Base URL override is for clients (the adapter's own
+    balance and model calls ignore it), so a gateway pointed at there must never be sent this one.
+    """
+    wanted, given = urlsplit(OPENROUTER_API), urlsplit(base_url.strip())
+    if (given.scheme.lower(), given.netloc.lower()) != (wanted.scheme, wanted.netloc.lower()):
+        where = given.hostname or "that host"
+        raise FetchError(f"The management key is sent only to {wanted.hostname}, so it was not sent to {where}.")
+
+
+async def fetch_overview(base_url: str, mgmt_key: str) -> Account:
+    """The whole account's activity and its list of keys: enough to store before the per-key fetches start."""
+    _only_openrouter(base_url)
     headers = {"Authorization": f"Bearer {mgmt_key}"}
     account = Account()
     # The whole account first: when this fails there is nothing worth storing.
@@ -157,10 +176,19 @@ async def fetch_account(base_url: str, mgmt_key: str) -> Account:
         account.keys = await _list_keys(base_url, headers)
     except FetchError as exc:
         account.errors.append(f"API keys: {exc}")
-        return account
+    return account
+
+
+async def fetch_per_key(base_url: str, mgmt_key: str, account: Account) -> None:
+    """Add each recently used key's activity to ``account.per_key``. A key that fails is skipped and reported.
 
     cutoff = utcnow() - timedelta(days=RECENT_KEY_DAYS)
+    The phase has its own ``KEYS_TIMEOUT``. When it runs out, the keys that answered are kept.
+    """
+    _only_openrouter(base_url)
+    headers = {"Authorization": f"Bearer {mgmt_key}"}
     gate = asyncio.Semaphore(KEY_CONCURRENCY)
+    recent = [k for k in account.keys if k.last_used_at and k.last_used_at >= cutoff]
 
     async def one(key: KeyInfo) -> None:
         async with gate:
@@ -173,7 +201,18 @@ async def fetch_account(base_url: str, mgmt_key: str) -> Account:
                 return
         account.per_key[key.hash] = parse_rows(data.get("data"))
 
-    await asyncio.gather(*(one(k) for k in account.keys if k.last_used_at and k.last_used_at >= cutoff))
+    try:
+        await asyncio.wait_for(asyncio.gather(*(one(k) for k in recent)), KEYS_TIMEOUT)
+    except TimeoutError:
+        account.errors.append(
+            f"per-key activity timed out after {KEYS_TIMEOUT:g}s ({len(account.per_key)} of {len(recent)} keys fetched)"
+        )
+
+
+async def fetch_account(base_url: str, mgmt_key: str) -> Account:
+    """The account's activity, and each recently used key's, in one go."""
+    account = await fetch_overview(base_url, mgmt_key)
+    await fetch_per_key(base_url, mgmt_key, account)
     return account
 
 

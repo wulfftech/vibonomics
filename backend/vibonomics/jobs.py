@@ -457,9 +457,17 @@ async def _refresh_usage(run_id: int) -> dict[str, Any]:
             return
         events.publish("refresh.progress", {"kind": "usage", "provider": cfg.name})
         try:
-            base = (resolved.base_url or "https://openrouter.ai/api/v1").rstrip("/")
-            account = await asyncio.wait_for(usage.fetch_account(base, resolved.mgmt_key), PROVIDER_TIMEOUT)
+            # Never the row's Base URL: that is for clients, and this key can create and delete API keys.
+            base = usage.OPENROUTER_API
+            account = await asyncio.wait_for(usage.fetch_overview(base, resolved.mgmt_key), PROVIDER_TIMEOUT)
+            # Stored before the per-key phase starts, so a key that never answers cannot cost the rows already here.
             stats["rows"] += await asyncio.to_thread(usage.persist, cfg.id, account)
+            try:
+                await usage.fetch_per_key(base, resolved.mgmt_key, account)
+            except Exception as exc:
+                account.errors.append(f"per-key activity: {failure_text(exc)}")
+            if account.per_key:
+                stats["rows"] += await asyncio.to_thread(usage.persist, cfg.id, usage.Account(per_key=account.per_key))
         except Exception as exc:
             text = failure_text(exc, PROVIDER_TIMEOUT)
             msg = text if text.startswith(("GET", "POST")) else f"{type(exc).__name__}: {text}"

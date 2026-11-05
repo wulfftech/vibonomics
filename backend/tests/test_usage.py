@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 import httpx
@@ -303,6 +304,54 @@ def test_totals_add_up_and_efficiency_is_cost_per_million_tokens(client):
 
 
 def test_the_daily_series_has_no_gaps(client):
+async def test_a_base_url_override_does_not_redirect_the_management_key():
+    # The adapter's own balance and model calls ignore the override; the management key, which can create and
+    # delete keys, must not be the one thing that follows it to a gateway.
+    with session_scope() as session:
+        pid = _provider(session)
+        session.get(ProviderConfig, pid).base_url = "https://gateway.example/v1"
+    with respx.mock(assert_all_called=False) as router:
+        _mock_openrouter(router)
+        gateway = router.route(host="gateway.example").mock(return_value=httpx.Response(200, json={"data": []}))
+        stats = await jobs._refresh_usage(0)
+    assert not gateway.called
+    assert (stats["ok"], stats["failed"]) == (1, 0)
+    with session_scope() as session:
+        assert len(_days(session, pid)) == 3
+
+
+def _hang_for_keys(hanging: set[str]):
+    """An /activity handler that answers the account and the fast keys at once and never answers the others."""
+
+    async def activity(request: httpx.Request) -> httpx.Response:
+        digest = request.url.params.get("api_key_hash")
+        if digest in hanging:
+            await asyncio.sleep(30)
+        data = {"hashA": KEY_A, "hashC": KEY_C}.get(digest, []) if digest else AGGREGATE
+        return httpx.Response(200, json={"data": data})
+
+    return activity
+
+
+async def test_a_slow_per_key_phase_does_not_discard_the_account_rows_that_arrived(monkeypatch):
+    # The account's rows and the keys' used to share one timeout, so a key that never answered lost them all.
+    monkeypatch.setattr(jobs, "PROVIDER_TIMEOUT", 0.5)
+    monkeypatch.setattr(usage, "KEYS_TIMEOUT", 0.5, raising=False)
+    with session_scope() as session:
+        pid = _provider(session)
+    with respx.mock(assert_all_called=False) as router:
+        _mock_openrouter(router)
+        router.get(f"{BASE}/activity").mock(side_effect=_hang_for_keys({"hashA"}))
+        stats = await jobs._refresh_usage(0)
+    assert (stats["ok"], stats["failed"], stats["partial"]) == (1, 0, 1)
+    assert "timed out" in stats["errors"][0]
+    with session_scope() as session:
+        assert len(_days(session, pid)) == 3  # the account's rows
+        assert len(_days(session, pid, "hashC")) == 1  # a key that answered in time
+        assert _days(session, pid, "hashA") == {}  # the one that did not
+        assert {k.key_hash for k in session.scalars(select(UsageKey))} == {"hashA", "hashB", "hashC"}
+
+
     daily = _get(client)["daily"]
     assert [d["date"] for d in daily] == ["2026-10-30", "2026-10-31", "2026-11-01"]
     assert [d["cost"] for d in daily] == [pytest.approx(1.5), 0, pytest.approx(2.0)]
@@ -344,7 +393,7 @@ def test_one_key_on_its_own(client):
 
 def test_accounts_are_kept_apart_and_can_be_added_together(client):
     with session_scope() as session:
-        other = _provider(session, "Second account")
+        other = _provider(session, "Second account", key="sk-or-mgmt-test-other-account")
         pid = session.scalars(select(ProviderConfig.id).where(ProviderConfig.name == "Spend test")).one()
     usage.persist(
         other,
