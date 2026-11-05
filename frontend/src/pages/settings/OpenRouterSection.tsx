@@ -245,7 +245,7 @@ export function OpenRouterSection() {
             />
             <NumberInput
               label="Providers listed"
-              description="Cheapest first, shared across the models. 1 to 10"
+              description="Cheapest first, shared across the models; each model keeps at least one. 1 to 10"
               min={1}
               max={10}
               value={presets.max_providers}

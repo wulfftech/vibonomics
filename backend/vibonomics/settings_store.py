@@ -232,7 +232,13 @@ class PresetSettings(BaseModel):
         description=f"Models listed, best value first; the rest are fallbacks. OpenRouter allows at most "
         f"{PRESET_MAX_MODELS} in a preset.",
     )
-    max_providers: int = Field(3, ge=1, le=10, description="Providers listed, cheapest first")
+    max_providers: int = Field(
+        3,
+        ge=1,
+        le=10,
+        description="Providers listed, cheapest first, shared across the models. Every model that has provider data "
+        "keeps at least one of its own, so the list can run past this when there are more models than providers.",
+    )
 
     @field_validator("slug")
     @classmethod

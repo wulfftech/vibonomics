@@ -51,7 +51,16 @@ docker compose logs -f vibonomics
   transcribed from OpenCode's docs: re-check it against them before editing.
 - **Best-value preset** (`presets.py`, `api/presets.py`): the only code that writes to an OpenRouter account.
   It writes a slug that starts with `vibonomics-` and that it created itself (`owned` in the `preset_state`
-  setting), never a preset made by hand, and never deletes (the API cannot). The prefix is added to the name
+  setting), never a preset made by hand, and never deletes (the API cannot). Ownership is tied to the key and
+  host that created it (`owners` in the same setting: a fingerprint of both, never the key) and to the preset's
+  id and creation time when the response carries them; a different key, or a preset deleted and made again, blocks
+  the plan, and a legacy `owned` slug with no record is trusted once. Every preset call goes to
+  `OpenRouterAdapter.spec.default_base_url`, never to the provider row's Base URL override. OpenRouter allows at
+  most 3 models in a preset (`PRESET_MAX_MODELS`). `allow_fallbacks` is not written, and unchanged-or-update is
+  decided on the owned keys alone, so a key OpenRouter does not keep cannot write a new version every sync. A
+  write counts only when the answer carries a version and a config, and a lost answer is read back before it is
+  called a failure. Saving the settings in the UI with writing allowed also plans from the saved settings and
+  applies that plan. The prefix is added to the name
   the operator types (`preset_slug()`), never asked for, so it can't be left off. An archived preset takes no new
   versions and blocks the plan. OpenRouter keeps no partial update, so every write is the whole config: read the
   live one, change only `model`, `models` and `provider.only`/`order`, send the rest back, then read the

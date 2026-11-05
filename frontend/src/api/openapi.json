@@ -809,7 +809,7 @@
           "providers"
         ],
         "summary": "Refresh Providers",
-        "description": "Refresh the given providers' models and balances, leaving the others alone.\n\nOne request for the whole set: the refresh jobs are serialised per kind, so two concurrent\nsingle-provider calls would silently drop the second.",
+        "description": "Refresh the given providers' models and balances, leaving the others alone.\n\nOne request for the whole set keeps it one run. A run already in progress does not drop the call: the\nproviders wait for it and are refreshed together afterwards, and the answer says ``queued``.",
         "operationId": "refresh_providers_api_providers_refresh_post",
         "requestBody": {
           "content": {
@@ -3760,7 +3760,7 @@
             "maximum": 10.0,
             "minimum": 1.0,
             "title": "Max Providers",
-            "description": "Providers listed, cheapest first",
+            "description": "Providers listed, cheapest first, shared across the models. Every model that has provider data keeps at least one of its own, so the list can run past this when there are more models than providers.",
             "default": 3
           }
         },
@@ -5476,6 +5476,11 @@
             "title": "Byok Cost",
             "description": "USD spent through the operator's own provider keys, not credits"
           },
+          "byok_tokens": {
+            "type": "integer",
+            "title": "Byok Tokens",
+            "description": "Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs"
+          },
           "cost_per_mtok": {
             "anyOf": [
               {
@@ -5486,7 +5491,7 @@
               }
             ],
             "title": "Cost Per Mtok",
-            "description": "USD per million tokens: how efficiently the spend turned into work"
+            "description": "USD of credits per million tokens billed in credits; own-key traffic is left out of both sides"
           },
           "cost_per_request": {
             "anyOf": [
@@ -5497,7 +5502,8 @@
                 "type": "null"
               }
             ],
-            "title": "Cost Per Request"
+            "title": "Cost Per Request",
+            "description": "USD of credits per request billed in credits"
           },
           "cache_hit": {
             "anyOf": [
@@ -5522,6 +5528,7 @@
           "cached_tokens",
           "tokens",
           "byok_cost",
+          "byok_tokens",
           "cost_per_mtok",
           "cost_per_request",
           "cache_hit"
@@ -5567,6 +5574,11 @@
             "title": "Byok Cost",
             "description": "USD spent through the operator's own provider keys, not credits"
           },
+          "byok_tokens": {
+            "type": "integer",
+            "title": "Byok Tokens",
+            "description": "Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs"
+          },
           "cost_per_mtok": {
             "anyOf": [
               {
@@ -5577,7 +5589,7 @@
               }
             ],
             "title": "Cost Per Mtok",
-            "description": "USD per million tokens: how efficiently the spend turned into work"
+            "description": "USD of credits per million tokens billed in credits; own-key traffic is left out of both sides"
           },
           "cost_per_request": {
             "anyOf": [
@@ -5588,7 +5600,8 @@
                 "type": "null"
               }
             ],
-            "title": "Cost Per Request"
+            "title": "Cost Per Request",
+            "description": "USD of credits per request billed in credits"
           },
           "cache_hit": {
             "anyOf": [
@@ -5617,6 +5630,7 @@
           "cached_tokens",
           "tokens",
           "byok_cost",
+          "byok_tokens",
           "cost_per_mtok",
           "cost_per_request",
           "cache_hit",
@@ -5663,6 +5677,11 @@
             "title": "Byok Cost",
             "description": "USD spent through the operator's own provider keys, not credits"
           },
+          "byok_tokens": {
+            "type": "integer",
+            "title": "Byok Tokens",
+            "description": "Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs"
+          },
           "cost_per_mtok": {
             "anyOf": [
               {
@@ -5673,7 +5692,7 @@
               }
             ],
             "title": "Cost Per Mtok",
-            "description": "USD per million tokens: how efficiently the spend turned into work"
+            "description": "USD of credits per million tokens billed in credits; own-key traffic is left out of both sides"
           },
           "cost_per_request": {
             "anyOf": [
@@ -5684,7 +5703,8 @@
                 "type": "null"
               }
             ],
-            "title": "Cost Per Request"
+            "title": "Cost Per Request",
+            "description": "USD of credits per request billed in credits"
           },
           "cache_hit": {
             "anyOf": [
@@ -5738,6 +5758,7 @@
           "cached_tokens",
           "tokens",
           "byok_cost",
+          "byok_tokens",
           "cost_per_mtok",
           "cost_per_request",
           "cache_hit",
@@ -5843,6 +5864,11 @@
             "title": "Byok Cost",
             "description": "USD spent through the operator's own provider keys, not credits"
           },
+          "byok_tokens": {
+            "type": "integer",
+            "title": "Byok Tokens",
+            "description": "Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs"
+          },
           "cost_per_mtok": {
             "anyOf": [
               {
@@ -5853,7 +5879,7 @@
               }
             ],
             "title": "Cost Per Mtok",
-            "description": "USD per million tokens: how efficiently the spend turned into work"
+            "description": "USD of credits per million tokens billed in credits; own-key traffic is left out of both sides"
           },
           "cost_per_request": {
             "anyOf": [
@@ -5864,7 +5890,8 @@
                 "type": "null"
               }
             ],
-            "title": "Cost Per Request"
+            "title": "Cost Per Request",
+            "description": "USD of credits per request billed in credits"
           },
           "cache_hit": {
             "anyOf": [
@@ -5893,6 +5920,7 @@
           "cached_tokens",
           "tokens",
           "byok_cost",
+          "byok_tokens",
           "cost_per_mtok",
           "cost_per_request",
           "cache_hit",
@@ -6505,6 +6533,12 @@
             "title": "Alternatives",
             "description": "Also suggest up to this many models the request did not name, from the same providers, that score at least as well as the pick and give better value (with no pick, the best values at or above min_score). Free offers are left out.",
             "default": 0
+          },
+          "include_client_restricted": {
+            "type": "boolean",
+            "title": "Include Client Restricted",
+            "description": "Rank, and possibly pick, a model that only one client may call (the OpenCode Console's free tier answers 403 to every other client). Off by default: a program using this API is not that client.",
+            "default": false
           }
         },
         "type": "object",
@@ -6784,6 +6818,18 @@
             "type": "boolean",
             "title": "Price Drop",
             "default": false
+          },
+          "client_restricted": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Restricted",
+            "description": "The only client that may call this model (`opencode` for the OpenCode Console's free tier); such a model is not eligible unless the request sets include_client_restricted"
           },
           "batch_discount": {
             "anyOf": [

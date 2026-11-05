@@ -354,8 +354,8 @@ export interface paths {
          * Refresh Providers
          * @description Refresh the given providers' models and balances, leaving the others alone.
          *
-         *     One request for the whole set: the refresh jobs are serialised per kind, so two concurrent
-         *     single-provider calls would silently drop the second.
+         *     One request for the whole set keeps it one run. A run already in progress does not drop the call: the
+         *     providers wait for it and are refreshed together afterwards, and the answer says ``queued``.
          */
         post: operations["refresh_providers_api_providers_refresh_post"];
         delete?: never;
@@ -1427,7 +1427,7 @@ export interface components {
             max_models: number;
             /**
              * Max Providers
-             * @description Providers listed, cheapest first
+             * @description Providers listed, cheapest first, shared across the models. Every model that has provider data keeps at least one of its own, so the list can run past this when there are more models than providers.
              * @default 3
              */
             max_providers: number;
@@ -1987,11 +1987,19 @@ export interface components {
              */
             byok_cost: number;
             /**
+             * Byok Tokens
+             * @description Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs
+             */
+            byok_tokens: number;
+            /**
              * Cost Per Mtok
-             * @description USD per million tokens: how efficiently the spend turned into work
+             * @description USD of credits per million tokens billed in credits; own-key traffic is left out of both sides
              */
             cost_per_mtok: number | null;
-            /** Cost Per Request */
+            /**
+             * Cost Per Request
+             * @description USD of credits per request billed in credits
+             */
             cost_per_request: number | null;
             /**
              * Cache Hit
@@ -2033,11 +2041,19 @@ export interface components {
              */
             byok_cost: number;
             /**
+             * Byok Tokens
+             * @description Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs
+             */
+            byok_tokens: number;
+            /**
              * Cost Per Mtok
-             * @description USD per million tokens: how efficiently the spend turned into work
+             * @description USD of credits per million tokens billed in credits; own-key traffic is left out of both sides
              */
             cost_per_mtok: number | null;
-            /** Cost Per Request */
+            /**
+             * Cost Per Request
+             * @description USD of credits per request billed in credits
+             */
             cost_per_request: number | null;
             /**
              * Cache Hit
@@ -2081,11 +2097,19 @@ export interface components {
              */
             byok_cost: number;
             /**
+             * Byok Tokens
+             * @description Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs
+             */
+            byok_tokens: number;
+            /**
              * Cost Per Mtok
-             * @description USD per million tokens: how efficiently the spend turned into work
+             * @description USD of credits per million tokens billed in credits; own-key traffic is left out of both sides
              */
             cost_per_mtok: number | null;
-            /** Cost Per Request */
+            /**
+             * Cost Per Request
+             * @description USD of credits per request billed in credits
+             */
             cost_per_request: number | null;
             /**
              * Cache Hit
@@ -2156,11 +2180,19 @@ export interface components {
              */
             byok_cost: number;
             /**
+             * Byok Tokens
+             * @description Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs
+             */
+            byok_tokens: number;
+            /**
              * Cost Per Mtok
-             * @description USD per million tokens: how efficiently the spend turned into work
+             * @description USD of credits per million tokens billed in credits; own-key traffic is left out of both sides
              */
             cost_per_mtok: number | null;
-            /** Cost Per Request */
+            /**
+             * Cost Per Request
+             * @description USD of credits per request billed in credits
+             */
             cost_per_request: number | null;
             /**
              * Cache Hit
@@ -2383,6 +2415,12 @@ export interface components {
              * @default 0
              */
             alternatives: number;
+            /**
+             * Include Client Restricted
+             * @description Rank, and possibly pick, a model that only one client may call (the OpenCode Console's free tier answers 403 to every other client). Off by default: a program using this API is not that client.
+             * @default false
+             */
+            include_client_restricted: boolean;
         };
         /** ValueResponse */
         ValueResponse: {
@@ -2468,6 +2506,11 @@ export interface components {
              * @default false
              */
             price_drop: boolean;
+            /**
+             * Client Restricted
+             * @description The only client that may call this model (`opencode` for the OpenCode Console's free tier); such a model is not eligible unless the request sets include_client_restricted
+             */
+            client_restricted?: string | null;
             /**
              * Batch Discount
              * @description The provider's own batch API discount, for a direct offer

@@ -23,6 +23,7 @@ function bucket(over: Partial<SpendBucket> = {}): SpendBucket {
     cached_tokens: 0,
     tokens: 0,
     byok_cost: 0,
+    byok_tokens: 0,
     cost_per_mtok: null,
     cost_per_request: null,
     cache_hit: null,
