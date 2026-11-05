@@ -326,8 +326,11 @@ def merge_endpoints(per_model: list[tuple[str, list[dict[str, Any]]]], limit: in
     """One provider list for several models: each model's cheapest endpoint in turn, then its next, up to ``limit``.
 
     An endpoint two models share is listed once and names both. Round-robin, so the first model cannot use every slot.
+    ``only`` is one list for every model in the preset, so a model with endpoints always keeps one of its own, even
+    where that takes the list past ``limit``: a model with none listed could never be served.
     """
     merged: dict[str, dict[str, Any]] = {}
+    served: set[str] = set()
     for rank in range(max((len(eps) for _model, eps in per_model), default=0)):
         for model_id, eps in per_model:
             if rank >= len(eps):
@@ -336,8 +339,10 @@ def merge_endpoints(per_model: list[tuple[str, list[dict[str, Any]]]], limit: in
             if tag in merged:
                 if model_id not in merged[tag]["models"]:
                     merged[tag]["models"].append(model_id)
-            elif len(merged) < limit:
+                served.add(model_id)
+            elif len(merged) < limit or model_id not in served:
                 merged[tag] = {**eps[rank], "models": [model_id]}
+                served.add(model_id)
     return list(merged.values())
 
 
@@ -750,19 +755,32 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
 
     provider_block = (base_config or {}).get("provider")
     provider_block = provider_block if isinstance(provider_block, dict) else {}
-    plan.providers = merge_endpoints(
-        [
-            (c.model_id, choose_endpoints(c.endpoints, c.cache_read, inputs.task, provider_block, cfg.max_providers))
-            for c in plan.picks
-        ],
-        cfg.max_providers,
-    )
-    if not plan.providers:
+    per_pick = [
+        (c.model_id, choose_endpoints(c.endpoints, c.cache_read, inputs.task, provider_block, cfg.max_providers))
+        for c in plan.picks
+    ]
+    bare = [c.name for c, (_id, eps) in zip(plan.picks, per_pick, strict=True) if not eps]
+    if len(bare) == len(plan.picks):
         plan.warnings.append(
             "No provider data for these models (or none that passes the preset's quantization and ignore filters), "
             "so the preset names no provider and OpenRouter routes as it decides. Provider data comes from the "
             "'Check OpenRouter endpoint discounts' refresh option."
         )
+    elif bare:
+        # `only` is shared by every listed model, so one model with no provider in it could never be served.
+        plan.warnings.append(
+            f"{', '.join(bare)} {'has' if len(bare) == 1 else 'have'} no provider data (or none that passes the "
+            "preset's quantization and ignore filters), and a provider list would keep "
+            f"{'it' if len(bare) == 1 else 'them'} from being served, so the preset names no provider and OpenRouter "
+            "routes as it decides. Provider data comes from the 'Check OpenRouter endpoint discounts' refresh option."
+        )
+    else:
+        plan.providers = merge_endpoints(per_pick, cfg.max_providers)
+        if len(plan.providers) > cfg.max_providers:
+            plan.warnings.append(
+                f"Each of the {len(plan.picks)} models keeps a provider of its own, so the preset lists "
+                f"{len(plan.providers)} providers, more than the limit of {cfg.max_providers}."
+            )
     unseen = [k for k in UNSEEN_FILTERS if k in provider_block]
     if unseen:
         plan.warnings.append(

@@ -680,6 +680,18 @@ def test_the_first_model_cannot_take_every_provider_slot():
     assert merge_endpoints([], 5) == []
 
 
+def test_every_model_that_has_endpoints_is_guaranteed_one_of_its_own():
+    per_model = [("m1", [_ep("a"), _ep("b")]), ("m2", [_ep("c"), _ep("d")]), ("m3", [_ep("e"), _ep("f")])]
+    merged = merge_endpoints(per_model, limit=2)
+    assert [e["tag"] for e in merged] == ["a", "c", "e"]  # three, though the limit is two: m3 would have none
+    assert [e["models"] for e in merged] == [["m1"], ["m2"], ["m3"]]
+    # once each has one, the limit holds again
+    assert [e["tag"] for e in merge_endpoints(per_model, limit=4)] == ["a", "c", "e", "b"]
+    # a shared endpoint serves both and takes one slot
+    shared = merge_endpoints([("m1", [_ep("a"), _ep("b")]), ("m2", [_ep("a"), _ep("c")])], limit=1)
+    assert [(e["tag"], e["models"]) for e in shared] == [("a", ["m1", "m2"])]
+
+
 def test_a_plan_with_several_models_lists_them_and_their_providers(client):
     _settings(max_models=3, max_providers=4)
     with respx.mock(assert_all_called=False) as router:
@@ -691,10 +703,35 @@ def test_a_plan_with_several_models_lists_them_and_their_providers(client):
     assert plan["config"]["models"] == ["acme/best", "acme/steady", "acme/pricey"]
     assert plan["request"]["body"]["models"] == plan["config"]["models"]
     assert plan["reason"] == f"Creates {SLUG} with 3 models, led by best."
-    # only acme/best has endpoint data, so the providers are its four cheapest
-    assert [p["tag"] for p in plan["providers"]] == ["novita/fp4", "deepinfra/fp8", "wafer/bf16", "slow/fp8"]
-    assert all(p["models"] == ["acme/best"] for p in plan["providers"])
     assert plan["runners_up"] == []
+    # only acme/best has endpoint data, and a provider list shared by every model would leave the other two with no
+    # provider they can be served by, so no list is written at all
+    assert plan["providers"] == []
+    assert "provider" not in plan["config"]
+    assert any("steady, pricey" in w and "no provider data" in w for w in plan["warnings"])
+
+
+def _give_endpoints(model_id: str, specs: list[tuple[str, float, float]]) -> None:
+    rows = [
+        {"provider": tag.split("/")[0], "tag": tag, "quantization": "fp8", "input": i, "output": o, "uptime_1d": 99}
+        for tag, i, o in specs
+    ]
+    with session_scope() as session:
+        session.query(Model).filter_by(model_id=model_id).one().extra = {"endpoints": rows}
+
+
+def test_every_model_in_the_preset_keeps_a_provider_of_its_own_even_past_the_limit(client):
+    _settings(max_models=3, max_providers=2)
+    _give_endpoints("acme/steady", [("steady-a/fp8", 0.1, 0.4), ("steady-b/fp8", 0.2, 0.5)])
+    _give_endpoints("acme/pricey", [("pricey-a/fp8", 1.0, 4.0), ("pricey-b/fp8", 2.0, 5.0)])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    tags = ["novita/fp4", "steady-a/fp8", "pricey-a/fp8"]
+    assert [p["tag"] for p in plan["providers"]] == tags
+    assert [p["models"] for p in plan["providers"]] == [["acme/best"], ["acme/steady"], ["acme/pricey"]]
+    assert plan["config"]["provider"] == {"only": tags, "order": tags}
+    assert any("more than the limit of 2" in w for w in plan["warnings"])
 
 
 def test_growing_the_lineup_says_which_models_were_added(client):
