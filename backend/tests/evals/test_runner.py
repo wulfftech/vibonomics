@@ -504,6 +504,25 @@ async def test_a_model_that_only_its_own_client_may_call_is_not_attempted(monkey
     assert CountingClient.model_requests == 0
 
 
+@pytest.mark.asyncio
+async def test_the_finished_event_carries_the_status_that_was_stored(monkeypatch):
+    sent: list[tuple[str, dict]] = []
+    monkeypatch.setattr(runner, "publish", lambda event, data=None: sent.append((event, data)))
+    monkeypatch.setattr(runner, "LLMClient", CountingClient)
+
+    # Nothing is attempted for a model only its own client may call, so no task result is produced and the run fails.
+    failed_id, _ = _seed(task_ids=("tool-pick",), model_extra={"client_restricted": "opencode"})
+    await runner.execute(failed_id)
+    done_id, _ = _seed(task_ids=("instr-json",))
+    await runner.execute(done_id)
+
+    with session_scope() as session:
+        stored = {i: session.get(EvalRun, i).status for i in (failed_id, done_id)}
+    finished = {data["run_id"]: data["status"] for event, data in sent if event == "evals.finished"}
+    assert stored == {failed_id: "failed", done_id: "done"}
+    assert finished == stored
+
+
 class MalformedUrlToolsClient(FakeClient):
     """A base URL with a typo: httpx raises its own error, which is not a ChatError."""
 

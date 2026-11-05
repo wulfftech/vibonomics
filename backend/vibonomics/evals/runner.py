@@ -342,20 +342,17 @@ async def _run(run_id: int) -> None:
         if judge_client is not None:
             await judge_client.aclose()
 
+    status = "cancelled" if cancelled else "failed" if done == 0 else "done"
     with session_scope() as session:
         run = session.get(EvalRun, run_id)
         if run is not None:
             run.summary = summary
             run.progress = {**(run.progress or {}), "done": done, "total": total, "current": None}
-            if cancelled:
-                run.status = "cancelled"
-            elif done == 0:
-                run.status = "failed"
+            run.status = status
+            if status == "failed":
                 run.error = run.error or "No task results were produced."
-            else:
-                run.status = "done"
             run.finished_at = datetime.now(UTC)
-    publish("evals.finished", {"run_id": run_id, "status": "cancelled" if cancelled else "done"})
+    publish("evals.finished", {"run_id": run_id, "status": status})
 
 
 def _update_progress(run_id: int, done: int, total: int, current: str | None) -> None:
