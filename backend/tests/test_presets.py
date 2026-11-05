@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -1109,3 +1110,145 @@ def test_an_update_whose_answer_carries_no_version_does_not_count_as_written(cli
     assert response.status_code == 502
     state = client.get("/api/presets/state").json()
     assert state["last_status"] == "failed" and state["version"] is None
+
+
+# ---- a write whose answer was lost -----------------------------------------------------------------------------
+
+
+class _Account:
+    """An OpenRouter account that has the preset only once the write has gone through, whatever the answer was."""
+
+    def __init__(self, router: respx.Router, before: dict[str, Any] | None, version: int = 1, **ids: Any) -> None:
+        self.before, self.version, self.ids = before, version, ids
+        self.written: dict[str, Any] | None = None
+        self.reads = router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=self._get)
+        router.get(f"{BASE}/presets/{SLUG}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+
+    def take(self, request: httpx.Request) -> None:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        self.written, self.version = sent, self.version + (0 if self.before is None else 1)
+
+    def _get(self, request: httpx.Request) -> httpx.Response:
+        config = self.written if self.written is not None else self.before
+        if config is None:
+            return httpx.Response(404, json={"error": {"message": "Preset not found"}})
+        return httpx.Response(200, json=_preset(SLUG, config, version=self.version, **self.ids))
+
+
+def _lost_after_taking(account: _Account, how):
+    def post(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        return how(request)
+
+    return post
+
+
+def _timeout(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("read timed out", request=request)
+
+
+def test_a_create_whose_answer_never_arrived_is_found_by_reading_it_back_and_claimed(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="p-1", created_at="2026-11-05T00:00:00Z")
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, _timeout)
+        )
+        plan = _plan(client)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        assert post.call_count == 1  # never retried
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["applied"] is True and body["version"] == 1 and body["unsaved"] == []
+    assert "read back" in body["message"]
+    state = _state()
+    assert state["owned"] == [SLUG]
+    assert state["owners"][SLUG]["fingerprint"] == owner_fingerprint(BASE, KEY)
+    assert state["owners"][SLUG]["preset_id"] == "p-1"
+    assert client.get("/api/presets/state").json()["last_status"] == "applied"
+    # the next plan is a normal one, not a block on a preset that "Vibonomics did not create"
+    with respx.mock(assert_all_called=False) as router:
+        _Account(router, account.written, version=1, id="p-1", created_at="2026-11-05T00:00:00Z")
+        assert _plan(client)["action"] == "unchanged"
+
+
+def test_a_body_that_is_not_json_is_read_back_the_same_way(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, lambda request: httpx.Response(200, text="<html>gateway</html>"))
+        )
+        plan = _plan(client)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+    assert response.status_code == 200 and response.json()["applied"] is True
+    assert _state()["owned"] == [SLUG]
+
+
+def test_an_update_whose_answer_was_lost_is_reported_as_applied_when_the_preset_has_the_plan(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, {"model": "acme/steady"}, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, lambda request: httpx.Response(504, text="gateway timeout"))
+        )
+        plan = _plan(client)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+    assert response.status_code == 200, response.text
+    assert response.json()["applied"] is True and response.json()["version"] == 3
+    assert client.get("/api/presets/state").json()["last_status"] == "applied"
+
+
+def test_a_lost_answer_is_a_failure_when_the_preset_is_not_what_the_plan_wrote(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    with respx.mock(assert_all_called=False) as router:
+        # the preset is not there when the apply plans, and someone has made one of their own by the time it re-reads
+        reads = iter([404, 200])
+
+        def get(request: httpx.Request) -> httpx.Response:
+            if next(reads) == 404:
+                return httpx.Response(404, json={"error": {"message": "Preset not found"}})
+            return httpx.Response(200, json=_preset(SLUG, {"model": "by/hand"}, version=1))
+
+        router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=get)
+        router.get(f"{BASE}/presets/{SLUG}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_timeout)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+    assert response.status_code == 502
+    assert "did not take the update" in response.json()["detail"]
+    assert client.get("/api/presets/state").json()["owned"] == []
+    assert client.get("/api/presets/state").json()["last_status"] == "failed"
+
+
+def test_a_refusal_is_not_read_back(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, lambda request: httpx.Response(400, json={"error": "bad"}))
+        )
+        plan = _plan(client)
+        reads = account.reads.call_count
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        assert account.reads.call_count == reads + 1  # the apply's own plan, and no read after the 400
+    assert response.status_code == 502
+
+
+async def test_a_write_that_is_cancelled_is_still_claimed_when_it_went_through(client, monkeypatch):
+    from vibonomics import http, presets
+
+    async def cancelled(method: str, url: str, **kwargs: Any):
+        account.take(httpx.Request(method, url, content=json.dumps(kwargs["json_body"]).encode()))
+        raise asyncio.CancelledError
+
+    await http.close_client()
+    try:
+        with respx.mock(assert_all_called=False) as router:
+            account = _Account(router, None, id="p-1")
+            monkeypatch.setattr(presets, "request", cancelled)
+            with pytest.raises(asyncio.CancelledError):
+                await presets.apply(None, "schedule")
+    finally:
+        await http.close_client()
+    assert _state()["owned"] == [SLUG]
+    assert _state()["last"]["status"] == "applied"

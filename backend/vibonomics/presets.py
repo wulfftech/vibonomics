@@ -467,9 +467,10 @@ def _owner_record(
     }
 
 
-def _claim_record(plan: Plan, state: dict[str, Any], version: int | None, data: dict[str, Any]) -> dict[str, Any]:
+def _claim_record(
+    plan: Plan, state: dict[str, Any], version: int | None, preset_id: str | None, created_at: str | None
+) -> dict[str, Any]:
     """The account record to keep once a write has gone through; an update keeps what the create recorded."""
-    preset_id, created_at = _stable_id(data)
     if plan.action == "create":
         return _owner_record(plan.fingerprint or "", version, preset_id, created_at)
     old = (state.get("owners") or {}).get(plan.slug)
@@ -832,14 +833,23 @@ def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any
 
 
 async def _settle(
-    plan: Plan, inputs: Inputs, trigger: str, data: dict[str, Any], version: Any, stored: dict[str, Any]
+    plan: Plan,
+    inputs: Inputs,
+    trigger: str,
+    version: Any,
+    stored: dict[str, Any],
+    preset_id: str | None,
+    created_at: str | None,
+    read_back: bool = False,
 ) -> Applied:
-    """Record a write that OpenRouter confirmed: the slug is ours from here on, and the run is logged."""
+    """Record a write that went through: the slug is ours from here on, and the run is logged."""
     assert plan.config is not None
     slug = plan.slug
     unsaved = unsaved_keys(plan.config, stored)
     verb = "Created" if plan.action == "create" else "Updated"
     message = f"{verb} {slug} as version {version}: {plan.reason}"
+    if read_back:
+        message += " OpenRouter's answer did not arrive, so this was read back from the preset."
     if unsaved:
         message += f" OpenRouter did not keep: {', '.join(unsaved)}."
     applied = {
@@ -849,10 +859,28 @@ async def _settle(
         "at": datetime.now(UTC).isoformat(),
     }
     # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
-    owner = _claim_record(plan, inputs.state, version, data)
+    owner = _claim_record(plan, inputs.state, version, preset_id, created_at)
     await asyncio.to_thread(_update_state, {"applied": applied}, slug, owner)
     await asyncio.to_thread(_record_run, slug, "applied", message, trigger)
     return Applied(version=version, unsaved=unsaved, message=message)
+
+
+async def _read_back(plan: Plan, inputs: Inputs, trigger: str) -> Applied | None:
+    """After a write whose outcome is unknown, claim it if the preset now holds exactly what the plan sent.
+
+    OpenRouter may have made the version and lost the answer (a timeout, a body that is not JSON, a gateway error).
+    Without this the preset exists, is not recorded as ours, and every later plan is blocked.
+    """
+    assert inputs.api_key is not None
+    try:
+        remote = await fetch_remote(inputs.base_url, inputs.api_key, plan.slug)
+    except FetchError:
+        return None
+    if remote is None or not remote.readable or remote.config != plan.config:
+        return None
+    return await _settle(
+        plan, inputs, trigger, remote.version, remote.config, remote.preset_id, remote.created_at, True
+    )
 
 
 async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]:
@@ -880,11 +908,23 @@ async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]
                 retries=0,  # a retried create would leave a second version behind
             )
             data, version, stored = _confirmed(resp.json(), cfg.slug)
+        except asyncio.CancelledError:
+            # Whoever cancelled has stopped waiting, but OpenRouter may have taken the write. Claim it if so, or the
+            # preset it made would be blocked as someone else's.
+            try:
+                await asyncio.wait_for(_read_back(plan, inputs, trigger), 15)
+            except Exception:  # best effort: the cancellation goes on whatever happens here
+                log.warning("Could not check whether the cancelled preset write for %s went through", cfg.slug)
+            raise
         except (FetchError, ValueError, _Unconfirmed) as exc:
+            # A refusal (4xx) is final. Anything else may have been written with the answer lost on the way back.
+            final = isinstance(exc, FetchError) and exc.status is not None and exc.status < 500
+            if not final and (recovered := await _read_back(plan, inputs, trigger)) is not None:
+                return plan, recovered
             message = scrub_secrets(f"OpenRouter did not take the update: {exc}", headers)
             await asyncio.to_thread(_record_run, cfg.slug, "failed", message, trigger)
             raise PresetWriteError(message) from exc
-        return plan, await _settle(plan, inputs, trigger, data, version, stored)
+        return plan, await _settle(plan, inputs, trigger, version, stored, *_stable_id(data))
 
 
 async def sync(trigger: str = "schedule") -> None:
