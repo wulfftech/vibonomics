@@ -1306,8 +1306,12 @@
                   "type": "null"
                 }
               ],
+              "description": "Send the token in the X-Vibonomics-Token header instead.",
+              "deprecated": true,
               "title": "Token"
-            }
+            },
+            "description": "Send the token in the X-Vibonomics-Token header instead.",
+            "deprecated": true
           },
           {
             "name": "x-vibonomics-token",

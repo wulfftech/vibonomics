@@ -3499,6 +3499,10 @@ export interface operations {
     ingest_claude_api_subscription_ingest_claude_post: {
         parameters: {
             query?: {
+                /**
+                 * @deprecated
+                 * @description Send the token in the X-Vibonomics-Token header instead.
+                 */
                 token?: string | null;
             };
             header?: {
