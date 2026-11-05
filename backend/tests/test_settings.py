@@ -148,6 +148,17 @@ def test_a_stored_value_that_no_longer_validates_falls_back_without_losing_the_r
     assert loaded.subscriptions.claude_ingest_token_enc == "encrypted-token"
 
 
+def test_a_preset_lineup_saved_under_the_old_limit_of_ten_loads_as_three_not_one():
+    stored = AppSettings().model_dump(mode="json")
+    stored["presets"].update({"max_models": 7, "slug": "vibonomics-keep", "max_providers": 2})
+    _store(stored)
+
+    with session_scope() as s:
+        loaded = load_settings(s)
+
+    assert (loaded.presets.max_models, loaded.presets.slug, loaded.presets.max_providers) == (3, "vibonomics-keep", 2)
+
+
 def test_a_stored_document_that_is_not_settings_at_all_loads_as_the_defaults():
     _store({"refresh": 5, "scoring": "nope", "general": ["x"]})
 

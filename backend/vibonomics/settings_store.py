@@ -154,6 +154,9 @@ class GeneralSettings(BaseModel):
 
 PRESET_SLUG_PREFIX = "vibonomics-"
 PRESET_SLUG_MAX = 64
+# OpenRouter answers HTTP 400 "A preset can have at most 3 models" to a longer list.
+PRESET_MAX_MODELS = 3
+PRESET_MIN_INTERVAL_HOURS = 0.5
 _TEMPLATE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -184,7 +187,12 @@ class PresetSettings(BaseModel):
 
     enabled: bool = Field(False, description="Let Vibonomics create and update the preset below on OpenRouter")
     auto_apply: bool = Field(False, description="Also update the preset on a schedule, with no one watching")
-    interval_hours: float = Field(24, ge=1, le=168, description="Hours between scheduled updates")
+    interval_hours: float = Field(
+        24,
+        ge=PRESET_MIN_INTERVAL_HOURS,
+        le=168,
+        description="Hours between scheduled updates; 0.5 is every thirty minutes",
+    )
     slug: str = Field(
         f"{PRESET_SLUG_PREFIX}best-value",
         description=f"The preset's name. {PRESET_SLUG_PREFIX} is put in front of it if it is not already there.",
@@ -217,7 +225,13 @@ class PresetSettings(BaseModel):
         le=100,
         description="A new model replaces one already in the preset only when it gives this much more value",
     )
-    max_models: int = Field(1, ge=1, le=10, description="Models listed, best value first; the rest are fallbacks")
+    max_models: int = Field(
+        1,
+        ge=1,
+        le=PRESET_MAX_MODELS,
+        description=f"Models listed, best value first; the rest are fallbacks. OpenRouter allows at most "
+        f"{PRESET_MAX_MODELS} in a preset.",
+    )
     max_providers: int = Field(3, ge=1, le=10, description="Providers listed, cheapest first")
 
     @field_validator("slug")
@@ -273,6 +287,15 @@ def _drop(data: Any, loc: tuple[int | str, ...]) -> bool:
     return False
 
 
+def _clamp_preset_models(data: Any) -> None:
+    """A lineup saved when the limit was ten becomes three, not the default of one a rejected value would get."""
+    presets = data.get("presets") if isinstance(data, dict) else None
+    listed = presets.get("max_models") if isinstance(presets, dict) else None
+    if isinstance(listed, int) and not isinstance(listed, bool) and listed > PRESET_MAX_MODELS:
+        log.warning("Stored presets.max_models is %s; OpenRouter allows %s, using that", listed, PRESET_MAX_MODELS)
+        presets["max_models"] = PRESET_MAX_MODELS
+
+
 def _validate_stored(raw: Any) -> AppSettings:
     """The stored settings, minus any value that this release no longer accepts.
 
@@ -280,6 +303,7 @@ def _validate_stored(raw: Any) -> AppSettings:
     starting, nor take the keys and token stored beside it down with it. Each one is logged and reset to its default.
     """
     data = copy.deepcopy(raw)
+    _clamp_preset_models(data)
     for _ in range(100):
         try:
             return AppSettings.model_validate(data)

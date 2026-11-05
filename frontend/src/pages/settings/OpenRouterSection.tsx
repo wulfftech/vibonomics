@@ -28,6 +28,9 @@ const DIMENSIONS = [
   { value: 'agentic', label: 'Agentic' },
 ];
 
+/** OpenRouter refuses a preset that lists more models than this (HTTP 400). */
+const MAX_MODELS = 3;
+
 const TEMPLATE_HELP = 'Its tools, reasoning and provider filters are copied into a new preset. Read only.';
 
 /** The account's own presets to start from. Falls back to typing a slug when OpenRouter cannot be asked. */
@@ -108,11 +111,7 @@ export function OpenRouterSection() {
 
   // Unsaved changes are previewed as they stand, so they can be tried before they are kept.
   const preview = () => plan.mutate(dirty ? presets : undefined);
-  const applyPlan = () => {
-    const digest = plan.data?.digest;
-    if (!digest) {
-      return;
-    }
+  const send = (digest: string) => {
     apply.mutate(digest, {
       onSuccess: (result) => {
         notifications.show({
@@ -128,6 +127,28 @@ export function OpenRouterSection() {
       },
     });
   };
+  const applyPlan = () => {
+    const digest = plan.data?.digest;
+    if (digest) {
+      send(digest);
+    }
+  };
+  // Saving with writing allowed sends the update right away, so a change reaches OpenRouter without a second step.
+  // It plans from what was just saved, and sends nothing when that plan has nothing to write.
+  const pushSaved = () =>
+    plan.mutate(undefined, {
+      onSuccess: (fresh) => {
+        if (fresh.draft) {
+          return;
+        }
+        if (!['create', 'update'].includes(fresh.action) || !fresh.digest) {
+          notifications.show({ message: fresh.reason, color: fresh.action === 'blocked' ? 'yellow' : 'blue' });
+          return;
+        }
+        send(fresh.digest);
+      },
+      onError: (error) => notifications.show({ message: error.message, color: 'red' }),
+    });
 
   const current = plan.data;
   // Apply plans from what is saved, so only a plan made from saved settings can be applied.
@@ -216,11 +237,11 @@ export function OpenRouterSection() {
             />
             <NumberInput
               label="Models listed"
-              description="Best value first; the rest are fallbacks. 1 to 10"
+              description="Best value first; the rest are fallbacks. 1 to 3, OpenRouter's limit"
               min={1}
-              max={10}
+              max={MAX_MODELS}
               value={presets.max_models}
-              onChange={(next) => set({ max_models: Math.min(10, Math.max(1, Math.round(toNumber(next, 1)))) })}
+              onChange={(next) => set({ max_models: Math.min(MAX_MODELS, Math.max(1, Math.round(toNumber(next, 1)))) })}
             />
             <NumberInput
               label="Providers listed"
@@ -293,9 +314,12 @@ export function OpenRouterSection() {
             />
             <NumberInput
               label="Every"
-              w={140}
-              min={1}
+              description="0.5 is every 30 minutes"
+              w={200}
+              min={0.5}
               max={168}
+              step={0.5}
+              decimalScale={1}
               suffix=" h"
               disabled={!presets.enabled || !presets.auto_apply}
               value={presets.interval_hours}
@@ -304,7 +328,17 @@ export function OpenRouterSection() {
           </Group>
         </Stack>
       </Card>
-      <SaveBar dirty={dirty && !nameMissing} saving={saving} onReset={reset} onSave={() => submit()} />
+      {dirty && presets.enabled && (
+        <Text size="xs" c="dimmed" ta="right">
+          Saving also sends the update to OpenRouter.
+        </Text>
+      )}
+      <SaveBar
+        dirty={dirty && !nameMissing}
+        saving={saving}
+        onReset={reset}
+        onSave={() => submit({ onSaved: presets.enabled ? pushSaved : undefined })}
+      />
 
       <Card withBorder padding="md">
         <Stack gap="md">

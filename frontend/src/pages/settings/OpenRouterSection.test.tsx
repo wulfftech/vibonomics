@@ -358,9 +358,9 @@ describe('OpenRouterSection', () => {
   });
 
   it.each([
-    ['Models listed', 'max_models'],
-    ['Providers listed', 'max_providers'],
-  ])('saves at most ten for %s', async (label, key) => {
+    ['Models listed', 'max_models', 3],
+    ['Providers listed', 'max_providers', 10],
+  ])('saves at most the limit for %s', async (label, key, limit) => {
     serve();
     const user = userEvent.setup();
     renderSection();
@@ -369,19 +369,78 @@ describe('OpenRouterSection', () => {
     await user.type(field, '15');
     await user.tab();
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(savedPresets()?.[key]).toBe(10));
+    await waitFor(() => expect(savedPresets()?.[key]).toBe(limit));
   });
 
-  it('saves ten when ten is asked for', async () => {
+  it('saves three models when three are asked for, the most OpenRouter takes in a preset', async () => {
     serve();
     const user = userEvent.setup();
     renderSection();
     const field = await screen.findByLabelText('Models listed');
+    expect(field).toHaveAccessibleDescription(/1 to 3/);
     await user.clear(field);
-    await user.type(field, '10');
+    await user.type(field, '3');
     await user.tab();
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(savedPresets()?.max_models).toBe(10));
+    await waitFor(() => expect(savedPresets()?.max_models).toBe(3));
+  });
+
+  it('takes half an hour as the schedule', async () => {
+    serve({ saved: { auto_apply: true, interval_hours: 6 } });
+    const user = userEvent.setup();
+    renderSection();
+    const field = await screen.findByLabelText('Every');
+    await user.tripleClick(field);
+    await user.keyboard('0.5');
+    await user.tab();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(savedPresets()?.interval_hours).toBe(0.5));
+  });
+
+  it('sends the update to OpenRouter when settings are saved with writing allowed, and says so beforehand', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    const field = await screen.findByLabelText('Minimum score');
+    await user.clear(field);
+    await user.type(field, '80');
+    expect(screen.getByText('Saving also sends the update to OpenRouter.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(calls('api/presets/apply')).toHaveLength(1));
+    expect(JSON.parse((calls('api/presets/apply')[0][1] as RequestInit).body as string)).toEqual({ digest: 'abc123' });
+    // it planned from what was saved, never from the draft
+    expect(previewBody()).toEqual({});
+    const order = fetchMock.mock.calls.map(([u, init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${u}`);
+    expect(order.indexOf('PUT api/settings')).toBeLessThan(order.indexOf('POST api/presets/plan'));
+    expect(order.indexOf('POST api/presets/plan')).toBeLessThan(order.indexOf('POST api/presets/apply'));
+  });
+
+  it('only saves, and sends nothing to OpenRouter, while writing is switched off', async () => {
+    serve({ enabled: false });
+    const user = userEvent.setup();
+    renderSection();
+    const field = await screen.findByLabelText('Minimum score');
+    await user.clear(field);
+    await user.type(field, '80');
+    expect(screen.queryByText('Saving also sends the update to OpenRouter.')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(savedPresets()?.min_score).toBe(80));
+    expect(calls('api/presets/plan')).toHaveLength(0);
+    expect(calls('api/presets/apply')).toHaveLength(0);
+  });
+
+  it('sends nothing when the saved settings leave the preset as it is, and says that', async () => {
+    serve({ plan: plan({ action: 'unchanged', reason: 'Already up to date.', request: null, changes: [] }) });
+    const user = userEvent.setup();
+    renderSection();
+    const field = await screen.findByLabelText('Minimum score');
+    await user.clear(field);
+    await user.type(field, '80');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls('api/presets/plan')).toHaveLength(1));
+    expect(await screen.findAllByText('Already up to date.')).not.toHaveLength(0);
+    expect(calls('api/presets/apply')).toHaveLength(0);
   });
 
   it('previews the saved settings, and says nothing of settings, when nothing was changed', async () => {

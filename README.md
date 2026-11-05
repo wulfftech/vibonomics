@@ -66,7 +66,7 @@ tried.
   and API key, with the cost of a million tokens and the cache hit rate. OpenRouter only shows the last 30
   days, so Vibonomics keeps each day it sees.
 - **A best-value preset.** Optionally keeps one OpenRouter preset pointed at the models that give the most
-  score per dollar today (up to ten, the rest as fallbacks), on their cheapest providers. Preview shows the
+  score per dollar today (up to three, the rest as fallbacks), on their cheapest providers. Preview shows the
   exact request first. Off by default.
 
 ### A closer look
@@ -366,7 +366,8 @@ second row of tabs under Providers, where settings that belong to one provider l
   shows; the Models page's 0 to 100 index is relative to whatever is on screen, so it makes a poor fixed
   floor). A model already in the preset keeps its place unless another beats it by a set percentage, so the
   preset does not flap between near ties.
-- **How many models.** One to ten. The best is the lead (`model`) and the list, lead first, is `models`:
+- **How many models.** One to three, which is as many as OpenRouter lets a preset hold (it answers HTTP 400
+  to a fourth). The best is the lead (`model`) and the list, lead first, is `models`:
   OpenRouter's fallbacks, tried in order when one fails. OpenRouter's docs say a preset can hold an array
   of models without naming the field, so after a write Vibonomics reads the preset back and reports any key
   OpenRouter did not keep.
@@ -386,8 +387,11 @@ second row of tabs under Providers, where settings that belong to one provider l
   request it would send. **Apply** sends that plan, and only that plan: if anything moved since you looked,
   it refuses and asks you to preview again. After a write it reads the preset back and names any key
   OpenRouter did not keep.
-- **On a schedule.** A separate switch updates the preset every N hours with no one watching. Off by default,
-  and it needs the write switch too.
+- **On a schedule.** A separate switch updates the preset every N hours (as little as 0.5, which is every
+  thirty minutes) with no one watching. Off by default, and it needs the write switch too.
+- **Saving sends it.** With the write switch on, **Save** on this page also sends the update straight away:
+  it plans from what was just saved and applies that plan, so a change reaches OpenRouter without a second
+  step. If the saved settings leave the preset as it is, nothing is sent and the page says so.
 
 A preset with a system prompt cannot be updated: the API takes no system prompt, so a new version would
 drop it. Vibonomics reports that instead of writing. The preset calls use your ordinary OpenRouter API key,

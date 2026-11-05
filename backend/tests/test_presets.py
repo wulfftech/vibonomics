@@ -552,14 +552,36 @@ def test_the_name_the_operator_types_is_saved_with_the_prefix(client):
     assert saved.json()["settings"]["presets"]["slug"] == "vibonomics-fast-coding"
 
 
-def test_up_to_ten_models_and_ten_providers_are_allowed_and_no_more(client):
+def test_up_to_three_models_and_ten_providers_are_allowed_and_no_more(client):
+    # OpenRouter refuses a preset that lists a fourth model: HTTP 400 "A preset can have at most 3 models".
     current = client.get("/api/settings").json()["settings"]
-    ok = {**current, "presets": {**current["presets"], "max_models": 10, "max_providers": 10}}
+    ok = {**current, "presets": {**current["presets"], "max_models": 3, "max_providers": 10}}
     assert client.put("/api/settings", json={"settings": ok}).status_code == 200
-    for field in ("max_models", "max_providers"):
-        for value in (0, 11):
+    for field, over in (("max_models", 4), ("max_providers", 11)):
+        for value in (0, over):
             bad = {**current, "presets": {**current["presets"], field: value}}
             assert client.put("/api/settings", json={"settings": bad}).status_code == 422, (field, value)
+
+
+def test_the_scheduled_update_can_run_every_thirty_minutes_and_no_more_often(client):
+    current = client.get("/api/settings").json()["settings"]
+    for hours, status in ((0.5, 200), (0.25, 422)):
+        body = {**current, "presets": {**current["presets"], "interval_hours": hours}}
+        assert client.put("/api/settings", json={"settings": body}).status_code == status, hours
+    assert PresetSettings(enabled=True, auto_apply=True, interval_hours=0.5).interval_hours == 0.5
+
+
+@pytest.mark.asyncio
+async def test_the_scheduler_runs_the_preset_every_thirty_minutes():
+    from vibonomics import scheduler
+
+    try:
+        scheduler.start(AppSettings())
+        scheduler.reschedule(AppSettings(presets=PresetSettings(enabled=True, auto_apply=True, interval_hours=0.5)))
+        job = scheduler._scheduler.get_job("preset-sync")
+        assert job is not None and job.trigger.interval.total_seconds() == 30 * 60
+    finally:
+        scheduler.shutdown()
 
 
 def test_it_is_off_until_the_operator_turns_it_on():
@@ -868,7 +890,7 @@ def test_a_draft_is_tried_with_its_own_limits_and_name(client):
 
 def test_a_draft_that_is_not_valid_is_refused(client):
     saved = _saved_presets(client)
-    for patch in ({"slug": ""}, {"max_models": 11}, {"min_value": -5}):
+    for patch in ({"slug": ""}, {"max_models": 4}, {"min_value": -5}):
         response = client.post("/api/presets/plan", json={"settings": {**saved, **patch}})
         assert response.status_code == 422, patch
 

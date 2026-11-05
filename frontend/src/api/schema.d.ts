@@ -1356,7 +1356,7 @@ export interface components {
             auto_apply: boolean;
             /**
              * Interval Hours
-             * @description Hours between scheduled updates
+             * @description Hours between scheduled updates; 0.5 is every thirty minutes
              * @default 24
              */
             interval_hours: number;
@@ -1421,7 +1421,7 @@ export interface components {
             switch_margin_pct: number;
             /**
              * Max Models
-             * @description Models listed, best value first; the rest are fallbacks
+             * @description Models listed, best value first; the rest are fallbacks. OpenRouter allows at most 3 in a preset.
              * @default 1
              */
             max_models: number;
