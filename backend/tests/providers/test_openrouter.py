@@ -34,13 +34,20 @@ def listing(model_id: str, input_: float, output: float, cache_read: float | Non
     }
 
 
-def endpoint(provider: str, input_: float, output: float, discount: float = 0.0) -> dict:
+def endpoint(
+    provider: str, input_: float, output: float, discount: float = 0.0, cache_read: float | None = None
+) -> dict:
     return {
         "provider_name": provider,
         "tag": provider.lower(),
         "quantization": "fp8",
         "uptime_last_1d": 99.0,
-        "pricing": {"prompt": per_token(input_), "completion": per_token(output), "discount": discount},
+        "pricing": {
+            "prompt": per_token(input_),
+            "completion": per_token(output),
+            "discount": discount,
+            **({"input_cache_read": per_token(cache_read)} if cache_read is not None else {}),
+        },
     }
 
 
@@ -100,3 +107,17 @@ async def test_the_listed_endpoint_may_be_the_discounted_one():
     assert (offer.price.input, offer.price.output) == (0.14, 0.42)
     assert offer.discount == 0.3
     assert offer.discount_note == "30% off via Cheap"
+
+
+@pytest.mark.asyncio
+async def test_each_endpoint_keeps_its_own_cache_read_price_in_the_unit_of_its_input_and_output():
+    # The preset costs endpoints for a cache-heavy task, so an endpoint that caches must not be costed with the
+    # model's one listed cache price, and one that does not cache must not borrow it.
+    offer = await offer_for(
+        listing("vendor/model", 0.10, 0.40, cache_read=0.01),
+        [endpoint("Caches", 0.10, 0.40, cache_read=0.02), endpoint("Plain", 0.08, 0.40)],
+    )
+    by_provider = {e["provider"]: e for e in offer.extra["endpoints"]}
+    assert by_provider["Caches"]["cache_read"] == 0.02
+    assert by_provider["Caches"]["input"] == 0.10  # same per-1M unit
+    assert by_provider["Plain"]["cache_read"] is None
