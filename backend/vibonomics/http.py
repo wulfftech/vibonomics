@@ -8,7 +8,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Hashable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 import httpx
 
@@ -17,8 +17,6 @@ from . import __version__
 log = logging.getLogger(__name__)
 
 USER_AGENT = f"Vibonomics/{__version__} (+self-hosted LLM analysis)"
-
-_T = TypeVar("_T")
 
 _client: httpx.AsyncClient | None = None
 
@@ -191,7 +189,7 @@ def _read_cache(cache_file: Path, validate: Callable[[Any], bool] | None) -> Any
 _flights: dict[Hashable, asyncio.Future[Any]] = {}
 
 
-async def single_flight(key: Hashable, start: Callable[[], Awaitable[_T]]) -> _T:
+async def single_flight[T](key: Hashable, start: Callable[[], Awaitable[T]]) -> T:
     """The result of one ``start()`` shared by every caller that arrives with the same ``key`` while it runs.
 
     A caller gets the result, or the error, of the shared run; the next one after it has finished starts a new
