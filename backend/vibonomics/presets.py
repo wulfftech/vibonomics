@@ -271,9 +271,22 @@ def build_config(base: dict[str, Any] | None, model_ids: list[str], tags: list[s
         # A list left over from another model would name providers that do not serve this one.
         provider.pop("only", None)
         provider.pop("order", None)
-    provider.setdefault("allow_fallbacks", True)
-    config["provider"] = provider
+    # No default is written for the operator (allow_fallbacks is on at OpenRouter already): a key that Vibonomics adds
+    # and the account does not keep would make every later plan differ from the live preset.
+    if provider or "provider" in config:
+        config["provider"] = provider
     return config
+
+
+def owned_view(config: dict[str, Any]) -> dict[str, Any]:
+    """The only keys Vibonomics decides: what a plan is compared on, to tell an update from nothing to do."""
+    provider = config.get("provider") if isinstance(config.get("provider"), dict) else {}
+    return {
+        "model": config.get("model"),
+        "models": config.get("models"),
+        "only": provider.get("only"),
+        "order": provider.get("order"),
+    }
 
 
 def current_models(config: dict[str, Any]) -> list[str]:
@@ -771,7 +784,7 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
             if len(ids) == 1
             else f"Creates {cfg.slug} with {len(ids)} models, led by {pick.name}."
         )
-    elif plan.config == remote.config:
+    elif owned_view(plan.config) == owned_view(remote.config):
         plan.action = "unchanged"
         best = inputs.candidates[0]
         plan.reason = "Already up to date." + (

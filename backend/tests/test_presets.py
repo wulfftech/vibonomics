@@ -233,11 +233,11 @@ def test_a_config_keeps_everything_but_the_model_and_the_provider_lists():
 
 def test_a_model_with_no_provider_data_drops_lists_left_over_from_another_model():
     config = build_config({"model": "old/model", "provider": {"only": ["old"], "order": ["old"]}}, ["new/model"], [])
-    assert config["provider"] == {"allow_fallbacks": True}
-    assert build_config(None, ["m"], ["x/fp8"]) == {
-        "model": "m",
-        "provider": {"only": ["x/fp8"], "order": ["x/fp8"], "allow_fallbacks": True},
-    }
+    assert config["provider"] == {}
+    assert build_config(None, ["m"], ["x/fp8"]) == {"model": "m", "provider": {"only": ["x/fp8"], "order": ["x/fp8"]}}
+    # no provider block is invented where there is nothing to put in it, and no routing default is written for the
+    # operator: OpenRouter's own (fallbacks on) already applies
+    assert build_config(None, ["m"], []) == {"model": "m"}
 
 
 def test_a_diff_opens_the_provider_block_and_names_what_goes():
@@ -289,7 +289,6 @@ def test_a_missing_preset_is_a_create_with_the_exact_request_shown(client):
         "provider": {
             "only": ["novita/fp4", "deepinfra/fp8", "wafer/bf16"],
             "order": ["novita/fp4", "deepinfra/fp8", "wafer/bf16"],
-            "allow_fallbacks": True,
         },
     }
     assert plan["request"] == {
@@ -379,7 +378,7 @@ def test_our_own_preset_is_read_back_with_its_version_and_history(client):
     assert [v["version"] for v in plan["versions"]] == [4, 1]
     assert plan["versions"][0]["live"] is True and plan["versions"][1]["live"] is False
     assert plan["config"]["tools"] == current["tools"]  # an edit made in the OpenRouter UI survives
-    assert {c["path"] for c in plan["changes"]} == {"provider.allow_fallbacks", "provider.only", "provider.order"}
+    assert {c["path"] for c in plan["changes"]} == {"provider.only", "provider.order"}
 
 
 def test_a_preset_that_is_already_right_is_unchanged(client):
@@ -954,7 +953,7 @@ def test_a_preset_made_under_another_key_is_left_alone(client):
 def test_a_preset_made_under_the_key_in_use_is_still_ours(client):
     _own_as(KEY)
     with respx.mock(assert_all_called=False) as router:
-        _remote(router, SLUG, {"model": "acme/steady"}, version=3)
+        _remote(router, SLUG, {"model": "acme/best"}, version=3)
         plan = _plan(client)
     assert plan["action"] == "update"
     assert plan["digest"]
@@ -963,7 +962,7 @@ def test_a_preset_made_under_the_key_in_use_is_still_ours(client):
 def test_a_slug_recorded_before_accounts_were_tracked_is_trusted_once_and_then_tied_to_the_key(client, caplog):
     _own()  # the form the live instance holds: a bare slug and no record
     with caplog.at_level("INFO", logger="vibonomics.presets"), respx.mock(assert_all_called=False) as router:
-        _remote(router, SLUG, {"model": "acme/steady"}, version=3)
+        _remote(router, SLUG, {"model": "acme/best"}, version=3)
         assert _plan(client)["action"] == "update"
     assert _state()["owners"][SLUG]["fingerprint"] == owner_fingerprint(BASE, KEY)
     assert any("adopt" in r.getMessage() and SLUG in r.getMessage() for r in caplog.records)
@@ -984,7 +983,7 @@ def test_a_preset_deleted_and_made_again_by_hand_is_no_longer_ours(client):
     assert plan["action"] == "blocked" and "no longer the one Vibonomics created" in plan["reason"]
     # the same id is the same preset, and a creation time written another way is the same instant
     with respx.mock(assert_all_called=False) as router:
-        _remote(router, SLUG, {"model": "acme/steady"}, version=4, id="p-1", created_at="2026-11-01T00:00:00+00:00")
+        _remote(router, SLUG, {"model": "acme/best"}, version=4, id="p-1", created_at="2026-11-01T00:00:00+00:00")
         assert _plan(client)["action"] == "update"
     # a creation time alone is enough to tell them apart
     _own_as(KEY, created_at="2026-11-01T00:00:00Z")
@@ -996,7 +995,7 @@ def test_a_preset_deleted_and_made_again_by_hand_is_no_longer_ours(client):
 def test_a_response_with_no_id_or_creation_time_leaves_the_key_to_decide(client):
     _own_as(KEY, preset_id="p-1", created_at="2026-11-01T00:00:00Z")
     with respx.mock(assert_all_called=False) as router:
-        _remote(router, SLUG, {"model": "acme/steady"}, version=2)  # the live preset names neither
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)  # the live preset names neither
         assert _plan(client)["action"] == "update"
 
 
@@ -1027,7 +1026,7 @@ def test_the_digest_names_the_account_and_the_version_it_was_planned_against(cli
     digests = []
     for version in (2, 3):
         with respx.mock(assert_all_called=False) as router:
-            _remote(router, SLUG, {"model": "acme/steady"}, version=version)
+            _remote(router, SLUG, {"model": "acme/best"}, version=version)
             digests.append(_plan(client)["digest"])
     assert digests[0] != digests[1]  # someone made a version in between, so the reviewed plan is stale
 
@@ -1103,7 +1102,7 @@ def test_a_create_whose_answer_carries_no_version_is_a_failed_write_and_claims_n
 def test_an_update_whose_answer_carries_no_version_does_not_count_as_written(client):
     _own_as(KEY)
     with respx.mock(assert_all_called=False) as router:
-        _remote(router, SLUG, {"model": "acme/steady"}, version=2)
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
         router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_answers({"data": {}}))
         plan = _plan(client)
         response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
@@ -1187,7 +1186,7 @@ def test_a_body_that_is_not_json_is_read_back_the_same_way(client):
 def test_an_update_whose_answer_was_lost_is_reported_as_applied_when_the_preset_has_the_plan(client):
     _own_as(KEY)
     with respx.mock(assert_all_called=False) as router:
-        account = _Account(router, {"model": "acme/steady"}, version=2)
+        account = _Account(router, {"model": "acme/best"}, version=2)
         router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
             side_effect=_lost_after_taking(account, lambda request: httpx.Response(504, text="gateway timeout"))
         )
@@ -1252,3 +1251,47 @@ async def test_a_write_that_is_cancelled_is_still_claimed_when_it_went_through(c
         await http.close_client()
     assert _state()["owned"] == [SLUG]
     assert _state()["last"]["status"] == "applied"
+
+
+# ---- keys Vibonomics does not own -------------------------------------------------------------------------------
+
+
+def test_a_store_that_drops_a_default_does_not_make_every_sync_write_a_new_version(client):
+    account: _Account
+
+    def stores_less(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        assert account.written is not None
+        (account.written.get("provider") or {}).pop("allow_fallbacks", None)  # whatever it does not keep
+        return httpx.Response(200, json=_preset(SLUG, account.written, version=1, id="p-1"))
+
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="p-1")
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=stores_less)
+        plan = _plan(client)
+        assert "allow_fallbacks" not in json.dumps(plan["config"])  # OpenRouter's own default stands
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()["applied"] is True
+        for _ in range(2):
+            again = _plan(client)
+            assert again["action"] == "unchanged" and again["changes"] == []
+            assert client.post("/api/presets/apply", json={"digest": again["digest"]}).json()["applied"] is False
+        assert post.call_count == 1
+
+
+def test_only_the_keys_vibonomics_owns_decide_whether_the_preset_changes(client):
+    _own_as(KEY)
+    tags = ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
+    live = {
+        "model": "acme/best",
+        "provider": {"only": tags, "order": tags, "allow_fallbacks": False, "data_collection": "deny"},
+        "tools": [{"type": "openrouter:web_search"}],
+    }
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        assert _plan(client)["action"] == "unchanged"
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {**live, "provider": {**live["provider"], "order": tags[::-1]}}, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "update" and [c["path"] for c in plan["changes"]] == ["provider.order"]
+    # and the whole config, the operator's keys included, is still what is sent
+    assert plan["config"]["provider"]["allow_fallbacks"] is False and plan["config"]["tools"] == live["tools"]
