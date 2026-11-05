@@ -19,6 +19,9 @@ USER_AGENT = f"Vibonomics/{__version__} (+self-hosted LLM analysis)"
 
 _client: httpx.AsyncClient | None = None
 
+_USERINFO = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/]*@")
+# Stops before trailing punctuation, so "…?token=x: HTTP 500" keeps its colon.
+_URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>)]*[^\s'\"<>):.,;]")
 _SECRET_HEADER = re.compile(r"auth|key|token|secret|cookie|credential|password", re.IGNORECASE)
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _FIRST_ORIGIN = "vibonomics.first_origin"
@@ -70,7 +73,8 @@ class FetchError(Exception):
     """A fetch failed in a way worth surfacing to the operator (status code, auth, parse)."""
 
     def __init__(self, message: str = "", status: int | None = None):
-        super().__init__(message)
+        # Adapters word some of these themselves, with a base URL that may carry user:password@ or ?token=.
+        super().__init__(_redact_urls(message))
         self.status = status
 
 
@@ -155,12 +159,21 @@ def scrub_secrets(text: str, *sources: dict[str, Any] | None) -> str:
     return text
 
 
+def public_url(url: str) -> str:
+    """``url`` without its userinfo, query and fragment: the part that is safe to show a visitor or write to a log."""
+    head = re.split(r"[?#]", url, maxsplit=1)[0]
+    return _USERINFO.sub(r"\1", head)
+
+
 def _redact(url: str) -> str:
-    # Some APIs (Gemini) accept ?key=...; never let it reach logs or the UI.
-    if "key=" in url:
-        head, _, _tail = url.partition("?")
-        return head + "?…"
-    return url
+    # Some APIs (Gemini) accept ?key=..., and a gateway may want user:password@ or ?token=; none may reach a log
+    # or the UI.
+    shown = public_url(url)
+    return f"{shown}?…" if "?" in url.partition("#")[0] else shown
+
+
+def _redact_urls(text: str) -> str:
+    return _URL_IN_TEXT.sub(lambda match: _redact(match.group(0)), text)
 
 
 async def cached_json(
@@ -175,7 +188,7 @@ async def cached_json(
         data = await get_json(url, headers=headers, timeout=timeout)
     except FetchError:
         if cache_file.exists():
-            log.warning("Using cached copy of %s", url)
+            log.warning("Using cached copy of %s", _redact(url))
             return json.loads(cache_file.read_text(encoding="utf-8"))
         raise
     try:
@@ -184,5 +197,5 @@ async def cached_json(
         tmp.write_text(json.dumps(data), encoding="utf-8")
         tmp.replace(cache_file)
     except OSError as exc:  # cache is best-effort
-        log.warning("Could not cache %s: %s", url, exc)
+        log.warning("Could not cache %s: %s", _redact(url), exc)
     return data

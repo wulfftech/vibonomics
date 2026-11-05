@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from .. import crypto, events
 from ..catalog.modelsdev import load_catalog
 from ..db import get_session, session_scope
-from ..http import FetchError
+from ..http import FetchError, public_url
 from ..jobs import run_job, spawn
 from ..orm import Balance, ProviderConfig
 from ..provider_service import env_locked, resolve, resolve_draft
@@ -210,8 +210,19 @@ def list_providers(request: Request, session: Session = Depends(get_session)) ->
     providers = session.scalars(select(ProviderConfig).order_by(ProviderConfig.name)).all()
     out = [_provider_out(p, session) for p in providers]
     if not is_authenticated(request):
-        # A visitor with no session sees which keys are set, never the end of one.
-        out = [p.model_copy(update={"api_key_hint": None, "mgmt_key_hint": None, "extra_key_hint": None}) for p in out]
+        # A visitor with no session sees which keys are set, never the end of one, and a base URL without the
+        # user:password@ or ?token= a gateway may need.
+        out = [
+            p.model_copy(
+                update={
+                    "api_key_hint": None,
+                    "mgmt_key_hint": None,
+                    "extra_key_hint": None,
+                    "base_url": public_url(p.base_url) if p.base_url else p.base_url,
+                }
+            )
+            for p in out
+        ]
     return out
 
 

@@ -40,6 +40,51 @@ async def test_a_key_echoed_across_the_cut_in_an_error_body_is_still_scrubbed():
     assert len(message) < 400
 
 
+@pytest.mark.parametrize(
+    ("url", "shown", "public"),
+    [
+        ("https://gw.example/v1/models", "https://gw.example/v1/models", "https://gw.example/v1/models"),
+        ("https://admin:pass@gw.example/v1", "https://gw.example/v1", "https://gw.example/v1"),
+        ("https://admin@gw.example:8443/v1", "https://gw.example:8443/v1", "https://gw.example:8443/v1"),
+        ("https://gw.example/v1?token=abc123", "https://gw.example/v1?…", "https://gw.example/v1"),
+        (
+            "https://gw.example/v1/models?key=AIzaSyFAKE",
+            "https://gw.example/v1/models?…",
+            "https://gw.example/v1/models",
+        ),
+        ("https://u:p@gw.example/v1?a=1&b=2#frag", "https://gw.example/v1?…", "https://gw.example/v1"),
+        ("http://[::1]:4000/v1?x=1", "http://[::1]:4000/v1?…", "http://[::1]:4000/v1"),
+        ("gw.example/v1", "gw.example/v1", "gw.example/v1"),
+    ],
+)
+def test_a_url_shown_to_a_person_carries_no_credentials(url, shown, public):
+    assert http._redact(url) == shown
+    assert http.public_url(url) == public
+
+
+@respx.mock
+async def test_an_error_names_the_url_without_its_credentials():
+    respx.get("https://gw.example/v1/models").mock(return_value=httpx.Response(404, text="not here"))
+
+    with pytest.raises(http.FetchError) as caught:
+        await http.get_json("https://admin:s3cret@gw.example/v1/models?token=abc123", retries=0)
+
+    assert "s3cret" not in str(caught.value)
+    assert "abc123" not in str(caught.value)
+    assert "gw.example/v1/models" in str(caught.value)
+
+
+def test_an_error_built_from_a_base_url_is_redacted_where_it_is_made():
+    # The adapters word these themselves, e.g. f"{self.base_url}/models: unexpected response shape".
+    error = http.FetchError(
+        "https://admin:s3cret@gw.example/v1/models: unexpected shape (see https://x.example/a?token=abc123 too)"
+    )
+
+    assert "s3cret" not in str(error)
+    assert "abc123" not in str(error)
+    assert str(error) == "https://gw.example/v1/models: unexpected shape (see https://x.example/a?… too)"
+
+
 SECRET_HEADERS = {
     "x-api-key": KEY,
     "x-goog-api-key": KEY,
