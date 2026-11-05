@@ -200,6 +200,18 @@ def test_the_presets_own_provider_filters_narrow_the_choice():
     assert [e["tag"] for e in ignoring] == ["deepinfra/fp8", "slow/fp8"]
 
 
+def test_an_allow_list_leaves_out_endpoints_whose_provider_is_not_on_it():
+    # a provider may be named by its slug, by the full tag, or by its display name, in any case
+    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=["deepinfra"])] == ["deepinfra/fp8"]
+    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=["novita/fp4"])] == ["novita/fp4"]
+    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=["WAFER", "Novita"])] == [
+        "novita/fp4",
+        "wafer/bf16",
+    ]
+    assert choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=["nobody"]) == []
+    assert len(choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=[])) == 4  # an empty list restricts nothing
+
+
 def test_the_cache_price_counts_toward_which_endpoint_is_cheapest():
     cheap_cache = [
         {"tag": "a/x", "input": 1.0, "output": 1.0},
@@ -353,6 +365,40 @@ def test_a_new_preset_starts_from_the_template_and_the_template_is_only_read(cli
     # the template asks for fp8, so the fp4 and bf16 endpoints are not listed
     assert plan["config"]["provider"]["only"] == ["deepinfra/fp8", "slow/fp8"]
     assert plan["config"]["provider"]["quantizations"] == ["fp8"]
+
+
+def test_a_templates_provider_allow_list_is_honoured_and_the_plan_says_so(client):
+    _settings(template_slug="my-tools")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", {"model": "other/model", "provider": {"only": ["deepinfra"]}}, version=3)
+        plan = _plan(client)
+    assert plan["config"]["provider"]["only"] == ["deepinfra/fp8"]  # not novita/fp4, which is cheaper
+    assert [p["tag"] for p in plan["providers"]] == ["deepinfra/fp8"]
+    assert any("template" in w and "deepinfra" in w and "only" in w for w in plan["warnings"])
+
+
+def test_a_templates_allow_list_that_leaves_nothing_means_no_pin_and_a_warning(client):
+    _settings(template_slug="my-tools")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", {"model": "other/model", "provider": {"only": ["nobody"]}}, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "create" and plan["providers"] == []
+    assert "only" not in plan["config"].get("provider", {}) and "order" not in plan["config"].get("provider", {})
+    assert any("template" in w and "nobody" in w for w in plan["warnings"])
+    assert any("no provider" in w.lower() for w in plan["warnings"])
+
+
+def test_the_allow_list_is_the_templates_and_not_the_lists_this_preset_wrote_itself(client):
+    # once the preset exists its own `only` is the last plan's output, and filtering by it would never let it change
+    _own_as(KEY)
+    live = {"model": "acme/best", "provider": {"only": ["deepinfra/fp8"], "order": ["deepinfra/fp8"]}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        plan = _plan(client)
+    assert plan["config"]["provider"]["only"] == ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
+    assert not any("template" in w for w in plan["warnings"])
 
 
 def test_a_missing_template_blocks_the_plan(client):

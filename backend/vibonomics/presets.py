@@ -217,8 +217,12 @@ def choose_endpoints(
     limit: int,
     *,
     current: Sequence[str] = (),
+    allow: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """The cheapest endpoints for one task that the preset's own provider filters would still let through.
+
+    ``allow`` is a template's own ``only`` list: an endpoint whose provider (by slug, full tag or name) is not on it
+    is skipped. An empty one restricts nothing.
 
     Each endpoint is costed with its own cache-read price. One that lists none is costed as uncached: the model's
     listed price is the best endpoint's, and an endpoint without a cache would be ranked ahead on a discount it does
@@ -230,6 +234,7 @@ def choose_endpoints(
     """
     quantizations = {q.lower() for q in provider_block.get("quantizations") or [] if isinstance(q, str)}
     ignored = {s.lower() for s in provider_block.get("ignore") or [] if isinstance(s, str)}
+    allowed = {s.lower() for s in allow if isinstance(s, str)}
     position: dict[str, int] = {}
     for i, tag in enumerate(current):
         position.setdefault(tag, i)
@@ -241,7 +246,8 @@ def choose_endpoints(
             continue
         if quantizations and str(ep.get("quantization") or "").lower() not in quantizations:
             continue
-        if {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider") or "").lower()} & ignored:
+        names = {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider") or "").lower()}
+        if names & ignored or (allowed and not names & allowed):
             continue
         cache = ep.get("cache_read")
         cost = task_cost(price_in, price_out, cache if isinstance(cache, int | float) else None, task)
@@ -794,25 +800,39 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
     live_provider = remote.config.get("provider") if remote else None
     live_provider = live_provider if isinstance(live_provider, dict) else {}
     live_tags = [t for key in ("order", "only") for t in live_provider.get(key) or [] if isinstance(t, str)]
+    # A template's `only` is the operator's allow-list. Once the preset exists its own `only` is what the last plan
+    # wrote, and filtering by that would stop it ever changing.
+    allow = (
+        [s for s in provider_block.get("only") or [] if isinstance(s, str)]
+        if remote is None and cfg.template_slug
+        else []
+    )
+    if allow:
+        plan.warnings.append(
+            f"The template's provider list (only: {', '.join(allow)}) is applied: only those providers are "
+            "considered for this preset."
+        )
     per_pick = [
         (
             c.model_id,
-            choose_endpoints(c.endpoints, inputs.task, provider_block, cfg.max_providers, current=live_tags),
+            choose_endpoints(
+                c.endpoints, inputs.task, provider_block, cfg.max_providers, current=live_tags, allow=allow
+            ),
         )
         for c in plan.picks
     ]
     bare = [c.name for c, (_id, eps) in zip(plan.picks, per_pick, strict=True) if not eps]
     if len(bare) == len(plan.picks):
         plan.warnings.append(
-            "No provider data for these models (or none that passes the preset's quantization and ignore filters), "
-            "so the preset names no provider and OpenRouter routes as it decides. Provider data comes from the "
-            "'Check OpenRouter endpoint discounts' refresh option."
+            "No provider data for these models (or none that passes the preset's quantization, ignore and provider "
+            "list filters), so the preset names no provider and OpenRouter routes as it decides. Provider data comes "
+            "from the 'Check OpenRouter endpoint discounts' refresh option."
         )
     elif bare:
         # `only` is shared by every listed model, so one model with no provider in it could never be served.
         plan.warnings.append(
             f"{', '.join(bare)} {'has' if len(bare) == 1 else 'have'} no provider data (or none that passes the "
-            "preset's quantization and ignore filters), and a provider list would keep "
+            "preset's quantization, ignore and provider list filters), and a provider list would keep "
             f"{'it' if len(bare) == 1 else 'them'} from being served, so the preset names no provider and OpenRouter "
             "routes as it decides. Provider data comes from the 'Check OpenRouter endpoint discounts' refresh option."
         )
