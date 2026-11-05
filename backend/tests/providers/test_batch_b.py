@@ -371,6 +371,32 @@ def test_fireworks_pricing_parser():
     assert rows[("accounts/fireworks/models/nemotron-3-ultra-nvfp4", "")].name == "NVIDIA Nemotron 3 Ultra"
 
 
+def test_fireworks_fast_is_a_router_only_when_it_is_the_suffix_of_the_name():
+    models = "https://app.fireworks.ai/models/fireworks"
+    extra_rows = "".join(
+        f"| [{name}]({models}/{slug}) | \\$1.00 / \\$0.10 / \\$2.00 | - |\n"
+        for name, slug in (
+            ("Fast Llama 70B", "fast-llama-70b"),
+            ("Turbo Fast Coder", "turbo-fast-coder"),
+            ("Mini Fast", "mini-fast"),
+        )
+    )
+    page = text("fireworks_pricing.md").replace("| [Qwen 3.8 Max]", extra_rows + "| [Qwen 3.8 Max]")
+    rows = {r.name: r for r in fireworks.parse_pricing(page)}
+    # "Fast" inside a model's own name is not Fireworks' fast mode, which has no id of its own: it is a router.
+    assert rows["Fast Llama 70B"].model_id == "accounts/fireworks/models/fast-llama-70b"
+    assert rows["Fast Llama 70B"].variant == ""
+    assert rows["Turbo Fast Coder"].model_id == "accounts/fireworks/models/turbo-fast-coder"
+    assert rows["Turbo Fast Coder"].variant == ""
+    # Its own slug already says fast, so a "-fast" router id would be for a model that does not exist.
+    assert rows["Mini Fast"].model_id == "accounts/fireworks/models/mini-fast"
+    assert rows["Mini Fast"].variant == ""
+    # The real fast rows (a base model's name plus "Fast", on the base model's slug) are still routers.
+    assert rows["Kimi K3 Fast"].model_id == "accounts/fireworks/routers/kimi-k3-fast"
+    assert rows["Kimi K3 Fast"].variant == "fast"
+    assert rows["GLM 5.3 Fast"].model_id == "accounts/fireworks/routers/glm-5p3-fast"
+
+
 @respx.mock
 async def test_fireworks_models_docs_and_live(ctx):
     respx.get(fireworks.PRICING_PAGE).respond(text=text("fireworks_pricing.md"))

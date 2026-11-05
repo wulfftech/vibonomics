@@ -68,7 +68,10 @@ def parse_pricing(markdown: str) -> list[PriceRow]:
         name = strip_markdown(m.group("name"))
         slug, acct = m.group("slug"), m.group("acct")
         low = name.lower()
-        variant = "us" if re.search(r"\(us(?:-only)?\)", low) else ("fast" if re.search(r"\bfast\b", low) else "")
+        # Fast mode is the base model's name plus "Fast", on the base model's own slug. A "Fast" elsewhere in a name, or
+        # a slug that already says fast, is a model of its own, and a "-fast" router id for it would not exist.
+        is_fast = re.sub(r"\s*\([^)]*\)", "", low).strip().endswith(" fast") and "fast" not in slug.split("-")
+        variant = "us" if re.search(r"\(us(?:-only)?\)", low) else ("fast" if is_fast else "")
         model_id = f"accounts/{acct}/models/{slug}"
         if variant == "fast":
             model_id = f"accounts/{acct}/routers/{slug}-fast"
