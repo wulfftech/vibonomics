@@ -58,6 +58,7 @@ def parse_pricing(markdown: str) -> list[PagePrice]:
                     },
                 )
             )
+        break  # the first table with these headers is the standard rates; a later one (a priority tier) is not
     return rows
 
 
@@ -171,7 +172,10 @@ class AnthropicAdapter(ProviderAdapter):
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         month_to_date = await self._cost_report(month_start, now)
         thirty_start = now - timedelta(days=30)
-        last_30_days = month_to_date if thirty_start <= month_start else await self._cost_report(thirty_start, now)
+        # Only the 31st of a 31-day month starts both windows on the same day. Any other day the trailing window
+        # reaches back into the last month, and the month so far is a part of it, not the whole.
+        same_days = thirty_start.date() == month_start.date()
+        last_30_days = month_to_date if same_days else await self._cost_report(thirty_start, now)
         return {"month_to_date": month_to_date, "last_30_days": last_30_days}
 
     async def fetch_balance(self) -> BalanceInfo:

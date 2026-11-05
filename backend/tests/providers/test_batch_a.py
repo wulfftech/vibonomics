@@ -7,6 +7,7 @@ fixture is a small subset of the real catalogue.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -65,6 +66,25 @@ async def test_anthropic_prices_from_page(ctx):
     assert opus.extra["cache_write_1h"] == 8.0
 
 
+def test_anthropic_keeps_the_first_pricing_table_and_ignores_a_later_one_with_the_same_headers():
+    # A priority-tier or long-context table below the standard one must not override the standard prices.
+    later = (
+        "\n\n## Priority Tier\n\n"
+        "| Model | Base input tokens | 5m cache writes | 1h cache writes | Cache hits and refreshes | Output tokens |\n"
+        "| :-- | :-- | :-- | :-- | :-- | :-- |\n"
+        "| Claude Opus 5.5 | $9 / MTok | $11 / MTok | $18 / MTok | $0.90 / MTok | $45 / MTok |\n"
+        "| Claude Opus 5 | $10 / MTok | $12 / MTok | $20 / MTok | $1 / MTok | $50 / MTok |\n"
+        "| Claude Sonnet 9 | $6 / MTok | $7 / MTok | $12 / MTok | $0.60 / MTok | $30 / MTok |\n"
+    )
+    rows = {r.name: r for r in anthropic.parse_pricing(text("anthropic_pricing.md") + later)}
+    assert (rows["Claude Opus 5.5"].input, rows["Claude Opus 5.5"].output) == (4.0, 20.0)
+    assert rows["Claude Opus 5"].input == 5.0
+    assert "Claude Sonnet 9" not in rows
+    assert len(anthropic.parse_pricing(text("anthropic_pricing.md") + later)) == len(
+        anthropic.parse_pricing(text("anthropic_pricing.md"))
+    )
+
+
 @respx.mock
 async def test_anthropic_keeps_catalogue_prices_when_page_fails(ctx):
     respx.get(anthropic.PRICING_URL).mock(side_effect=httpx.ConnectError("boom"))
@@ -72,20 +92,51 @@ async def test_anthropic_keeps_catalogue_prices_when_page_fails(ctx):
     assert offers and all(o.extra.get("pricing_page_error") for o in offers)
 
 
+def _freeze_anthropic_clock(monkeypatch, now: datetime) -> None:
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(anthropic, "datetime", Frozen)
+
+
+def _cost_report(month_cents: str, trailing_cents: str):
+    """A cost-report mock whose answer depends on the window asked for: the month starts on the 1st at midnight."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        month = request.url.params["starting_at"].endswith("-01T00:00:00Z")
+        return httpx.Response(200, json={"data": [{"results": [{"amount": month_cents if month else trailing_cents}]}]})
+
+    return answer
+
+
 @respx.mock
-async def test_anthropic_admin_spend(ctx):
-    route = respx.get(f"{anthropic.API}/v1/organizations/cost_report").mock(
-        return_value=httpx.Response(200, json={"data": [{"results": [{"amount": "1000"}, {"amount": "234.5"}]}]})
-    )
+async def test_anthropic_admin_spend(ctx, monkeypatch):
+    _freeze_anthropic_clock(monkeypatch, datetime(2026, 11, 5, 12, 0, tzinfo=UTC))
+    route = respx.get(f"{anthropic.API}/v1/organizations/cost_report").mock(side_effect=_cost_report("1234.5", "9900"))
     info = await make(anthropic.AnthropicAdapter, ctx, key="sk-ant-x", mgmt="sk-ant-admin01-x").fetch_balance()
     assert info.status == "ok"
     # The headline is the calendar month, the figure the Console's billing page budgets against.
     assert info.account_used == 12.35
     assert info.details["month_to_date"] == 12.35
-    assert info.details["last_30_days"] == 12.35
+    # The trailing 30 days reach back into October, so they are their own request, not the month again.
+    assert info.details["last_30_days"] == 99.0
     assert info.details["spend_period"] == "this month"
     starts = [call.request.url.params["starting_at"] for call in route.calls]
-    assert starts[0].endswith("-01T00:00:00Z")
+    assert starts == ["2026-11-01T00:00:00Z", "2026-10-06T12:00:00Z"]
+
+
+@respx.mock
+async def test_anthropic_reuses_the_month_for_the_trailing_window_only_when_they_start_on_the_same_day(
+    ctx, monkeypatch
+):
+    # On the 31st of a 31-day month, 30 days back is the 1st.
+    _freeze_anthropic_clock(monkeypatch, datetime(2026, 12, 31, 12, 0, tzinfo=UTC))
+    route = respx.get(f"{anthropic.API}/v1/organizations/cost_report").mock(side_effect=_cost_report("1234.5", "9900"))
+    info = await make(anthropic.AnthropicAdapter, ctx, key="sk-ant-x", mgmt="sk-ant-admin01-x").fetch_balance()
+    assert info.details["month_to_date"] == info.details["last_30_days"] == 12.35
+    assert route.call_count == 1
 
 
 async def test_anthropic_balances_without_admin_key(ctx):
