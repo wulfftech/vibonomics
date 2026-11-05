@@ -320,6 +320,19 @@ async def test_opencode_chat_routing(ctx):
         adapter.chat_target("gemini-4-argon")
 
 
+async def test_opencode_go_asks_for_a_session_id_and_names_itself_but_the_console_tier_does_not(ctx):
+    # Go's docs: a client other than OpenCode names itself in its user agent and sends a stable id per conversation
+    # in x-opencode-session; without it Go answers HTTP 400. The free Console tier gets neither: it admits only
+    # OpenCode, and nothing here tries to get past that.
+    go = make(opencode.OpenCodeGoAdapter, ctx, key="k").chat_target("glm-5.3")
+    assert go.session_header == "x-opencode-session"
+    assert go.headers["User-Agent"].startswith("Vibonomics/")
+    assert go.headers["Authorization"] == "Bearer k"
+    console = make(opencode.OpenCodeAdapter, ctx, key="k").chat_target("glm-5.3")
+    assert console.session_header is None
+    assert "User-Agent" not in console.headers
+
+
 async def test_opencode_go_is_metered_subscription(ctx):
     adapter = make(opencode.OpenCodeGoAdapter, ctx)
     import respx as _respx

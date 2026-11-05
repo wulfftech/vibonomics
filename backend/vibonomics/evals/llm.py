@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,6 +23,11 @@ from ..providers.base import ChatTarget
 log = logging.getLogger(__name__)
 
 RETRIABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+
+# The conversation a request belongs to. The runner sets it once per task, and a provider that asks for a stable
+# id per conversation (``ChatTarget.session_header``) gets it on every request that task sends, the judge's included.
+# A context variable, not a ``chat`` argument, so each concurrent task sees its own without touching the clients.
+conversation_id: ContextVar[str | None] = ContextVar("conversation_id", default=None)
 
 
 class ChatError(Exception):
@@ -212,6 +218,9 @@ class LLMClient:
     async def _post(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> tuple[dict[str, Any], int]:
         started = time.monotonic()
         last_error = ""
+        session = conversation_id.get()
+        if self.target.session_header and session:
+            headers = {**headers, self.target.session_header: session}
         for attempt in range(4):
             try:
                 response = await self._client.post(url, json=payload, headers=headers)

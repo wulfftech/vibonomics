@@ -85,12 +85,26 @@ function RunListItem({
   );
 }
 
-function TargetSummaryCard({ name, provider, summary }: { name: string; provider: string; summary: Json | null }) {
+function TargetSummaryCard({
+  name,
+  provider,
+  summary,
+  notRun,
+}: {
+  name: string;
+  provider: string;
+  summary: Json | null;
+  /** Why the model was not run at all, when it has no summary because every task failed before it started. */
+  notRun: string | null;
+}) {
   const score = summary ? num(summary.score) : null;
   const passed = summary ? num(summary.passed) : null;
   const tasks = summary ? num(summary.tasks) : null;
   const errored = summary ? (num(summary.errors) ?? 0) : 0;
   const ungraded = summary ? (num(summary.ungraded) ?? 0) : 0;
+  // A score over a handful of tasks is a small sample, however high it is: say so rather than let 3 of 14 read as 100.
+  const scored = tasks !== null ? tasks - errored - ungraded : null;
+  const lowCoverage = tasks !== null && scored !== null && tasks > 0 && scored * 2 < tasks;
   const cost = summary ? num(summary.cost ?? summary.cost_usd) : null;
   const tokens = summary ? num(summary.tokens) : null;
   const assessment = summary && typeof summary.assessment === 'string' ? summary.assessment : null;
@@ -106,10 +120,27 @@ function TargetSummaryCard({ name, provider, summary }: { name: string; provider
               {provider}
             </Text>
           </Stack>
-          <Text size="xl" lh={1}>
+          <Text size="xl" lh={1} c={lowCoverage ? 'dimmed' : undefined}>
             <ScoreNumber value={score} bold />
           </Text>
         </Group>
+        {lowCoverage && (
+          <Tooltip
+            multiline
+            maw={320}
+            withArrow
+            label={`Only ${scored} of ${tasks} tasks were scored; the rest errored or had no grade. This score rests on a small sample, so do not compare it with a model that completed them all.`}
+          >
+            <Badge size="xs" variant="light" color="yellow" w="fit-content" style={{ cursor: 'help' }}>
+              Low coverage · {scored} of {tasks} scored
+            </Badge>
+          </Tooltip>
+        )}
+        {notRun && (
+          <Text size="xs" c="dimmed">
+            Not run: {notRun}
+          </Text>
+        )}
         <Text size="xs" c="dimmed">
           {passed !== null && tasks !== null ? `${passed}/${tasks} passed` : DASH} · {money(cost)} ·{' '}
           {tokens !== null ? `${compactCount(tokens)} tokens` : DASH}
@@ -404,12 +435,19 @@ function RunDetail({
         {run.targets.map((target) => {
           const key = `${target.provider_id}|${target.model_id}`;
           const summary = summaries[key];
+          // A model that never started has no summary; its tasks each carry the reason, and it is the same one.
+          // Summaries appear only when a run ends, so while it is active a missing one means nothing yet.
+          const reason = active
+            ? null
+            : results.find((r) => r.provider_id === target.provider_id && r.model_id === target.model_id && r.error)
+                ?.error;
           return (
             <TargetSummaryCard
               key={key}
               name={target.name}
               provider={target.provider_name}
               summary={isObject(summary) ? summary : null}
+              notRun={isObject(summary) ? null : (reason ?? null)}
             />
           );
         })}

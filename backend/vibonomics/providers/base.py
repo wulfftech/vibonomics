@@ -143,6 +143,8 @@ class ChatTarget:
     base_url: str
     model: str
     headers: dict[str, str]
+    session_header: str | None = None
+    """A header the provider asks every client to fill with a stable id per conversation (OpenCode Go)."""
 
 
 @dataclass

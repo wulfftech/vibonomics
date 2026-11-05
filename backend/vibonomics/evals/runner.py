@@ -25,7 +25,7 @@ from ..settings_store import AppSettings, load_settings
 from . import sandbox_client
 from .graders import grade_answer, grade_tool_calls
 from .judge import Judge
-from .llm import ChatError, ChatReply, LLMClient, ToolCall, assistant_message, tool_call_payload
+from .llm import ChatError, ChatReply, LLMClient, ToolCall, assistant_message, conversation_id, tool_call_payload
 from .suites import SUITES, TaskDef
 from .unittest_harness import MARKER as HARNESS_MARKER
 
@@ -43,6 +43,15 @@ MAX_TOOL_OUTPUT = 6000
 MAX_TRANSCRIPT_CHARS = 60_000
 PASS_THRESHOLD = 75.0
 PARTIAL_THRESHOLD = 40.0
+
+# A free endpoint's rate limit is per minute, and the client's own retries wait seconds, so a task that still gets
+# HTTP 429 sleeps and goes again. The wait is per model: while one task waits, the model's others wait with it
+# instead of all hitting the limit again together.
+RATE_LIMIT_BACKOFF = (30.0, 60.0, 120.0)
+_RATE_LIMITED = re.compile(r"HTTP 429|rate.?limit|too many requests", re.IGNORECASE)
+
+# Client id (the ``client_restricted`` flag a provider puts on a model) to the name to show.
+_CLIENT_NAMES = {"opencode": "OpenCode"}
 
 EXEC_DISABLED_NOTE = (
     "Code execution is disabled (Settings → Testing → sandbox). Coding tasks were graded from the transcript "
@@ -90,6 +99,7 @@ class Target:
         self.name = name
         self.provider_name = provider_name
         self.client = client
+        self.cool_down_until = 0.0  # event-loop time before which this model's requests wait
 
     @property
     def key(self) -> str:
@@ -149,6 +159,16 @@ async def _run(run_id: int) -> None:
     for raw in targets_raw:
         provider_id, model_id = int(raw["provider_id"]), str(raw["model_id"])
         cfg = providers.get(provider_id)
+        row = model_rows.get((provider_id, model_id))
+        restricted = (row.extra or {}).get("client_restricted") if row is not None else None
+        if restricted:
+            # Not attempted: the provider admits only its own client, so every call would be refused.
+            client_name = _CLIENT_NAMES.get(str(restricted), str(restricted))
+            target_errors[f"{provider_id}|{model_id}"] = (
+                f"{client_name} serves this free model only to its own client, so Vibonomics cannot test it. "
+                "Test the paid or Go version of the model instead."
+            )
+            continue
         try:
             adapter = build_adapter(cfg, ctx) if cfg else None
             if adapter is None:
@@ -212,43 +232,54 @@ async def _run(run_id: int) -> None:
 
     async def one(target: Target, task: TaskDef) -> None:
         nonlocal done
-        if run_id in _cancelled:
-            return
-        async with semaphore:
+        current = f"{target.name} · {task.id}"
+        result: dict[str, Any] = {}
+        for attempt in range(len(RATE_LIMIT_BACKOFF) + 1):
+            # The wait is outside the semaphore, so a rate-limited model does not hold a slot other models need.
+            while (wait := target.cool_down_until - asyncio.get_running_loop().time()) > 0 and run_id not in _cancelled:
+                _update_progress(run_id, done, total, f"{target.name} · waiting out a rate limit")
+                await asyncio.sleep(min(wait, 5.0))
             if run_id in _cancelled:
                 return
-            current = f"{target.name} · {task.id}"
-            _update_progress(run_id, done, total, current)
-            result = await _run_task(task, target, settings, judge)
-            model = model_rows.get((target.provider_id, target.model_id))
-            result.update(
-                {
-                    "provider_id": target.provider_id,
-                    "model_id": target.model_id,
-                    "canonical_id": model.canonical_id if model else None,
-                }
+            async with semaphore:
+                if run_id in _cancelled:
+                    return
+                _update_progress(run_id, done, total, current)
+                result = await _run_task(task, target, settings, judge)
+            if attempt == len(RATE_LIMIT_BACKOFF) or not _rate_limited(result):
+                break
+            target.cool_down_until = max(
+                target.cool_down_until, asyncio.get_running_loop().time() + RATE_LIMIT_BACKOFF[attempt]
             )
-            input_tokens = int(result.get("input_tokens") or 0)
-            output_tokens = int(result.get("output_tokens") or 0)
-            priced = model is not None and model.price_input is not None and model.price_output is not None
-            if result.get("cost_usd") is None and priced:
-                result["cost_usd"] = round(
-                    (input_tokens * model.price_input + output_tokens * model.price_output) / 1_000_000, 6
-                )
-            _store_result(run_id, result)
-            status = result.get("status") or "error"
-            summaries[target.key].append(
-                {
-                    "task": task.id,
-                    "category": task.category,
-                    # Errored and ungraded results have no grade; they must not average in as zero.
-                    "score": float(result["score"]) if status in GRADED_STATUSES else None,
-                    "status": status,
-                    "notes": result.get("judge_notes") or result.get("error"),
-                }
+        model = model_rows.get((target.provider_id, target.model_id))
+        result.update(
+            {
+                "provider_id": target.provider_id,
+                "model_id": target.model_id,
+                "canonical_id": model.canonical_id if model else None,
+            }
+        )
+        input_tokens = int(result.get("input_tokens") or 0)
+        output_tokens = int(result.get("output_tokens") or 0)
+        priced = model is not None and model.price_input is not None and model.price_output is not None
+        if result.get("cost_usd") is None and priced:
+            result["cost_usd"] = round(
+                (input_tokens * model.price_input + output_tokens * model.price_output) / 1_000_000, 6
             )
-            done += 1
-            _update_progress(run_id, done, total, current)
+        _store_result(run_id, result)
+        status = result.get("status") or "error"
+        summaries[target.key].append(
+            {
+                "task": task.id,
+                "category": task.category,
+                # Errored and ungraded results have no grade; they must not average in as zero.
+                "score": float(result["score"]) if status in GRADED_STATUSES else None,
+                "status": status,
+                "notes": result.get("judge_notes") or result.get("error"),
+            }
+        )
+        done += 1
+        _update_progress(run_id, done, total, current)
 
     try:
         # Wait for every task even if one dies outside its own error handling (a full disk, a locked
@@ -424,7 +455,22 @@ def _trim(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return trimmed
 
 
+def _rate_limited(result: dict[str, Any]) -> bool:
+    return result.get("status") == "error" and bool(_RATE_LIMITED.search(str(result.get("error") or "")))
+
+
 async def _run_task(task: TaskDef, target: Target, settings: AppSettings, judge: Judge | None) -> dict[str, Any]:
+    # One conversation per task: a provider that wants a stable id per conversation gets this one on every request.
+    token = conversation_id.set(f"vibonomics-{secrets.token_hex(12)}")
+    try:
+        return await _run_task_in_conversation(task, target, settings, judge)
+    finally:
+        conversation_id.reset(token)
+
+
+async def _run_task_in_conversation(
+    task: TaskDef, target: Target, settings: AppSettings, judge: Judge | None
+) -> dict[str, Any]:
     usage = Usage()
     transcript: list[dict[str, Any]] = []
     started = asyncio.get_running_loop().time()

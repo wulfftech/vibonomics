@@ -244,6 +244,14 @@ per-model assessment. Models Vibonomics cannot call (free OpenCode models, OpenC
 not offered as judges, and free models are labelled because they rate-limit often. A run with a broken
 judge still completes, scored by the deterministic checks, and says so.
 
+A task that gets HTTP 429 waits and tries again (30, 60 then 120 seconds, shared by the model's other tasks)
+before it is called an error. Errored and ungraded tasks are left out of a model's score, not averaged in as
+zero, and a card whose score rests on fewer than half its tasks is badged **Low coverage** so 3 of 14 does not
+read as a clean 100. A free OpenCode Console model is never attempted, since OpenCode admits only its own client
+to it: its tasks error at once with that reason. OpenCode Go is different. Its docs ask other clients to name
+themselves in their own user agent and send a stable id per conversation in `x-opencode-session`, and it answers
+HTTP 400 without one, so Vibonomics does both for Go (one id per task).
+
 **Sandbox.** Model-written code never runs beside your keys. It gets a room with no network, no secrets
 and a strict curfew. The compose file starts `vibonomics-sandbox`
 with no network at all, a read-only filesystem and limits on CPU, memory and processes. Its server runs as

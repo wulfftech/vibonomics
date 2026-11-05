@@ -16,7 +16,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from ..http import FetchError, get_json, get_text
+from ..http import USER_AGENT, FetchError, get_json, get_text
 from .base import BalanceInfo, ChatTarget, ModelOffer, ProviderAdapter, ProviderSpec
 from .common import modelsdev_offers, openai_model_ids, parse_markdown_tables
 from .pricing_pages import PagePrice, apply_page_prices, find_column, parse_price_cell
@@ -62,6 +62,9 @@ FREE_DATA_UNKNOWN = "OpenCode's docs don't say how this free model handles your 
 # OpenCode's Console docs: "Free-tier chat models require OpenCode; use paid models or Go from other clients."
 # Every other harness gets HTTP 403, even with a valid key. Go's own free ids are not covered by that sentence.
 CLIENT_RESTRICTED = "opencode"
+
+# OpenCode Go asks clients for a stable id per conversation in this header, for routing and prompt caching.
+SESSION_HEADER = "x-opencode-session"
 
 
 def parse_pricing(markdown: str) -> list[PagePrice]:
@@ -281,6 +284,18 @@ class _OpenCodeBase(ProviderAdapter):
                 "supported APIs (OpenAI chat completions and Anthropic messages)."
             )
         wire = "anthropic" if "anthropic" in npm else "openai"
+        if self.subscription:
+            # Go's docs ask any client other than OpenCode to name itself in its own user agent and to send a stable
+            # id per conversation in x-opencode-session, and answer HTTP 400 without it. That is the documented way
+            # in, so it is not sending another client's identity. The free Console tier is different: it admits
+            # only OpenCode, and nothing here tries to get past that.
+            return ChatTarget(
+                wire=wire,
+                base_url=api,
+                model=model_id,
+                headers={**self.auth_headers(), "User-Agent": USER_AGENT},
+                session_header=SESSION_HEADER,
+            )
         return ChatTarget(wire=wire, base_url=api, model=model_id, headers=self.auth_headers())
 
     def _endpoint_for(self, model_id: str) -> dict[str, Any] | None:

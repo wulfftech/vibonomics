@@ -80,6 +80,11 @@ docker compose logs -f vibonomics
   reference solution that passes its visible and hidden tests (`tests/evals/test_suites.py` proves it)
   and a judge rubric. Model-written code only runs through `sandbox_client`, never `subprocess` in the
   app process. A judge failure must be reported in the run summary, not silently scored as zero.
+  A task's error is never a score: errored and ungraded results stay out of averages. A `429` is retried
+  with `RATE_LIMIT_BACKOFF` (shared per model) before it counts as an error. The runner never calls a model a
+  provider flags `client_restricted`. OpenCode Go (not the Console tier) gets its own user agent and a
+  per-task `x-opencode-session` through the `conversation_id` context variable; do not extend that to the
+  restricted tier or to any other client's headers.
 - **Subscriptions** (`subscriptions.py`, `api/subscriptions.py`): Claude Code status-line snapshots are
   posted to `/api/subscription/ingest/claude` with an ingest token — the one `/api` path exempt from the
   login guard, because the caller has no session, so the token is compared with `hmac.compare_digest`.

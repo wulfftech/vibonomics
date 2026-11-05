@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
@@ -94,8 +96,17 @@ def _no_catalog(monkeypatch):
     monkeypatch.setattr(runner, "load_catalog", load_catalog)
 
 
+@pytest.fixture(autouse=True)
+def _no_rate_limit_waits(monkeypatch):
+    """A rate-limited task would otherwise sleep for half a minute; tests that want the retries set their own."""
+    monkeypatch.setattr(runner, "RATE_LIMIT_BACKOFF", ())
+
+
 def _seed(
-    task_ids: tuple[str, ...] = QUICK_TASKS, sandbox_mode: str = "local", extra_targets: tuple[dict, ...] = ()
+    task_ids: tuple[str, ...] = QUICK_TASKS,
+    sandbox_mode: str = "local",
+    extra_targets: tuple[dict, ...] = (),
+    model_extra: dict | None = None,
 ) -> tuple[int, int]:
     with session_scope() as session:
         provider = ProviderConfig(
@@ -116,6 +127,7 @@ def _seed(
                 price_input=1.0,
                 price_output=2.0,
                 active=True,
+                extra=model_extra or {},
             )
         )
         settings = load_settings(session)
@@ -387,6 +399,109 @@ async def test_model_errors_are_reported_and_left_out_of_scores(monkeypatch):
         assert own[(provider_id, MODEL_ID)]["score"] == pytest.approx(97.0)
         assert own[(provider_id, MODEL_ID)]["tasks"] == 2
         assert (gone["provider_id"], gone["model_id"]) not in own
+
+
+class FlakyToolsClient(FakeClient):
+    """Rate limited on the first request of the tool-use task, for its first ``fail_first`` attempts."""
+
+    fail_first = 0
+    attempts = 0
+
+    async def chat(self, messages, tools=None):
+        first_round = not any(m.get("role") == "tool" for m in messages)
+        if first_round and any(t.name == "get_forecast" for t in tools or []):
+            type(self).attempts += 1
+            if type(self).attempts <= type(self).fail_first:
+                raise ChatError("HTTP 429: Rate limit exceeded: free-models-per-min")
+        return await super().chat(messages, tools)
+
+
+def _flaky(monkeypatch, fail_first: int) -> None:
+    monkeypatch.setattr(runner, "LLMClient", FlakyToolsClient)
+    monkeypatch.setattr(FlakyToolsClient, "fail_first", fail_first)
+    monkeypatch.setattr(FlakyToolsClient, "attempts", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_task_waits_and_goes_again(monkeypatch):
+    monkeypatch.setattr(runner, "RATE_LIMIT_BACKOFF", (0.05, 0.05))
+    _flaky(monkeypatch, fail_first=2)
+    run_id, _provider_id = _seed(task_ids=("tool-pick",))
+    started = time.monotonic()
+    await runner.execute(run_id)
+    elapsed = time.monotonic() - started
+
+    with session_scope() as session:
+        result = session.query(EvalResult).filter(EvalResult.run_id == run_id).one()
+        assert (result.status, result.score) == ("passed", 100.0), result.error
+    assert FlakyToolsClient.attempts == 3
+    assert elapsed >= 0.09  # it slept between the attempts rather than hammering the limit
+
+
+@pytest.mark.asyncio
+async def test_a_task_still_rate_limited_after_every_retry_is_an_error_not_a_zero(monkeypatch):
+    monkeypatch.setattr(runner, "RATE_LIMIT_BACKOFF", (0.0, 0.0))
+    _flaky(monkeypatch, fail_first=99)
+    run_id, provider_id = _seed(task_ids=("tool-pick", "instr-json"))
+    await runner.execute(run_id)
+
+    with session_scope() as session:
+        run = session.get(EvalRun, run_id)
+        results = {r.task_id: r for r in session.query(EvalResult).filter(EvalResult.run_id == run_id)}
+        assert results["tool-pick"].status == "error"
+        assert "429" in results["tool-pick"].error
+        assert results["instr-json"].status == "passed"
+        summary = run.summary["targets"][f"{provider_id}|{MODEL_ID}"]
+        assert (summary["errors"], summary["score"]) == (1, 100.0)
+    assert FlakyToolsClient.attempts == 3  # the first try and one per wait
+
+
+@pytest.mark.asyncio
+async def test_an_error_that_is_not_a_rate_limit_is_not_retried(monkeypatch):
+    monkeypatch.setattr(runner, "RATE_LIMIT_BACKOFF", (0.0, 0.0))
+    attempts = {"n": 0}
+
+    class Refused(FakeClient):
+        async def chat(self, messages, tools=None):
+            if any(t.name == "get_forecast" for t in tools or []):
+                attempts["n"] += 1
+                raise ChatError("HTTP 404: No endpoints found that support tool use.")
+            return await super().chat(messages, tools)
+
+    monkeypatch.setattr(runner, "LLMClient", Refused)
+    run_id, _provider_id = _seed(task_ids=("tool-pick",))
+    await runner.execute(run_id)
+    assert attempts["n"] == 1
+
+
+class CountingClient(FakeClient):
+    """Counts the requests the model under test receives (the judge's carry the evaluator prompt)."""
+
+    model_requests = 0
+
+    async def chat(self, messages, tools=None):
+        system = next((m.get("content") for m in messages if m.get("role") == "system"), "") or ""
+        if "exacting evaluator" not in system:
+            type(self).model_requests += 1
+        return await super().chat(messages, tools)
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_only_its_own_client_may_call_is_not_attempted(monkeypatch):
+    monkeypatch.setattr(runner, "LLMClient", CountingClient)
+    monkeypatch.setattr(CountingClient, "model_requests", 0)
+    run_id, provider_id = _seed(task_ids=("tool-pick", "instr-json"), model_extra={"client_restricted": "opencode"})
+    await runner.execute(run_id)
+
+    with session_scope() as session:
+        results = list(session.query(EvalResult).filter(EvalResult.run_id == run_id))
+        assert {r.task_id for r in results} == {"tool-pick", "instr-json"}
+        for result in results:
+            assert result.status == "error"
+            assert result.provider_config_id == provider_id
+            assert "OpenCode serves this free model only to its own client" in result.error
+            assert "paid or Go version" in result.error
+    assert CountingClient.model_requests == 0
 
 
 class MalformedUrlToolsClient(FakeClient):

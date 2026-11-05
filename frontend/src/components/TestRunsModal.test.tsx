@@ -40,10 +40,13 @@ const results = [
   { task_id: 'agentic-fix-mean', category: 'agentic', status: 'ungraded', score: 0 },
 ] as unknown as EvalResultOut[];
 
+// What the modal shows; a test swaps it to see another run.
+let shown: { run: EvalRunOut; results: EvalResultOut[] } = { run, results };
+
 vi.mock('../api/evals', () => ({
-  isActiveRun: () => false,
-  useRun: () => ({ isPending: false, isError: false, data: { run, results } }),
-  useRuns: () => ({ data: [run], isPending: false, isError: false }),
+  isActiveRun: (status: string) => status === 'running',
+  useRun: () => ({ isPending: false, isError: false, data: shown }),
+  useRuns: () => ({ data: [shown.run], isPending: false, isError: false }),
   useJudges: () => ({ data: [] }),
   useSuites: () => ({ data: [] }),
   useCancelRun: () => ({ mutate: vi.fn(), isPending: false }),
@@ -83,6 +86,66 @@ describe('TestRunsModal, ungraded and errored results', () => {
       const cells = row(taskId).querySelectorAll('td');
       const scoreCell = cells[3]; // Task, Category, Status, Score for a single-target run
       expect(scoreCell.textContent?.trim()).toBe('—');
+    }
+  });
+});
+
+describe('TestRunsModal, a score that rests on few tasks', () => {
+  const summary = (over: Record<string, unknown>) => ({
+    score: 100,
+    tasks: 14,
+    passed: 3,
+    errors: 11,
+    ungraded: 0,
+    tokens: 1680,
+    cost: 0,
+    assessment: null,
+    ...over,
+  });
+  const withSummary = (over: Record<string, unknown>) => ({
+    run: { ...run, summary: { targets: { '3|acme/verify-model': summary(over) } } },
+    results,
+  });
+
+  it('flags 3 of 14 scored as low coverage, and a model that completed its tasks as normal', () => {
+    shown = withSummary({});
+    try {
+      const { unmount } = renderModal();
+      expect(screen.getByText('Low coverage · 3 of 14 scored')).toBeInTheDocument();
+      unmount();
+
+      shown = withSummary({ passed: 12, errors: 2 });
+      renderModal();
+      expect(screen.queryByText(/Low coverage/)).not.toBeInTheDocument();
+    } finally {
+      shown = { run, results };
+    }
+  });
+
+  it('says why a model that never started has no score', () => {
+    const refused = {
+      ...results[1],
+      provider_id: 3,
+      model_id: 'acme/verify-model',
+      error: 'OpenCode serves it only to its own client',
+    };
+    shown = { run: { ...run, summary: { targets: {} } }, results: [refused] };
+    try {
+      renderModal();
+      expect(screen.getByText(/Not run: OpenCode serves it only to its own client/)).toBeInTheDocument();
+    } finally {
+      shown = { run, results };
+    }
+  });
+
+  it('does not call a model "not run" while its run is still going', () => {
+    const failing = { ...results[1], provider_id: 3, model_id: 'acme/verify-model', error: 'HTTP 429' };
+    shown = { run: { ...run, status: 'running', summary: {} }, results: [failing] };
+    try {
+      renderModal();
+      expect(screen.queryByText(/Not run:/)).not.toBeInTheDocument();
+    } finally {
+      shown = { run, results };
     }
   });
 });

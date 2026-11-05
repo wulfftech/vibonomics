@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from vibonomics.evals.llm import ChatError, LLMClient, ToolSpec, to_anthropic_messages
+from vibonomics.evals.llm import ChatError, LLMClient, ToolSpec, conversation_id, to_anthropic_messages
 from vibonomics.providers.base import ChatTarget
 
 TOOL = ToolSpec(
@@ -63,6 +63,37 @@ async def test_openai_chat_with_tool_calls():
     body = json.loads(route.calls[0].request.content)
     assert body["tools"][0]["function"]["name"] == "write_file"
     assert body["max_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_the_conversation_id_goes_in_the_providers_session_header_only():
+    route = respx.post("https://example.test/v1/chat/completions").mock(return_value=openai_client())
+    target = ChatTarget(
+        wire="openai",
+        base_url="https://example.test/v1",
+        model="m",
+        headers={"A": "b"},
+        session_header="x-opencode-session",
+    )
+    plain = ChatTarget(wire="openai", base_url="https://example.test/v1", model="m", headers={"A": "b"})
+    client, plain_client = LLMClient(target), LLMClient(plain)
+
+    await client.chat([{"role": "user", "content": "no conversation yet"}])
+    token = conversation_id.set("vibonomics-abc")
+    try:
+        await client.chat([{"role": "user", "content": "hi"}])
+        await plain_client.chat([{"role": "user", "content": "hi"}])
+    finally:
+        conversation_id.reset(token)
+    await client.aclose()
+    await plain_client.aclose()
+
+    without, with_id, other_provider = (call.request.headers for call in route.calls)
+    assert "x-opencode-session" not in without
+    assert with_id["x-opencode-session"] == "vibonomics-abc"
+    assert with_id["a"] == "b"
+    assert "x-opencode-session" not in other_provider
 
 
 @pytest.mark.asyncio
