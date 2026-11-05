@@ -27,10 +27,13 @@ class SpendBucketOut(BaseModel):
     cached_tokens: int = Field(description="Prompt tokens served from a provider's cache")
     tokens: int = Field(description="Prompt plus completion tokens")
     byok_cost: float = Field(description="USD spent through the operator's own provider keys, not credits")
-    cost_per_mtok: float | None = Field(
-        description="USD per million tokens: how efficiently the spend turned into work"
+    byok_tokens: int = Field(
+        description="Tokens on rows that report own-key spend: they are in `tokens` but not in the per-token costs"
     )
-    cost_per_request: float | None
+    cost_per_mtok: float | None = Field(
+        description="USD of credits per million tokens billed in credits; own-key traffic is left out of both sides"
+    )
+    cost_per_request: float | None = Field(description="USD of credits per request billed in credits")
     cache_hit: float | None = Field(description="Share of prompt tokens that came from a cache, 0 to 1")
 
 
@@ -88,6 +91,7 @@ def _bucket(b: Bucket) -> dict[str, object]:
         "cached_tokens": b.cached_tokens,
         "tokens": b.tokens,
         "byok_cost": round(b.byok, 6),
+        "byok_tokens": b.byok_tokens,
         "cost_per_mtok": b.cost_per_mtok,
         "cost_per_request": b.cost_per_request,
         "cache_hit": b.cache_hit,

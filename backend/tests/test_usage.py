@@ -78,10 +78,8 @@ def _clean(session) -> None:
     session.execute(delete(ProviderConfig).where(ProviderConfig.type == "openrouter"))
 
 
-def _provider(session, name: str = "Spend test", mgmt: bool = True) -> int:
-    row = ProviderConfig(
-        type="openrouter", name=name, enabled=True, mgmt_key_enc=crypto.encrypt(MGMT) if mgmt else None
-    )
+def _provider(session, name: str = "Spend test", mgmt: bool = True, key: str = MGMT) -> int:
+    row = ProviderConfig(type="openrouter", name=name, enabled=True, mgmt_key_enc=crypto.encrypt(key) if mgmt else None)
     session.add(row)
     session.flush()
     return row.id
@@ -205,6 +203,33 @@ async def test_a_failure_to_read_the_account_itself_raises():
             await usage.fetch_account(BASE, MGMT)
 
 
+async def test_a_host_other_than_openrouters_is_refused_before_the_management_key_is_sent():
+    with respx.mock(assert_all_called=False) as router:
+        anywhere = router.route().mock(return_value=httpx.Response(200, json={"data": []}))
+        with pytest.raises(usage.FetchError, match=r"only to openrouter\.ai"):
+            await usage.fetch_account("https://gateway.example/v1", MGMT)
+    assert not anywhere.called
+
+
+async def test_a_key_with_no_name_is_called_key_and_its_hash_not_its_masked_label():
+    nameless = {**_key("abcdef0123456789", "", 1), "name": None}  # the fixture's label is a masked key
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BASE}/activity").mock(return_value=httpx.Response(200, json={"data": AGGREGATE}))
+        router.get(f"{BASE}/keys").mock(
+            side_effect=lambda request: httpx.Response(
+                200, json={"data": [nameless] if request.url.params.get("offset", "0") == "0" else []}
+            )
+        )
+        account = await usage.fetch_account(BASE, MGMT)
+    assert "sk-or-v1" not in account.keys[0].name
+    with session_scope() as session:
+        pid = _provider(session)
+    usage.persist(pid, account)
+    with session_scope() as session:
+        keys = usage.summarize(session, 30, None, None).keys
+    assert [k.name for k in keys] == ["Key abcdef01"]
+
+
 # ---- keeping the history -------------------------------------------------------------------------------------
 
 
@@ -279,31 +304,6 @@ async def test_run_job_records_a_usage_run():
         assert run is not None and run.status == "ok"
 
 
-# ---- the summary ---------------------------------------------------------------------------------------------
-
-
-def _get(client: TestClient, **params) -> dict:
-    response = client.get("/api/usage", params=params)
-    assert response.status_code == 200, response.text
-    assert MGMT not in response.text
-    return response.json()
-
-
-def test_totals_add_up_and_efficiency_is_cost_per_million_tokens(client):
-    data = _get(client)
-    totals = data["totals"]
-    assert totals["cost"] == pytest.approx(3.5)
-    assert totals["requests"] == 35
-    assert totals["prompt_tokens"] == 3_200_000 and totals["completion_tokens"] == 350_000
-    assert totals["tokens"] == 3_550_000  # prompt plus completion; reasoning is inside completion
-    assert totals["reasoning_tokens"] == 60_000
-    assert totals["cost_per_mtok"] == pytest.approx(3.5 / 3_550_000 * 1e6)
-    assert totals["cost_per_request"] == pytest.approx(0.1)
-    assert totals["cache_hit"] == pytest.approx(2_700_000 / 3_200_000)
-    assert (data["since"], data["until"]) == ("2026-10-30", "2026-11-01")
-
-
-def test_the_daily_series_has_no_gaps(client):
 async def test_a_base_url_override_does_not_redirect_the_management_key():
     # The adapter's own balance and model calls ignore the override; the management key, which can create and
     # delete keys, must not be the one thing that follows it to a gateway.
@@ -352,6 +352,31 @@ async def test_a_slow_per_key_phase_does_not_discard_the_account_rows_that_arriv
         assert {k.key_hash for k in session.scalars(select(UsageKey))} == {"hashA", "hashB", "hashC"}
 
 
+# ---- the summary ---------------------------------------------------------------------------------------------
+
+
+def _get(client: TestClient, **params) -> dict:
+    response = client.get("/api/usage", params=params)
+    assert response.status_code == 200, response.text
+    assert MGMT not in response.text
+    return response.json()
+
+
+def test_totals_add_up_and_efficiency_is_cost_per_million_tokens(client):
+    data = _get(client)
+    totals = data["totals"]
+    assert totals["cost"] == pytest.approx(3.5)
+    assert totals["requests"] == 35
+    assert totals["prompt_tokens"] == 3_200_000 and totals["completion_tokens"] == 350_000
+    assert totals["tokens"] == 3_550_000  # prompt plus completion; reasoning is inside completion
+    assert totals["reasoning_tokens"] == 60_000
+    assert totals["cost_per_mtok"] == pytest.approx(3.5 / 3_550_000 * 1e6)
+    assert totals["cost_per_request"] == pytest.approx(0.1)
+    assert totals["cache_hit"] == pytest.approx(2_700_000 / 3_200_000)
+    assert (data["since"], data["until"]) == ("2026-10-30", "2026-11-01")
+
+
+def test_the_daily_series_has_no_gaps(client):
     daily = _get(client)["daily"]
     assert [d["date"] for d in daily] == ["2026-10-30", "2026-10-31", "2026-11-01"]
     assert [d["cost"] for d in daily] == [pytest.approx(1.5), 0, pytest.approx(2.0)]
@@ -438,3 +463,69 @@ def test_the_models_beyond_the_top_are_folded_into_one_row(client):
     models = _get(client)["models"]
     assert len(models) == usage.MODELS_SHOWN + 1
     assert models[-1]["name"].startswith("Other models (")
+
+
+def test_a_key_with_no_stored_rows_still_leaves_the_key_picker_its_options(client):
+    # The page hides the key Select when `keys` is empty, which left no way back to "All keys".
+    for chosen in ("hashB", "no-such-key"):  # listed but silent, and unknown
+        data = _get(client, key=chosen)
+        assert data["totals"]["cost"] == 0 and data["daily"] == []
+        assert {k["name"] for k in data["keys"]} == {"Recall", "Continue", "Old key"}
+
+
+def _own_key_row(day: str, credits: float, byok: float, req: int, tokens: int) -> dict:
+    return {**_raw(day, "acme/m1", "Up1", credits, req, tokens, 0), "byok_usage_inference": byok}
+
+
+def test_cost_per_million_tokens_leaves_own_key_traffic_out_of_both_sides(client):
+    # Credits spent over every token, own-key tokens included, made an account that mostly brings its own provider
+    # keys look absurdly cheap. The ratio now covers only the traffic that was billed in credits.
+    with session_scope() as session:
+        pid = _provider(session, "Mostly own keys", key="sk-or-mgmt-test-own-keys")
+    usage.persist(
+        pid,
+        usage.Account(
+            aggregate=usage.parse_rows(
+                [
+                    _own_key_row("2026-11-01", 1.0, 0.0, 10, 1_000_000),
+                    # OpenRouter bills only a small fee on its credits for own-key traffic.
+                    {**_own_key_row("2026-11-01", 0.02, 5.0, 90, 9_000_000), "model": "acme/m2"},
+                    {**_own_key_row("2026-11-02", 0.0, 3.0, 30, 3_000_000), "model": "acme/m2"},
+                ]
+            )
+        ),
+    )
+    data = _get(client, provider_id=pid)
+    totals = data["totals"]
+    assert totals["cost"] == pytest.approx(1.02) and totals["byok_cost"] == pytest.approx(8.0)
+    assert totals["tokens"] == 13_000_000 and totals["byok_tokens"] == 12_000_000
+    assert totals["cost_per_mtok"] == pytest.approx(1.0)
+    assert totals["cost_per_request"] == pytest.approx(0.1)
+    day_one, day_two = data["daily"]
+    assert day_one["cost_per_mtok"] == pytest.approx(1.0)
+    assert day_two["cost_per_mtok"] is None  # nothing was billed in credits that day
+
+
+def test_two_providers_with_one_management_key_are_counted_once_in_all_accounts(client):
+    with session_scope() as session:
+        twin = _provider(session, "Same account again")  # the same management key as "Spend test"
+        different = _provider(session, "Another account", key="sk-or-mgmt-test-another")
+    _store(twin)
+    usage.persist(
+        different,
+        usage.Account(aggregate=usage.parse_rows([_raw("2026-11-01", "acme/m3", "Up3", 10.0, 100, 1_000_000, 0)])),
+    )
+    both = _get(client)
+    assert both["totals"]["cost"] == pytest.approx(13.5)  # 3.5 once, plus 10 for the other account
+    assert [k["name"] for k in both["keys"]].count("Recall") == 1
+    assert both["today_usd"] == pytest.approx(0.3)
+    assert [a["name"] for a in both["accounts"]] == ["Spend test", "Same account again", "Another account"]
+    assert _get(client, provider_id=twin)["totals"]["cost"] == pytest.approx(3.5)  # chosen on its own, it is shown
+
+
+def test_providers_sharing_the_environment_management_key_are_one_account(client, monkeypatch):
+    monkeypatch.setenv("VIBONOMICS_OPENROUTER_MGMT_KEY", "sk-or-mgmt-test-from-env")
+    with session_scope() as session:
+        twin = _provider(session, "Second row", mgmt=False)
+    _store(twin)
+    assert _get(client)["totals"]["cost"] == pytest.approx(3.5)
