@@ -106,9 +106,11 @@ docker compose logs -f vibonomics
   `backend/vibonomics/pricing.py` for `POST /api/models/value`. Change a formula in both, and keep
   `tests/test_value.py` checking the cases `pricing.test.ts` checks.
 - **Refresh** (`jobs.py`, `api/refresh.py`, `api/providers.py`): `run_job(kind, trigger, provider_ids)`
-  serialises each kind behind a lock and **returns immediately if the lock is held** — it does not queue.
-  So never fire one request per provider for a set: send them together (`POST /api/providers/refresh`
-  with `provider_ids`), or the second call is silently dropped. A single-provider run tags its
+  serialises each kind behind a lock and **returns immediately if the lock is held** — a whole-kind refresh
+  does not queue. A provider-scoped call is the exception: its ids are kept and run together, once, when the
+  lock frees (the run in flight read the provider list before the save). Still send a set together
+  (`POST /api/providers/refresh` with `provider_ids`), which answers `queued` rather than `started` when it
+  has to wait. A single-provider run tags its
   `refresh.finished` event with `provider` so the UI can stay quiet; a whole-kind run does not.
 - **Database**: SQLAlchemy models in `orm.py`. After a change, run
   `python -m vibonomics.migrations revision "..."` from `backend/`. Migrations run at startup.

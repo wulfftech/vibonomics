@@ -34,6 +34,8 @@ BALANCE_TIMEOUT = 60
 RUN_RETENTION_DAYS = 90
 _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 KINDS = ("models", "balances", "benchmarks", "usage")
+_PROVIDER_KINDS = ("models", "balances")
+_dropped: dict[str, set[int]] = defaultdict(set)
 
 
 def now() -> datetime:
@@ -72,7 +74,22 @@ def is_running(kind: str) -> bool:
 
 
 async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | None = None) -> None:
-    """Run one refresh kind. ``provider_ids`` narrows models/balances to those providers."""
+    """Run one refresh kind. ``provider_ids`` narrows models/balances to those providers.
+
+    A call that finds its kind already running is dropped, not queued, except a provider-scoped one: the run in
+    flight read the provider list before the save that asked for it, so those ids are kept and run once, together,
+    when the lock frees.
+    """
+    if _locks[kind].locked():
+        if provider_ids and kind in _PROVIDER_KINDS:
+            _dropped[kind] |= provider_ids
+        return
+    await _run_locked(kind, trigger, provider_ids)
+    while pending := _dropped.pop(kind, None):
+        await _run_locked(kind, "provider", pending)
+
+
+async def _run_locked(kind: str, trigger: str, provider_ids: set[int] | None) -> None:
     jobs: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
         "models": _refresh_models,
         "balances": _refresh_balances,
@@ -80,10 +97,7 @@ async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | N
         "usage": _refresh_usage,
     }
     job = jobs[kind]
-    lock = _locks[kind]
-    if lock.locked():
-        return
-    async with lock:
+    async with _locks[kind]:
         run_id: int | None = None
         status, message, stats = "ok", None, {}
         try:

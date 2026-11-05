@@ -238,6 +238,25 @@ def test_refresh_batch_covers_every_id_in_one_run(monkeypatch):
     assert calls == [("models", {first, second}), ("balances", {first, second})]
 
 
+def test_refresh_says_queued_when_a_run_is_already_in_progress(monkeypatch):
+    """The run in flight read the providers before the save, so the answer must not claim this one started."""
+    provider_id = _seed()
+
+    async def fake_run_job(kind, trigger="manual", provider_ids=None):
+        pass
+
+    monkeypatch.setattr(api, "run_job", fake_run_job)
+    client = _client(monkeypatch)
+
+    monkeypatch.setattr(api, "is_running", lambda kind: False)
+    assert client.post(f"/api/providers/{provider_id}/refresh").json() == {"status": "started"}
+    assert client.post("/api/providers/refresh", json={"provider_ids": [provider_id]}).json() == {"status": "started"}
+
+    monkeypatch.setattr(api, "is_running", lambda kind: kind == "models")
+    assert client.post(f"/api/providers/{provider_id}/refresh").json() == {"status": "queued"}
+    assert client.post("/api/providers/refresh", json={"provider_ids": [provider_id]}).json() == {"status": "queued"}
+
+
 def test_refresh_unknown_provider_is_404(monkeypatch):
     client = _client(monkeypatch)
     assert client.post("/api/providers/999999/refresh").status_code == 404
