@@ -211,7 +211,8 @@ def list_providers(request: Request, session: Session = Depends(get_session)) ->
     out = [_provider_out(p, session) for p in providers]
     if not is_authenticated(request):
         # A visitor with no session sees which keys are set, never the end of one, and a base URL without the
-        # user:password@ or ?token= a gateway may need.
+        # user:password@ or ?token= a gateway may need. A key's label is withheld too: OpenRouter sends it as a
+        # masked copy of the key, which is the same end the hints hide.
         out = [
             p.model_copy(
                 update={
@@ -219,6 +220,7 @@ def list_providers(request: Request, session: Session = Depends(get_session)) ->
                     "mgmt_key_hint": None,
                     "extra_key_hint": None,
                     "base_url": public_url(p.base_url) if p.base_url else p.base_url,
+                    "balance": p.balance.model_copy(update={"key_label": None}) if p.balance else None,
                 }
             )
             for p in out

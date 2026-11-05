@@ -150,6 +150,9 @@ class OpenRouterAdapter(ProviderAdapter):
                         "quantization": ep.get("quantization"),
                         "input": _per_million(p.get("prompt")),
                         "output": _per_million(p.get("completion")),
+                        # Each provider prices its own cache, or has none: the model's listed cache price is only one
+                        # endpoint's, so a ranking that borrows it picks the wrong provider for a cache-heavy task.
+                        "cache_read": _per_million(p.get("input_cache_read")),
                         "discount": _f(p.get("discount")) or 0.0,
                         "uptime_1d": ep.get("uptime_last_1d"),
                         "service_tier": ep.get("service_tier"),

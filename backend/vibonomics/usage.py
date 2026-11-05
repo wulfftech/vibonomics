@@ -18,24 +18,29 @@ cached tokens are part of the prompt tokens. So tokens processed are prompt plus
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
-from sqlalchemy import delete, false, func, select
+from sqlalchemy import case, delete, false, func, select
 from sqlalchemy.orm import Session
 
 from .db import session_scope
 from .http import FetchError, get_json
 from .orm import ProviderConfig, UsageDay, UsageKey, utcnow
 from .provider_service import resolve
+from .providers.openrouter import API as OPENROUTER_API
 
 log = logging.getLogger(__name__)
 
 RECENT_KEY_DAYS = 31
 KEY_PAGES = 10
 KEY_CONCURRENCY = 4
+# Its own budget, apart from the account's fetch: a key that never answers must not cost the rows already stored.
+KEYS_TIMEOUT = 300
 MODELS_SHOWN = 30
 UPSTREAMS_SHOWN = 15
 
@@ -133,7 +138,9 @@ async def _list_keys(base_url: str, headers: dict[str, str]) -> list[KeyInfo]:
             fresh += 1
             keys[digest] = KeyInfo(
                 hash=digest,
-                name=str(k.get("name") or k.get("label") or "")[:200],
+                # Never the label: OpenRouter sends it as a masked copy of the key, and the page shows this name to
+                # visitors. A nameless key is shown as "Key <hash>" by the summary.
+                name=str(k.get("name") or "")[:200],
                 disabled=bool(k.get("disabled")),
                 last_used_at=_time(k.get("last_used_at")),
                 usage_total=_num(k.get("usage")),
@@ -146,8 +153,21 @@ async def _list_keys(base_url: str, headers: dict[str, str]) -> list[KeyInfo]:
     return list(keys.values())
 
 
-async def fetch_account(base_url: str, mgmt_key: str) -> Account:
-    """The account's activity, and each recently used key's. A key that fails is skipped and reported."""
+def _only_openrouter(base_url: str) -> None:
+    """Refuse any host but OpenRouter's before the management key is attached to a request.
+
+    The key can create and delete API keys. A provider row's Base URL override is for clients (the adapter's own
+    balance and model calls ignore it), so a gateway pointed at there must never be sent this one.
+    """
+    wanted, given = urlsplit(OPENROUTER_API), urlsplit(base_url.strip())
+    if (given.scheme.lower(), given.netloc.lower()) != (wanted.scheme, wanted.netloc.lower()):
+        where = given.hostname or "that host"
+        raise FetchError(f"The management key is sent only to {wanted.hostname}, so it was not sent to {where}.")
+
+
+async def fetch_overview(base_url: str, mgmt_key: str) -> Account:
+    """The whole account's activity and its list of keys: enough to store before the per-key fetches start."""
+    _only_openrouter(base_url)
     headers = {"Authorization": f"Bearer {mgmt_key}"}
     account = Account()
     # The whole account first: when this fails there is nothing worth storing.
@@ -157,9 +177,18 @@ async def fetch_account(base_url: str, mgmt_key: str) -> Account:
         account.keys = await _list_keys(base_url, headers)
     except FetchError as exc:
         account.errors.append(f"API keys: {exc}")
-        return account
+    return account
 
+
+async def fetch_per_key(base_url: str, mgmt_key: str, account: Account) -> None:
+    """Add each recently used key's activity to ``account.per_key``. A key that fails is skipped and reported.
+
+    The phase has its own ``KEYS_TIMEOUT``. When it runs out, the keys that answered are kept.
+    """
+    _only_openrouter(base_url)
+    headers = {"Authorization": f"Bearer {mgmt_key}"}
     cutoff = utcnow() - timedelta(days=RECENT_KEY_DAYS)
+    recent = [k for k in account.keys if k.last_used_at and k.last_used_at >= cutoff]
     gate = asyncio.Semaphore(KEY_CONCURRENCY)
 
     async def one(key: KeyInfo) -> None:
@@ -173,7 +202,18 @@ async def fetch_account(base_url: str, mgmt_key: str) -> Account:
                 return
         account.per_key[key.hash] = parse_rows(data.get("data"))
 
-    await asyncio.gather(*(one(k) for k in account.keys if k.last_used_at and k.last_used_at >= cutoff))
+    try:
+        await asyncio.wait_for(asyncio.gather(*(one(k) for k in recent)), KEYS_TIMEOUT)
+    except TimeoutError:
+        account.errors.append(
+            f"per-key activity timed out after {KEYS_TIMEOUT:g}s ({len(account.per_key)} of {len(recent)} keys fetched)"
+        )
+
+
+async def fetch_account(base_url: str, mgmt_key: str) -> Account:
+    """The account's activity, and each recently used key's, in one go."""
+    account = await fetch_overview(base_url, mgmt_key)
+    await fetch_per_key(base_url, mgmt_key, account)
     return account
 
 
@@ -245,19 +285,30 @@ class Bucket:
     reasoning_tokens: int = 0
     cached_tokens: int = 0
     byok: float = 0.0
+    # The same three figures over the rows with no own-key (BYOK) spend. The activity API splits a day's spend into
+    # credits and own-key spend, but not the tokens, so a ratio of credits to tokens is only honest over the rows
+    # that have no own-key spend. A row that mixes both is left out whole.
+    credit_cost: float = 0.0
+    credit_requests: int = 0
+    credit_tokens: int = 0
 
     @property
     def tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
 
     @property
+    def byok_tokens(self) -> int:
+        """Tokens on rows that report own-key spend, which cost_per_mtok leaves out."""
+        return self.tokens - self.credit_tokens
+
+    @property
     def cost_per_mtok(self) -> float | None:
-        """USD per million tokens processed: the account's overall efficiency."""
-        return self.cost / self.tokens * 1e6 if self.tokens else None
+        """USD of credits per million tokens billed in credits: the account's efficiency, own-key traffic aside."""
+        return self.credit_cost / self.credit_tokens * 1e6 if self.credit_tokens else None
 
     @property
     def cost_per_request(self) -> float | None:
-        return self.cost / self.requests if self.requests else None
+        return self.credit_cost / self.credit_requests if self.credit_requests else None
 
     @property
     def cache_hit(self) -> float | None:
@@ -272,6 +323,9 @@ class Bucket:
             reasoning_tokens=max(0, self.reasoning_tokens - other.reasoning_tokens),
             cached_tokens=max(0, self.cached_tokens - other.cached_tokens),
             byok=max(0.0, self.byok - other.byok),
+            credit_cost=max(0.0, self.credit_cost - other.credit_cost),
+            credit_requests=max(0, self.credit_requests - other.credit_requests),
+            credit_tokens=max(0, self.credit_tokens - other.credit_tokens),
         )
 
     def plus(self, other: Bucket) -> Bucket:
@@ -283,6 +337,9 @@ class Bucket:
             self.reasoning_tokens + other.reasoning_tokens,
             self.cached_tokens + other.cached_tokens,
             self.byok + other.byok,
+            self.credit_cost + other.credit_cost,
+            self.credit_requests + other.credit_requests,
+            self.credit_tokens + other.credit_tokens,
         )
 
 
@@ -321,6 +378,8 @@ class Summary:
     today_as_of: datetime | None
 
 
+_CREDIT_ROW = UsageDay.byok_usage <= 0
+
 _SUMS = (
     func.sum(UsageDay.usage),
     func.sum(UsageDay.requests),
@@ -329,12 +388,28 @@ _SUMS = (
     func.sum(UsageDay.reasoning_tokens),
     func.sum(UsageDay.cached_tokens),
     func.sum(UsageDay.byok_usage),
+    func.sum(case((_CREDIT_ROW, UsageDay.usage), else_=0.0)),
+    func.sum(case((_CREDIT_ROW, UsageDay.requests), else_=0)),
+    func.sum(case((_CREDIT_ROW, UsageDay.prompt_tokens + UsageDay.completion_tokens), else_=0)),
 )
 
 
 def _bucket(values: Any) -> Bucket:
-    cost, requests, prompt, completion, reasoning, cached, byok = (v or 0 for v in values)
-    return Bucket(float(cost), int(requests), int(prompt), int(completion), int(reasoning), int(cached), float(byok))
+    cost, requests, prompt, completion, reasoning, cached, byok, credit_cost, credit_requests, credit_tokens = (
+        v or 0 for v in values
+    )
+    return Bucket(
+        float(cost),
+        int(requests),
+        int(prompt),
+        int(completion),
+        int(reasoning),
+        int(cached),
+        float(byok),
+        float(credit_cost),
+        int(credit_requests),
+        int(credit_tokens),
+    )
 
 
 def _grouped(session: Session, column: Any, where: list[Any]) -> dict[str, Bucket]:
@@ -352,48 +427,11 @@ def _fold(buckets: dict[str, Bucket], shown: int, label: str) -> list[tuple[str,
     return [*ranked[:shown], (f"{label} ({len(ranked) - shown})", rest)]
 
 
-def summarize(session: Session, days: int, provider_id: int | None, key_hash: str | None) -> Summary:
-    """Spend over the last ``days`` days of history for one account or all of them, and for one key or the whole."""
-    providers = list(
-        session.scalars(
-            select(ProviderConfig)
-            .where(ProviderConfig.type == "openrouter", ProviderConfig.enabled.is_(True))
-            .order_by(ProviderConfig.id)
-        )
+def _key_summaries(session: Session, scope: list[Any], ids: list[int], since: str | None) -> list[KeySummary]:
+    """Every key of the accounts in scope, with its spend since ``since`` (none when there is no window)."""
+    keyed = (
+        _grouped(session, UsageDay.key_hash, [*scope, UsageDay.key_hash != "", UsageDay.date >= since]) if since else {}
     )
-    accounts: list[AccountSummary] = []
-    for p in providers:
-        first, last, synced = session.execute(
-            select(func.min(UsageDay.date), func.max(UsageDay.date), func.max(UsageDay.fetched_at)).where(
-                UsageDay.provider_config_id == p.id, UsageDay.key_hash == ""
-            )
-        ).one()
-        accounts.append(AccountSummary(p.id, p.name, resolve(p).mgmt_key is not None, synced, first, last))
-
-    ids = [p.id for p in providers if provider_id is None or p.id == provider_id]
-    scope = [UsageDay.provider_config_id.in_(ids)] if ids else [false()]
-    whole = [*scope, UsageDay.key_hash == ""]
-    chosen = [*scope, UsageDay.key_hash == key_hash] if key_hash else whole
-
-    first, last = session.execute(select(func.min(UsageDay.date), func.max(UsageDay.date)).where(*chosen)).one()
-    today, today_as_of = _today(session, ids, key_hash)
-    if last is None:
-        return Summary(accounts, None, None, Bucket(), [], [], [], [], None, today, today_as_of)
-    since = max(first, (date.fromisoformat(last) - timedelta(days=days - 1)).isoformat())
-    window = [*chosen, UsageDay.date >= since]
-
-    per_day = _grouped(session, UsageDay.date, window)
-    daily: list[tuple[str, Bucket]] = []
-    day = date.fromisoformat(since)
-    while day <= date.fromisoformat(last):
-        daily.append((day.isoformat(), per_day.get(day.isoformat(), Bucket())))
-        day += timedelta(days=1)
-    totals = Bucket()
-    for _day, bucket in daily:
-        totals = totals.plus(bucket)
-
-    # The keys are listed even when one is chosen, so a picker built from them keeps its options.
-    keyed = _grouped(session, UsageDay.key_hash, [*scope, UsageDay.key_hash != "", UsageDay.date >= since])
     listed = list(session.scalars(select(UsageKey).where(UsageKey.provider_config_id.in_(ids)))) if ids else []
     names = {k.key_hash: k for k in listed}
     keys: list[KeySummary] = []
@@ -410,6 +448,70 @@ def summarize(session: Session, days: int, provider_id: int | None, key_hash: st
             )
         )
     keys.sort(key=lambda k: (-k.bucket.cost, k.name))
+    return keys
+
+
+def summarize(session: Session, days: int, provider_id: int | None, key_hash: str | None) -> Summary:
+    """Spend over the last ``days`` days of history for one account or all of them, and for one key or the whole."""
+    providers = list(
+        session.scalars(
+            select(ProviderConfig)
+            .where(ProviderConfig.type == "openrouter", ProviderConfig.enabled.is_(True))
+            .order_by(ProviderConfig.id)
+        )
+    )
+    accounts: list[AccountSummary] = []
+    identity: dict[int, str | None] = {}
+    for p in providers:
+        first, last, synced = session.execute(
+            select(func.min(UsageDay.date), func.max(UsageDay.date), func.max(UsageDay.fetched_at)).where(
+                UsageDay.provider_config_id == p.id, UsageDay.key_hash == ""
+            )
+        ).one()
+        mgmt_key = resolve(p).mgmt_key
+        accounts.append(AccountSummary(p.id, p.name, mgmt_key is not None, synced, first, last))
+        identity[p.id] = hashlib.sha256(mgmt_key.encode()).hexdigest() if mgmt_key else None
+
+    ids: list[int] = []
+    counted: set[str] = set()
+    for p in providers:
+        if provider_id is not None:
+            if p.id == provider_id:
+                ids.append(p.id)
+            continue
+        # Providers with one management key read one OpenRouter account, so summing them would count it twice.
+        # That includes every provider while the key comes from the environment. A provider with no key has none.
+        who = identity[p.id]
+        if who is not None:
+            if who in counted:
+                continue
+            counted.add(who)
+        ids.append(p.id)
+    scope = [UsageDay.provider_config_id.in_(ids)] if ids else [false()]
+    whole = [*scope, UsageDay.key_hash == ""]
+    chosen = [*scope, UsageDay.key_hash == key_hash] if key_hash else whole
+
+    first, last = session.execute(select(func.min(UsageDay.date), func.max(UsageDay.date)).where(*chosen)).one()
+    today, today_as_of = _today(session, ids, key_hash)
+    if last is None:
+        # The picker is built from the keys, so a key with no rows must not take it away (and the way back to all).
+        keys = _key_summaries(session, scope, ids, None)
+        return Summary(accounts, None, None, Bucket(), [], [], [], keys, None, today, today_as_of)
+    since = max(first, (date.fromisoformat(last) - timedelta(days=days - 1)).isoformat())
+    window = [*chosen, UsageDay.date >= since]
+
+    per_day = _grouped(session, UsageDay.date, window)
+    daily: list[tuple[str, Bucket]] = []
+    day = date.fromisoformat(since)
+    while day <= date.fromisoformat(last):
+        daily.append((day.isoformat(), per_day.get(day.isoformat(), Bucket())))
+        day += timedelta(days=1)
+    totals = Bucket()
+    for _day, bucket in daily:
+        totals = totals.plus(bucket)
+
+    # The keys are listed even when one is chosen, so a picker built from them keeps its options.
+    keys = _key_summaries(session, scope, ids, since)
     other: Bucket | None = None
     if not key_hash:
         attributed = Bucket()

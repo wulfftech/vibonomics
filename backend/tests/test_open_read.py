@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 from vibonomics.api.auth import READ_METHODS
 from vibonomics.app import _api_app, create_app
 from vibonomics.config import get_config
-from vibonomics.db import init_db
+from vibonomics.db import init_db, session_scope
+from vibonomics.orm import Balance
 
 LOGIN = {"password": "hunter2"}
 NOT_AUTHENTICATED = {"detail": "Not authenticated"}
@@ -147,6 +148,30 @@ def test_a_visitor_sees_which_keys_are_set_but_not_their_ends(client):
         assert theirs["api_key_hint"] is None
         assert theirs["mgmt_key_hint"] is None
         assert theirs["extra_key_hint"] is None
+    finally:
+        _logged_in(client).delete(f"/api/providers/{provider_id}")
+
+
+def test_a_visitor_does_not_get_a_keys_label_in_the_balance(client):
+    # OpenRouter's key label is a masked copy of the key, which the hints beside it hide from visitors.
+    _logged_in(client)
+    created = client.post(
+        "/api/providers", json={"type": "openrouter", "name": "Open read label test", "enabled": False}
+    )
+    assert created.status_code == 201
+    provider_id = created.json()["id"]
+    with session_scope() as session:
+        session.add(Balance(provider_config_id=provider_id, status="ok", key_label="sk-or-v1-abc...xyz"))
+    try:
+        mine = next(p for p in client.get("/api/providers").json() if p["id"] == provider_id)
+        assert mine["balance"]["key_label"] == "sk-or-v1-abc...xyz"
+
+        client.post("/api/auth/logout")
+        response = client.get("/api/providers")
+        theirs = next(p for p in response.json() if p["id"] == provider_id)
+        assert theirs["balance"]["status"] == "ok"
+        assert theirs["balance"]["key_label"] is None
+        assert "sk-or-v1-abc" not in response.text
     finally:
         _logged_in(client).delete(f"/api/providers/{provider_id}")
 

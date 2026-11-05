@@ -76,6 +76,43 @@ def test_a_price_change_adds_a_history_row_even_when_the_total_is_the_same():
     assert history == [(1.0, 3.0), (3.0, 1.0), (3.0, None)]
 
 
+def _stored_extra(provider_id: int, model_id: str) -> dict:
+    with session_scope() as s:
+        row = s.scalars(select(Model).where(Model.provider_config_id == provider_id, Model.model_id == model_id)).one()
+        return dict(row.extra)
+
+
+ENDPOINTS = [{"provider": "DeepInfra", "tag": "deepinfra/fp8", "input": 0.1, "output": 0.4, "cache_read": 0.02}]
+
+
+def test_a_refresh_with_no_endpoint_data_keeps_the_endpoints_the_model_already_had():
+    # A failed /endpoints lookup, or the discounts setting turned off, leaves the offer without an "endpoints" key.
+    # Replacing the stored extra wholesale used to drop them, and the preset lost its pins until the next good run.
+    provider_id = _provider("endpoints-kept")
+    jobs.persist_offers(
+        provider_id, [ModelOffer(model_id="m", name="M", extra={"endpoints": ENDPOINTS, "description": "old"})]
+    )
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", extra={"description": "new"})])
+    extra = _stored_extra(provider_id, "m")
+    assert extra["endpoints"] == ENDPOINTS
+    assert extra["description"] == "new"  # the rest of the offer still replaces what was stored
+
+
+def test_a_lookup_that_succeeded_with_no_endpoints_does_not_keep_stale_ones():
+    provider_id = _provider("endpoints-emptied")
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", extra={"endpoints": ENDPOINTS})])
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", extra={"endpoints": []})])
+    assert _stored_extra(provider_id, "m")["endpoints"] == []
+
+
+def test_a_model_that_became_free_does_not_keep_endpoints_that_were_never_looked_up_for_it():
+    # Free models skip the endpoint lookup, so their offer has none by design, not because a lookup failed.
+    provider_id = _provider("endpoints-free")
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", extra={"endpoints": ENDPOINTS})])
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", is_free=True, extra={})])
+    assert "endpoints" not in _stored_extra(provider_id, "m")
+
+
 async def test_a_provider_that_fails_while_saving_does_not_fail_the_others_or_free_the_lock_early(monkeypatch):
     deleted_id = _provider("deleted mid-run")
     slow_id = _provider("slow")
