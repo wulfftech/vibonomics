@@ -11,15 +11,7 @@ import { CopyIconButton } from '../CopyIconButton';
 import { EmptyState } from '../DataState';
 import { providerTextColor } from '../../lib/providerColors';
 import { ProviderDot } from '../ProviderDot';
-import {
-  BlendedCell,
-  CompositeCell,
-  DiscountCell,
-  ModelNameCell,
-  ScoreNumber,
-  TaskCostCell,
-  ValueCell,
-} from './cells';
+import { BlendedCell, CompositeCell, DiscountCell, ModelNameCell, ScoreNumber, TaskCostCell, ValueCell } from './cells';
 
 interface Column extends ColumnSpec {
   label?: string;
