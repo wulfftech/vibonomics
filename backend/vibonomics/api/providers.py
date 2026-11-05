@@ -15,10 +15,10 @@ from sqlalchemy.orm import Session
 from .. import crypto, events
 from ..catalog.modelsdev import load_catalog
 from ..db import get_session, session_scope
-from ..http import FetchError
+from ..http import FetchError, public_url
 from ..jobs import run_job, spawn
 from ..orm import Balance, ProviderConfig
-from ..provider_service import env_locked, resolve
+from ..provider_service import env_locked, resolve, resolve_draft
 from ..providers.base import FetchContext, ResolvedProvider
 from ..providers.registry import all_specs, get_adapter_class
 from ..settings_store import load_settings
@@ -125,7 +125,7 @@ class TestResult(BaseModel):
 
 
 class ProviderTestOverride(BaseModel):
-    """Values from an unsaved form; only the fields present replace the stored ones."""
+    """Values from an unsaved form; only the fields present replace the stored ones (``options`` as a whole)."""
 
     api_key: str | None = None
     mgmt_key: str | None = None
@@ -210,8 +210,19 @@ def list_providers(request: Request, session: Session = Depends(get_session)) ->
     providers = session.scalars(select(ProviderConfig).order_by(ProviderConfig.name)).all()
     out = [_provider_out(p, session) for p in providers]
     if not is_authenticated(request):
-        # A visitor with no session sees which keys are set, never the end of one.
-        out = [p.model_copy(update={"api_key_hint": None, "mgmt_key_hint": None, "extra_key_hint": None}) for p in out]
+        # A visitor with no session sees which keys are set, never the end of one, and a base URL without the
+        # user:password@ or ?token= a gateway may need.
+        out = [
+            p.model_copy(
+                update={
+                    "api_key_hint": None,
+                    "mgmt_key_hint": None,
+                    "extra_key_hint": None,
+                    "base_url": public_url(p.base_url) if p.base_url else p.base_url,
+                }
+            )
+            for p in out
+        ]
     return out
 
 
@@ -282,18 +293,18 @@ async def test_provider_draft(body: ProviderIn) -> TestResult:
         raise HTTPException(400, f"Unknown provider type '{body.type}'")
     if cls.spec.custom and not (body.base_url or "").strip():
         raise HTTPException(400, "A base URL is required for custom providers")
-    transient = ProviderConfig(
-        type=body.type,
-        name=(body.name or cls.spec.name).strip(),
-        base_url=(body.base_url or "").strip() or None,
-        options=body.options or {},
-        api_key_enc=crypto.encrypt(body.api_key) if body.api_key else None,
-        mgmt_key_enc=crypto.encrypt(body.mgmt_key) if body.mgmt_key else None,
-        extra_key_enc=crypto.encrypt(body.extra_key) if body.extra_key else None,
+    draft = resolve_draft(
+        body.type,
+        (body.name or cls.spec.name).strip(),
+        api_key=body.api_key,
+        mgmt_key=body.mgmt_key,
+        extra_key=body.extra_key,
+        base_url=body.base_url,
+        options=body.options,
     )
     with session_scope() as session:
         settings = load_settings(session)
-    return await _run_test(resolve(transient), settings)
+    return await _run_test(draft, settings)
 
 
 @router.post("/{provider_id}/test", response_model=TestResult)
@@ -349,7 +360,8 @@ def _override(cfg: ResolvedProvider, body: ProviderTestOverride | None) -> Resol
     if body.base_url is not None:
         cfg.base_url = body.base_url.strip() or None
     if body.options is not None:
-        cfg.options = {**cfg.options, **{k: v for k, v in body.options.items() if v not in (None, "")}}
+        # Replace, as update_provider does: Save stores exactly this, so a cleared option must test as cleared.
+        cfg.options = dict(body.options)
     return cfg
 
 

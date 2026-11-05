@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from ..http import scrub_secrets
+from ..http import drop_secrets_on_redirect, scrub_secrets
 from ..providers.base import ChatTarget
 
 log = logging.getLogger(__name__)
@@ -100,7 +100,11 @@ class LLMClient:
         self.timeout = timeout
         self.max_tokens = max_tokens
         self._token_param = "max_tokens"
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=20.0), follow_redirects=True)
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=20.0),
+            follow_redirects=True,
+            event_hooks={"request": [drop_secrets_on_redirect]},
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -246,7 +250,7 @@ class LLMClient:
                 await asyncio.sleep(_retry_delay(response, attempt))
                 continue
             if response.status_code >= 400:
-                raise ChatError(self._scrub(f"HTTP {response.status_code}: {_error_text(response)}"))
+                raise ChatError(f"HTTP {response.status_code}: {self._scrub(_error_text(response))[:300]}")
             latency = int((time.monotonic() - started) * 1000)
             try:
                 data = response.json()
@@ -269,14 +273,15 @@ def _retry_delay(response: httpx.Response, attempt: int) -> float:
 
 
 def _error_text(response: httpx.Response) -> str:
+    """The error as the endpoint worded it, uncut: the caller scrubs it first, because a cut can split a key."""
     try:
         data = response.json()
     except ValueError:
-        return response.text[:300]
+        return response.text
     error = data.get("error") if isinstance(data, dict) else None
     if isinstance(error, dict):
-        return str(error.get("message") or error)[:300]
-    return str(data)[:300]
+        return str(error.get("message") or error)
+    return str(data)
 
 
 def _flatten_content(content: Any) -> str:

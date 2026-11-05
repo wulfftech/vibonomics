@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
 from vibonomics.app import create_app
+from vibonomics.catalog.modelsdev import ModelsDevCatalog
 from vibonomics.config import get_config
 from vibonomics.db import init_db, session_scope
 from vibonomics.orm import Model, ProviderConfig
@@ -25,6 +26,12 @@ ENDPOINTS = [
 @pytest.fixture
 def client(monkeypatch) -> tuple[TestClient, dict[str, int]]:
     monkeypatch.delenv("VIBONOMICS_PASSWORD", raising=False)
+
+    async def no_catalog(force: bool = False) -> ModelsDevCatalog:
+        return ModelsDevCatalog({})
+
+    # The details endpoint loads the catalogue; without this the test needs models.dev.
+    monkeypatch.setattr("vibonomics.api.models.load_catalog", no_catalog)
     get_config.cache_clear()
     init_db()
     with session_scope() as session:

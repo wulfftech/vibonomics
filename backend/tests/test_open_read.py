@@ -151,6 +151,30 @@ def test_a_visitor_sees_which_keys_are_set_but_not_their_ends(client):
         _logged_in(client).delete(f"/api/providers/{provider_id}")
 
 
+def test_a_visitor_gets_a_base_url_without_its_credentials(client):
+    _logged_in(client)
+    created = client.post(
+        "/api/providers",
+        json={
+            "type": "custom-openai",
+            "name": "Open read url test",
+            "enabled": False,
+            "base_url": "https://admin:s3cret@gateway.example:8443/v1?token=abc123",
+        },
+    )
+    assert created.status_code == 201
+    provider_id = created.json()["id"]
+    try:
+        mine = next(p for p in client.get("/api/providers").json() if p["id"] == provider_id)
+        assert mine["base_url"] == "https://admin:s3cret@gateway.example:8443/v1?token=abc123"
+
+        client.post("/api/auth/logout")
+        theirs = next(p for p in client.get("/api/providers").json() if p["id"] == provider_id)
+        assert theirs["base_url"] == "https://gateway.example:8443/v1"
+    finally:
+        _logged_in(client).delete(f"/api/providers/{provider_id}")
+
+
 def test_a_visitor_does_not_get_the_ingest_token(client):
     _logged_in(client)
     mine = client.get("/api/subscription/claude").json()

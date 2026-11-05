@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,35 @@ USER_AGENT = f"Vibonomics/{__version__} (+self-hosted LLM analysis)"
 
 _client: httpx.AsyncClient | None = None
 
+_USERINFO = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/]*@")
+# Stops before trailing punctuation, so "…?token=x: HTTP 500" keeps its colon.
+_URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>)]*[^\s'\"<>):.,;]")
+_SECRET_HEADER = re.compile(r"auth|key|token|secret|cookie|credential|password", re.IGNORECASE)
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_FIRST_ORIGIN = "vibonomics.first_origin"
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    return url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme)
+
+
+async def drop_secrets_on_redirect(request: httpx.Request) -> None:
+    """Strip key and token headers from a request that a redirect has sent to another origin.
+
+    httpx drops only ``Authorization`` there, so ``x-api-key`` and ``x-goog-api-key`` would go to whatever host a
+    base URL override (or a hostile endpoint) redirects to. The first request of a chain records its origin in
+    its extensions, which every redirected request in the chain inherits. An http to https upgrade of the same
+    host keeps its headers, as httpx keeps ``Authorization`` there: they were already sent in the clear.
+    """
+    here = _origin(request.url)
+    first = request.extensions.setdefault(_FIRST_ORIGIN, here)
+    if here == first:
+        return
+    if first[1] == here[1] and (first[0], first[2], here[0], here[2]) == ("http", 80, "https", 443):
+        return
+    for name in {name for name in request.headers if _SECRET_HEADER.search(name)}:
+        del request.headers[name]
+
 
 def get_client() -> httpx.AsyncClient:
     global _client
@@ -27,6 +58,7 @@ def get_client() -> httpx.AsyncClient:
             follow_redirects=True,
             headers={"User-Agent": USER_AGENT},
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+            event_hooks={"request": [drop_secrets_on_redirect]},
         )
     return _client
 
@@ -42,7 +74,8 @@ class FetchError(Exception):
     """A fetch failed in a way worth surfacing to the operator (status code, auth, parse)."""
 
     def __init__(self, message: str = "", status: int | None = None):
-        super().__init__(message)
+        # Adapters word some of these themselves, with a base URL that may carry user:password@ or ?token=.
+        super().__init__(_redact_urls(message))
         self.status = status
 
 
@@ -106,7 +139,8 @@ async def request(
             await asyncio.sleep(2.0 * (attempt + 1))
             continue
         if resp.status_code >= 400:
-            body = scrub_secrets(resp.text[:300].replace("\n", " "), headers, params)
+            # Scrub before cutting: a key the remote echoes across the cut would no longer match in full.
+            body = scrub_secrets(resp.text.replace("\n", " "), headers, params)[:300]
             raise FetchError(f"{method} {_redact(url)}: HTTP {resp.status_code} {body}", status=resp.status_code)
         return resp
     raise FetchError(f"{method} {_redact(url)}: {scrub_secrets(str(last_exc), headers, params)}")
@@ -126,12 +160,30 @@ def scrub_secrets(text: str, *sources: dict[str, Any] | None) -> str:
     return text
 
 
+def public_url(url: str) -> str:
+    """``url`` without its userinfo, query and fragment: the part that is safe to show a visitor or write to a log."""
+    head = re.split(r"[?#]", url, maxsplit=1)[0]
+    return _USERINFO.sub(r"\1", head)
+
+
 def _redact(url: str) -> str:
-    # Some APIs (Gemini) accept ?key=...; never let it reach logs or the UI.
-    if "key=" in url:
-        head, _, _tail = url.partition("?")
-        return head + "?…"
-    return url
+    # Some APIs (Gemini) accept ?key=..., and a gateway may want user:password@ or ?token=; none may reach a log
+    # or the UI.
+    shown = public_url(url)
+    return f"{shown}?…" if "?" in url.partition("#")[0] else shown
+
+
+def _redact_urls(text: str) -> str:
+    return _URL_IN_TEXT.sub(lambda match: _redact(match.group(0)), text)
+
+
+def _read_cache(cache_file: Path, validate: Callable[[Any], bool] | None) -> Any | None:
+    """The cached JSON, or None when there is none worth using (missing, unreadable, or failing ``validate``)."""
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if validate is None or validate(data) else None
 
 
 async def cached_json(
@@ -140,14 +192,22 @@ async def cached_json(
     *,
     headers: dict[str, str] | None = None,
     timeout: float = 120.0,
+    validate: Callable[[Any], bool] | None = None,
 ) -> Any:
-    """Fetch JSON, falling back to the last good copy on disk when the network fails."""
+    """Fetch JSON, falling back to the last good copy on disk when the network fails.
+
+    ``validate`` says whether an answer has the shape the caller expects. A 200 that fails it counts as a failed
+    fetch: it is neither returned nor written over the good copy, which would then hold an error body.
+    """
     try:
         data = await get_json(url, headers=headers, timeout=timeout)
+        if validate is not None and not validate(data):
+            raise FetchError(f"{_redact(url)}: the response was not the expected shape")
     except FetchError:
-        if cache_file.exists():
-            log.warning("Using cached copy of %s", url)
-            return json.loads(cache_file.read_text(encoding="utf-8"))
+        cached = _read_cache(cache_file, validate)
+        if cached is not None:
+            log.warning("Using cached copy of %s", _redact(url))
+            return cached
         raise
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -155,5 +215,5 @@ async def cached_json(
         tmp.write_text(json.dumps(data), encoding="utf-8")
         tmp.replace(cache_file)
     except OSError as exc:  # cache is best-effort
-        log.warning("Could not cache %s: %s", url, exc)
+        log.warning("Could not cache %s: %s", _redact(url), exc)
     return data

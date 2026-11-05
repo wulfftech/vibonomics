@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from vibonomics.api import providers as api
 from vibonomics.db import init_db, session_scope
 from vibonomics.orm import ProviderConfig
+from vibonomics.providers.registry import ADAPTERS
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -130,13 +131,35 @@ def test_blank_base_url_means_the_default_host_and_keeps_the_key(monkeypatch):
     assert response.json()["message"].split("|")[0] == "stored-key"
 
 
+def test_a_cleared_base_url_tests_the_default_host_without_the_key_saved_for_the_override(monkeypatch):
+    with session_scope() as session:
+        row = ProviderConfig(
+            type="groq",
+            name="Groq behind a gateway",
+            enabled=True,
+            api_key_enc=api.crypto.encrypt("gateway-key"),
+            base_url="https://gateway.example/v1",
+            options={},
+        )
+        session.add(row)
+        session.flush()
+        provider_id = row.id
+    client = _client(monkeypatch)
+
+    cleared = client.post(f"/api/providers/{provider_id}/test", json={"base_url": ""})
+
+    message = cleared.json()["message"]
+    assert message.split(" The saved key")[0].split("|") == ["None", "None", "None", "None"]
+    assert "The saved key was not sent to a different host" in message
+
+
 def test_draft_requires_custom_base_url(monkeypatch):
     client = _client(monkeypatch)
     response = client.post("/api/providers/test", json={"type": "custom-openai", "api_key": "x"})
     assert response.status_code == 400
 
 
-def test_override_is_non_destructive():
+def test_override_replaces_the_options_as_save_does():
     base = api.ResolvedProvider(
         id=1,
         type="openrouter",
@@ -148,8 +171,39 @@ def test_override_is_non_destructive():
     )
     overridden = api._override(base, api.ProviderTestOverride(api_key="new", options={"b": "2"}))
     assert overridden.api_key == "new"
-    assert overridden.options == {"a": "1", "b": "2"}
+    assert overridden.options == {"b": "2"}
     # The dataclass mutates in place; the caller builds it fresh per request.
+
+
+def test_options_left_out_of_a_test_stay_as_saved():
+    base = api.ResolvedProvider(
+        id=1, type="openrouter", name="x", api_key=None, mgmt_key=None, base_url=None, options={"a": "1"}
+    )
+    assert api._override(base, api.ProviderTestOverride(api_key="new")).options == {"a": "1"}
+
+
+def test_clearing_an_option_clears_it_in_the_test_too(wire):
+    """Save stores the options as sent, so Test has to check them as sent: a cleared region is no region."""
+    client, calls = wire
+    with session_scope() as session:
+        row = ProviderConfig(
+            type="moonshot",
+            name="Moonshot with a region",
+            enabled=True,
+            api_key_enc=api.crypto.encrypt("sk-test-stored"),
+            options={"region": "cn"},
+        )
+        session.add(row)
+        session.flush()
+        provider_id = row.id
+
+    saved = client.post(f"/api/providers/{provider_id}/test")
+    assert saved.json()["ok"] is True
+    assert calls[-1].request.url.host == "api.moonshot.cn"
+
+    cleared = client.post(f"/api/providers/{provider_id}/test", json={"options": {}})
+    assert cleared.json()["ok"] is True
+    assert calls[-1].request.url.host == "api.moonshot.ai"
 
 
 def test_refresh_targets_one_provider(monkeypatch):
@@ -244,3 +298,115 @@ def test_a_key_with_a_stray_newline_never_reaches_the_message(monkeypatch):
         assert "Illegal header value" in str(caught.value)
     finally:
         server.shutdown()
+
+
+# -- the draft test never uses environment keys, and never sends a key anywhere the form did not name -----------------
+
+
+@pytest.fixture
+def wire(monkeypatch):
+    """The real ``_run_test`` and adapters, with every outbound request recorded and answered by a stub."""
+    import httpx
+    import respx
+
+    from vibonomics import http
+    from vibonomics.catalog import modelsdev
+    from vibonomics.catalog.modelsdev import ModelsDevCatalog
+
+    async def empty_catalog(force: bool = False):
+        return ModelsDevCatalog({})
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(api, "load_catalog", empty_catalog)
+    monkeypatch.setattr(http.asyncio, "sleep", no_wait)
+    # The shared client belongs to the event loop that first used it.
+    monkeypatch.setattr(http, "_client", None)
+    app = FastAPI()
+    app.include_router(api.router)
+    with respx.mock(assert_all_called=False) as router:
+        router.get(modelsdev.URL).mock(side_effect=httpx.ConnectError("no route"))
+        router.route().mock(return_value=httpx.Response(200, json={"data": []}))
+        yield TestClient(app), router.calls
+
+
+def _sent(calls) -> list[str]:
+    return [f"{call.request.url}\n{dict(call.request.headers)}\n{call.request.content!r}" for call in calls]
+
+
+@pytest.mark.parametrize("ptype", sorted(ADAPTERS))
+def test_a_draft_test_never_sends_an_environment_key(monkeypatch, wire, ptype):
+    client, calls = wire
+    spec = ADAPTERS[ptype].spec
+    monkeypatch.setenv(spec.env_key, "sk-test-env-api")
+    monkeypatch.setenv(spec.env_mgmt_key, "sk-test-env-mgmt")
+    monkeypatch.setenv(spec.env_extra_key, "sk-test-env-extra")
+
+    response = client.post("/api/providers/test", json={"type": ptype, "base_url": "https://attacker.example/v1"})
+
+    assert response.status_code == 200
+    assert not [text for text in _sent(calls) if "sk-test-env" in text], _sent(calls)
+    assert "sk-test-env" not in response.text
+
+
+def test_the_key_typed_into_the_form_is_the_key_tested_even_with_an_environment_key(monkeypatch, wire):
+    client, calls = wire
+    monkeypatch.setenv("VIBONOMICS_CUSTOM_OPENAI_API_KEY", "sk-test-env-api")
+
+    response = client.post(
+        "/api/providers/test",
+        json={"type": "custom-openai", "base_url": "https://llm.example/v1", "api_key": "  sk-test-typed \n"},
+    )
+
+    assert response.json()["ok"] is True, response.json()
+    assert len(calls) == 1
+    assert calls[0].request.headers["authorization"] == "Bearer sk-test-typed"
+    assert calls[0].request.url.host == "llm.example"
+
+
+def test_a_draft_with_no_key_sends_nothing_to_a_foreign_host(monkeypatch, wire):
+    client, calls = wire
+    monkeypatch.setenv("VIBONOMICS_GROQ_API_KEY", "sk-test-env-api")
+
+    response = client.post("/api/providers/test", json={"type": "groq", "base_url": "https://attacker.example/v1"})
+
+    assert response.json()["ok"] is True
+    assert "No API key set" in response.json()["message"]
+    assert len(calls) == 0
+
+
+def test_a_provider_test_goes_ahead_when_models_dev_cannot_be_reached(monkeypatch, wire, tmp_path):
+    from types import SimpleNamespace
+
+    from vibonomics.catalog import modelsdev
+
+    client, calls = wire
+    # The real loader, with nothing cached: this used to raise before the test's own error handling began.
+    monkeypatch.setattr(api, "load_catalog", modelsdev.load_catalog)
+    monkeypatch.setattr(modelsdev, "get_config", lambda: SimpleNamespace(cache_dir=tmp_path))
+    monkeypatch.setattr(modelsdev, "_cache", None)
+
+    response = client.post(
+        "/api/providers/test",
+        json={"type": "custom-openai", "base_url": "https://llm.example/v1", "api_key": "sk-test-typed"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True, response.json()
+    assert calls[-1].request.url.host == "llm.example"
+
+
+def test_a_saved_providers_environment_key_stays_home_when_the_test_names_another_host(monkeypatch, wire):
+    client, calls = wire
+    monkeypatch.setenv("VIBONOMICS_GROQ_API_KEY", "sk-test-env-api")
+    with session_scope() as session:
+        row = ProviderConfig(type="groq", name="Env-locked groq", enabled=True, options={})
+        session.add(row)
+        session.flush()
+        provider_id = row.id
+
+    response = client.post(f"/api/providers/{provider_id}/test", json={"base_url": "https://attacker.example/v1"})
+
+    assert "not sent to a different host" in response.json()["message"]
+    assert len(calls) == 0
