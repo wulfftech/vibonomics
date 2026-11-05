@@ -1622,7 +1622,7 @@ export interface components {
         };
         /**
          * ProviderTestOverride
-         * @description Values from an unsaved form; only the fields present replace the stored ones.
+         * @description Values from an unsaved form; only the fields present replace the stored ones (``options`` as a whole).
          */
         ProviderTestOverride: {
             /** Api Key */

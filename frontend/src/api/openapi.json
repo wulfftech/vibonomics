@@ -1032,6 +1032,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
               "default": 50,
               "title": "Limit"
             }
@@ -4470,7 +4472,7 @@
         },
         "type": "object",
         "title": "ProviderTestOverride",
-        "description": "Values from an unsaved form; only the fields present replace the stored ones."
+        "description": "Values from an unsaved form; only the fields present replace the stored ones (``options`` as a whole)."
       },
       "ProviderTypeOut": {
         "properties": {
@@ -4796,6 +4798,7 @@
         "properties": {
           "models_interval_hours": {
             "type": "number",
+            "maximum": 8760.0,
             "minimum": 0.0,
             "title": "Models Interval Hours",
             "description": "0 disables scheduled model/price refresh",
@@ -4803,18 +4806,21 @@
           },
           "balances_interval_minutes": {
             "type": "number",
+            "maximum": 525600.0,
             "minimum": 0.0,
             "title": "Balances Interval Minutes",
             "default": 30
           },
           "benchmarks_interval_hours": {
             "type": "number",
+            "maximum": 8760.0,
             "minimum": 0.0,
             "title": "Benchmarks Interval Hours",
             "default": 24
           },
           "usage_interval_hours": {
             "type": "number",
+            "maximum": 8760.0,
             "minimum": 0.0,
             "title": "Usage Interval Hours",
             "description": "Spend history from OpenRouter; needs a management key",
@@ -4997,24 +5003,28 @@
         "properties": {
           "intelligence_weight": {
             "type": "number",
+            "maximum": 1000.0,
             "minimum": 0.0,
             "title": "Intelligence Weight",
             "default": 0.3
           },
           "coding_weight": {
             "type": "number",
+            "maximum": 1000.0,
             "minimum": 0.0,
             "title": "Coding Weight",
             "default": 0.35
           },
           "agentic_weight": {
             "type": "number",
+            "maximum": 1000.0,
             "minimum": 0.0,
             "title": "Agentic Weight",
             "default": 0.35
           },
           "own_tests_weight": {
             "type": "number",
+            "maximum": 1000.0,
             "minimum": 0.0,
             "title": "Own Tests Weight",
             "description": "Weight of Vibonomics's own test results vs third-party data",
@@ -5022,6 +5032,7 @@
           },
           "free_model_cost": {
             "type": "number",
+            "maximum": 1000.0,
             "minimum": 0.0,
             "title": "Free Model Cost",
             "description": "Assumed blended USD per 1M tokens for free models when ranking value (they would otherwise have infinite value)",
@@ -6324,11 +6335,13 @@
           },
           "input_weight": {
             "type": "number",
+            "maximum": 1000.0,
             "minimum": 0.0,
             "title": "Input Weight"
           },
           "output_weight": {
             "type": "number",
+            "maximum": 1000.0,
             "minimum": 0.0,
             "title": "Output Weight"
           },
