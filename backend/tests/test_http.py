@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -170,3 +172,89 @@ async def test_a_chain_that_leaves_the_origin_and_comes_back_does_not_get_the_he
     await http.get_json("https://api.example/start", headers=SECRET_HEADERS)
 
     assert "x-api-key" not in landing.calls[0].request.headers
+
+
+# ---- one fetch for every caller that arrives while it is running ------------------------------------------------
+
+CATALOGUE = "https://catalogue.example/api.json"
+
+
+def _held_answer(answer: httpx.Response | Exception) -> tuple[respx.Route, asyncio.Event]:
+    """A route that answers only once the returned event is set, so callers pile up behind one request."""
+    release = asyncio.Event()
+
+    async def respond(_request: httpx.Request) -> httpx.Response:
+        await release.wait()
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return respx.get(CATALOGUE).mock(side_effect=respond), release
+
+
+async def _arrive(*tasks: asyncio.Task) -> None:
+    """Let every task run up to the point where it waits (asyncio.sleep is stubbed out here, so it cannot yield)."""
+    await asyncio.wait(tasks, timeout=0.05)
+
+
+@respx.mock
+async def test_callers_for_the_same_cache_entry_share_one_fetch(tmp_path):
+    route, release = _held_answer(httpx.Response(200, json={"n": 1}))
+    cache = tmp_path / "catalogue.json"
+    callers = [asyncio.create_task(http.cached_json(CATALOGUE, cache)) for _ in range(5)]
+    await _arrive(*callers)
+
+    release.set()
+    results = await asyncio.gather(*callers)
+
+    assert results == [{"n": 1}] * 5
+    assert route.call_count == 1
+    # Nothing is remembered once it has finished: the next caller after the entry expires fetches again.
+    again = asyncio.create_task(http.cached_json(CATALOGUE, cache))
+    await _arrive(again)
+    assert route.call_count == 2
+    await again
+
+
+@respx.mock
+async def test_a_caller_that_gives_up_does_not_stop_the_fetch_for_the_others(tmp_path):
+    route, release = _held_answer(httpx.Response(200, json={"n": 1}))
+    cache = tmp_path / "catalogue.json"
+    impatient = asyncio.create_task(http.cached_json(CATALOGUE, cache))
+    patient = asyncio.create_task(http.cached_json(CATALOGUE, cache))
+    await _arrive(impatient, patient)
+
+    impatient.cancel()
+    release.set()
+
+    assert await patient == {"n": 1}
+    assert impatient.cancelled()
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_a_failed_fetch_fails_every_waiting_caller_once_and_the_next_caller_tries_again(tmp_path):
+    route, release = _held_answer(httpx.Response(500, text="down"))
+    cache = tmp_path / "catalogue.json"
+    callers = [asyncio.create_task(http.cached_json(CATALOGUE, cache)) for _ in range(3)]
+    await _arrive(*callers)
+
+    release.set()
+    results = await asyncio.gather(*callers, return_exceptions=True)
+
+    assert all(isinstance(r, http.FetchError) for r in results)
+    # httpx's retry policy makes three requests for the one fetch, however many callers waited.
+    assert route.call_count == 3
+    route.mock(return_value=httpx.Response(200, json={"n": 2}))
+    assert await http.cached_json(CATALOGUE, cache) == {"n": 2}
+
+
+@respx.mock
+async def test_different_cache_entries_do_not_share_a_fetch(tmp_path):
+    route = respx.get(CATALOGUE).mock(return_value=httpx.Response(200, json={"n": 1}))
+
+    await asyncio.gather(
+        http.cached_json(CATALOGUE, tmp_path / "one.json"), http.cached_json(CATALOGUE, tmp_path / "two.json")
+    )
+
+    assert route.call_count == 2
