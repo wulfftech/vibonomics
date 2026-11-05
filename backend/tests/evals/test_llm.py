@@ -258,6 +258,33 @@ async def test_a_key_echoed_across_the_300_character_cut_is_still_scrubbed(respo
 
 @pytest.mark.asyncio
 @respx.mock
+@pytest.mark.parametrize(
+    ("wire", "base_url", "path", "headers"),
+    [
+        ("anthropic", "https://gateway.example", "/v1/messages", {"x-api-key": KEY}),
+        ("openai", "https://gateway.example/v1", "/v1/chat/completions", {"Authorization": f"Bearer {KEY}"}),
+        ("openai", "https://gateway.example/v1", "/v1/chat/completions", {"x-goog-api-key": KEY}),
+    ],
+    ids=["anthropic-x-api-key", "openai-bearer", "google-key-header"],
+)
+async def test_a_redirect_to_another_origin_does_not_carry_the_providers_key(wire, base_url, path, headers):
+    ok = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "content": [], "usage": {}}
+    redirect = httpx.Response(307, headers={"Location": "https://elsewhere.example/collect"})
+    respx.post(f"https://gateway.example{path}").mock(return_value=redirect)
+    landing = respx.post("https://elsewhere.example/collect").mock(return_value=httpx.Response(200, json=ok))
+    client = LLMClient(ChatTarget(wire=wire, base_url=base_url, model="m", headers=headers))
+
+    await client.chat([{"role": "user", "content": "hi"}])
+    await client.aclose()
+
+    assert landing.call_count == 1
+    arrived = landing.calls[0].request.headers
+    assert not {"x-api-key", "x-goog-api-key", "authorization"} & set(arrived)
+    assert json.loads(landing.calls[0].request.content)["model"] == "m"
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_a_key_echoed_by_anthropic_never_reaches_the_error():
     body = {"type": "error", "error": {"message": f"invalid x-api-key {KEY}"}}
     respx.post("https://example.test/v1/messages").mock(return_value=httpx.Response(200, json=body))

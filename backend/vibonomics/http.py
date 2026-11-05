@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,32 @@ USER_AGENT = f"Vibonomics/{__version__} (+self-hosted LLM analysis)"
 
 _client: httpx.AsyncClient | None = None
 
+_SECRET_HEADER = re.compile(r"auth|key|token|secret|cookie|credential|password", re.IGNORECASE)
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_FIRST_ORIGIN = "vibonomics.first_origin"
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    return url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme)
+
+
+async def drop_secrets_on_redirect(request: httpx.Request) -> None:
+    """Strip key and token headers from a request that a redirect has sent to another origin.
+
+    httpx drops only ``Authorization`` there, so ``x-api-key`` and ``x-goog-api-key`` would go to whatever host a
+    base URL override (or a hostile endpoint) redirects to. The first request of a chain records its origin in
+    its extensions, which every redirected request in the chain inherits. An http to https upgrade of the same
+    host keeps its headers, as httpx keeps ``Authorization`` there: they were already sent in the clear.
+    """
+    here = _origin(request.url)
+    first = request.extensions.setdefault(_FIRST_ORIGIN, here)
+    if here == first:
+        return
+    if first[1] == here[1] and (first[0], first[2], here[0], here[2]) == ("http", 80, "https", 443):
+        return
+    for name in {name for name in request.headers if _SECRET_HEADER.search(name)}:
+        del request.headers[name]
+
 
 def get_client() -> httpx.AsyncClient:
     global _client
@@ -27,6 +54,7 @@ def get_client() -> httpx.AsyncClient:
             follow_redirects=True,
             headers={"User-Agent": USER_AGENT},
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+            event_hooks={"request": [drop_secrets_on_redirect]},
         )
     return _client
 

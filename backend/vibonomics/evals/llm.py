@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from ..http import scrub_secrets
+from ..http import drop_secrets_on_redirect, scrub_secrets
 from ..providers.base import ChatTarget
 
 log = logging.getLogger(__name__)
@@ -100,7 +100,11 @@ class LLMClient:
         self.timeout = timeout
         self.max_tokens = max_tokens
         self._token_param = "max_tokens"
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=20.0), follow_redirects=True)
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=20.0),
+            follow_redirects=True,
+            event_hooks={"request": [drop_secrets_on_redirect]},
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
