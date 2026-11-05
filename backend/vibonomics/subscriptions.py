@@ -37,8 +37,22 @@ _WINDOWS = (
 )
 
 
+def _percent(value: Any) -> float | None:
+    """A status-line ``used_percentage``: Claude Code documents it as 0-100 (above 100 once a limit is exceeded).
+
+    It is never rescaled, because 1 is one percent: guessing a fraction made a fresh window read as full.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return round(number, 2)
+
+
 def _usage(value: Any) -> float | None:
-    """Normalise a fraction to percent; the docs use 0-1 but headers can run above 1."""
+    """The usage endpoint's ``utilization``. Its unit is undocumented, so a value up to 1.5 is read as a fraction."""
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -77,7 +91,7 @@ def _iso(value: Any) -> str | None:
 def _window(key: str, label: str, node: Any) -> dict[str, Any] | None:
     if not isinstance(node, dict):
         return None
-    used = _usage(node.get("used_percentage", node.get("utilization")))
+    used = _percent(node["used_percentage"]) if "used_percentage" in node else _usage(node.get("utilization"))
     if used is None:
         return None
     return {
@@ -93,7 +107,7 @@ def _spend(node: object) -> dict[str, float | str | None] | None:
         return None
     used = _num(node.get("used_usd"))
     limit = _num(node.get("limit_usd"))
-    percent = _num(node.get("used_percentage"))
+    percent = _percent(node.get("used_percentage"))
     if percent is None and used is not None and limit:
         percent = round(used / limit * 100, 2)
     return {
@@ -151,7 +165,7 @@ def _session(payload: dict[str, Any]) -> dict[str, Any] | None:
     cost = payload.get("cost") if isinstance(payload.get("cost"), dict) else {}
     context = payload.get("context_window") if isinstance(payload.get("context_window"), dict) else {}
     cache = payload.get("prompt_cache") if isinstance(payload.get("prompt_cache"), dict) else {}
-    used = _usage(context.get("used_percentage"))
+    used = _percent(context.get("used_percentage"))
     tokens = _num(context.get("total_input_tokens"))
     output = _num(context.get("total_output_tokens"))
     session = {

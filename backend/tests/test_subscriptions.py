@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -252,3 +253,40 @@ def test_spend_limit_without_a_percentage():
     response = client.get("/api/subscription/claude")
     assert response.status_code == 200
     assert response.json()["snapshot"]["spend_limit"]["used_usd"] == 3
+
+
+@pytest.mark.parametrize("value", [0.5, 1, 1.5, 23.5, 100])
+def test_status_line_percentages_are_already_percent(value):
+    """Claude Code documents used_percentage as 0-100 everywhere, so 1 is one percent and never a whole window."""
+    data = normalize_statusline(
+        {
+            "rate_limits": {
+                "five_hour": {"used_percentage": value},
+                "seven_day": {"used_percentage": value},
+                "spend_limit": {"used_percentage": value},
+            },
+            "context_window": {"used_percentage": value},
+        }
+    )
+    assert [w["used_percentage"] for w in data["windows"]] == [float(value)] * 3
+    assert data["spend_limit"]["used_percentage"] == float(value)
+    assert data["session"]["context_used_percentage"] == float(value)
+
+
+def test_a_status_line_that_mixes_small_and_large_percentages_agrees_with_itself():
+    data = normalize_statusline(
+        {
+            "rate_limits": {
+                "five_hour": {"used_percentage": 1},
+                "seven_day": {"used_percentage": 0.5},
+                "spend_limit": {"used_percentage": 23.5},
+            },
+            "context_window": {"used_percentage": 1.5},
+        }
+    )
+    assert {w["key"]: w["used_percentage"] for w in data["windows"]} == {
+        "five_hour": 1.0,
+        "seven_day": 0.5,
+        "spend_limit": 23.5,
+    }
+    assert data["session"]["context_used_percentage"] == 1.5
