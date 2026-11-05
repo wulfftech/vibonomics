@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -18,6 +19,10 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 from .config import get_config
+
+log = logging.getLogger(__name__)
+
+_warned_unreadable = False
 
 
 def write_owner_only(path: Path, data: bytes) -> None:
@@ -59,10 +64,19 @@ def encrypt(value: str | None) -> str | None:
 def decrypt(token: str | None) -> str | None:
     if not token:
         return None
+    global _warned_unreadable
     try:
         return _fernet().decrypt(token.encode()).decode()
     except InvalidToken:
         # The secret key changed; the stored value is unrecoverable and must be re-entered.
+        if not _warned_unreadable:
+            # Once: this runs for every key on every provider listing, and the cause is the same for all of them.
+            _warned_unreadable = True
+            log.warning(
+                "A stored secret could not be decrypted and will read as not set. The secret key "
+                "(VIBONOMICS_SECRET_KEY or secret.key in the config directory) is not the one it was saved under; "
+                "enter the keys again under Settings, Providers."
+            )
         return None
 
 
