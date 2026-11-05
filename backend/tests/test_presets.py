@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -24,7 +25,9 @@ from vibonomics.presets import (
     choose_endpoints,
     current_models,
     diff_config,
+    digest_of,
     merge_endpoints,
+    owner_fingerprint,
     rank,
     select_models,
     unsaved_keys,
@@ -151,9 +154,13 @@ def client(monkeypatch) -> TestClient:
     get_config.cache_clear()
 
 
-def _preset(slug: str, config: dict[str, Any], version: int = 1, system_prompt: str | None = None) -> dict[str, Any]:
+def _preset(
+    slug: str, config: dict[str, Any], version: int = 1, system_prompt: str | None = None, **data: Any
+) -> dict[str, Any]:
     live = {"version": version, "config": config, "system_prompt": system_prompt}
-    return {"data": {"slug": slug, "name": slug, "updated_at": "2026-11-04T07:36:33Z", "designated_version": live}}
+    return {
+        "data": {"slug": slug, "name": slug, "updated_at": "2026-11-04T07:36:33Z", "designated_version": live, **data}
+    }
 
 
 def _remote(router: respx.Router, slug: str, config: dict[str, Any] | None, **kwargs: Any) -> None:
@@ -180,26 +187,64 @@ def _plan(client: TestClient) -> dict[str, Any]:
 
 
 def test_the_cheapest_endpoints_for_one_task_come_first_and_the_unusable_are_skipped():
-    chosen = choose_endpoints(ENDPOINTS, None, TASK, {}, 3)
+    chosen = choose_endpoints(ENDPOINTS, TASK, {}, 3)
     assert [e["tag"] for e in chosen] == ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
     assert chosen[0]["task_cost"] == pytest.approx((600_000 * 0.08 + 20_000 * 0.35) / 1e6)
-    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, None, TASK, {}, 10)][-1] == "slow/fp8"
+    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, TASK, {}, 10)][-1] == "slow/fp8"
 
 
 def test_the_presets_own_provider_filters_narrow_the_choice():
-    only_fp8 = choose_endpoints(ENDPOINTS, None, TASK, {"quantizations": ["FP8"]}, 5)
+    only_fp8 = choose_endpoints(ENDPOINTS, TASK, {"quantizations": ["FP8"]}, 5)
     assert [e["tag"] for e in only_fp8] == ["deepinfra/fp8", "slow/fp8"]
-    ignoring = choose_endpoints(ENDPOINTS, None, TASK, {"ignore": ["Novita", "wafer"]}, 5)
+    ignoring = choose_endpoints(ENDPOINTS, TASK, {"ignore": ["Novita", "wafer"]}, 5)
     assert [e["tag"] for e in ignoring] == ["deepinfra/fp8", "slow/fp8"]
+
+
+def test_an_allow_list_leaves_out_endpoints_whose_provider_is_not_on_it():
+    # a provider may be named by its slug, by the full tag, or by its display name, in any case
+    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=["deepinfra"])] == ["deepinfra/fp8"]
+    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=["novita/fp4"])] == ["novita/fp4"]
+    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=["WAFER", "Novita"])] == [
+        "novita/fp4",
+        "wafer/bf16",
+    ]
+    assert choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=["nobody"]) == []
+    assert len(choose_endpoints(ENDPOINTS, TASK, {}, 5, allow=[])) == 4  # an empty list restricts nothing
 
 
 def test_the_cache_price_counts_toward_which_endpoint_is_cheapest():
     cheap_cache = [
         {"tag": "a/x", "input": 1.0, "output": 1.0},
-        {"tag": "b/x", "input": 1.2, "output": 1.0},
+        {"tag": "b/x", "input": 1.2, "output": 1.0, "cache_read": 0.0},
     ]
-    assert choose_endpoints(cheap_cache, 0.0, TASK, {}, 1)[0]["tag"] == "a/x"
-    assert choose_endpoints(cheap_cache, 0.0, Task(1000, 1000, 0.0), {}, 2)[0]["task_cost"] == pytest.approx(0.002)
+    assert choose_endpoints(cheap_cache, TASK, {}, 1)[0]["tag"] == "b/x"  # free cache reads at an 80% hit rate
+    uncached = choose_endpoints(cheap_cache, Task(1000, 1000, 0.0), {}, 2)  # and with no hits the cache is no help
+    assert [e["tag"] for e in uncached] == ["a/x", "b/x"] and uncached[0]["task_cost"] == pytest.approx(0.002)
+
+
+def test_each_endpoint_is_costed_with_its_own_cache_price_and_none_means_uncached():
+    # at an 80% hit rate the endpoint that caches is the cheaper one, though its input price is the higher
+    plain = {"tag": "plain/x", "input": 0.08, "output": 0.35, "uptime_1d": 99}
+    nulled = {"tag": "nulled/x", "input": 0.08, "output": 0.35, "cache_read": None, "uptime_1d": 98}
+    caching = {"tag": "caching/x", "input": 0.10, "output": 0.40, "cache_read": 0.01, "uptime_1d": 97}
+    # 0.01 is the model's own listed cache price, which an endpoint with no price of its own must not borrow
+    chosen = choose_endpoints([plain, nulled, caching], TASK, {}, 3)
+    assert [e["tag"] for e in chosen] == ["caching/x", "plain/x", "nulled/x"]
+    assert chosen[0]["task_cost"] == pytest.approx((600_000 * (0.10 * 0.2 + 0.01 * 0.8) + 20_000 * 0.40) / 1e6)
+    assert chosen[1]["task_cost"] == pytest.approx((600_000 * 0.08 + 20_000 * 0.35) / 1e6)  # 0.055, uncached
+
+
+def test_the_plan_pins_the_caching_endpoint_ahead_of_the_one_with_the_lower_sticker_price(client):
+    rows = [
+        {"provider": "Plain", "tag": "plain/x", "input": 0.08, "output": 0.35, "uptime_1d": 99},
+        {"provider": "Caching", "tag": "caching/x", "input": 0.10, "output": 0.40, "cache_read": 0.01, "uptime_1d": 99},
+    ]
+    _set_extra("acme/best", {"endpoints": rows})  # the shape the OpenRouter adapter stores
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert [p["tag"] for p in plan["providers"]] == ["caching/x", "plain/x"]
+    assert plan["config"]["provider"]["order"] == ["caching/x", "plain/x"]
 
 
 def test_a_config_keeps_everything_but_the_model_and_the_provider_lists():
@@ -226,11 +271,11 @@ def test_a_config_keeps_everything_but_the_model_and_the_provider_lists():
 
 def test_a_model_with_no_provider_data_drops_lists_left_over_from_another_model():
     config = build_config({"model": "old/model", "provider": {"only": ["old"], "order": ["old"]}}, ["new/model"], [])
-    assert config["provider"] == {"allow_fallbacks": True}
-    assert build_config(None, ["m"], ["x/fp8"]) == {
-        "model": "m",
-        "provider": {"only": ["x/fp8"], "order": ["x/fp8"], "allow_fallbacks": True},
-    }
+    assert config["provider"] == {}
+    assert build_config(None, ["m"], ["x/fp8"]) == {"model": "m", "provider": {"only": ["x/fp8"], "order": ["x/fp8"]}}
+    # no provider block is invented where there is nothing to put in it, and no routing default is written for the
+    # operator: OpenRouter's own (fallbacks on) already applies
+    assert build_config(None, ["m"], []) == {"model": "m"}
 
 
 def test_a_diff_opens_the_provider_block_and_names_what_goes():
@@ -282,7 +327,6 @@ def test_a_missing_preset_is_a_create_with_the_exact_request_shown(client):
         "provider": {
             "only": ["novita/fp4", "deepinfra/fp8", "wafer/bf16"],
             "order": ["novita/fp4", "deepinfra/fp8", "wafer/bf16"],
-            "allow_fallbacks": True,
         },
     }
     assert plan["request"] == {
@@ -321,6 +365,40 @@ def test_a_new_preset_starts_from_the_template_and_the_template_is_only_read(cli
     # the template asks for fp8, so the fp4 and bf16 endpoints are not listed
     assert plan["config"]["provider"]["only"] == ["deepinfra/fp8", "slow/fp8"]
     assert plan["config"]["provider"]["quantizations"] == ["fp8"]
+
+
+def test_a_templates_provider_allow_list_is_honoured_and_the_plan_says_so(client):
+    _settings(template_slug="my-tools")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", {"model": "other/model", "provider": {"only": ["deepinfra"]}}, version=3)
+        plan = _plan(client)
+    assert plan["config"]["provider"]["only"] == ["deepinfra/fp8"]  # not novita/fp4, which is cheaper
+    assert [p["tag"] for p in plan["providers"]] == ["deepinfra/fp8"]
+    assert any("template" in w and "deepinfra" in w and "only" in w for w in plan["warnings"])
+
+
+def test_a_templates_allow_list_that_leaves_nothing_means_no_pin_and_a_warning(client):
+    _settings(template_slug="my-tools")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", {"model": "other/model", "provider": {"only": ["nobody"]}}, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "create" and plan["providers"] == []
+    assert "only" not in plan["config"].get("provider", {}) and "order" not in plan["config"].get("provider", {})
+    assert any("template" in w and "nobody" in w for w in plan["warnings"])
+    assert any("no provider" in w.lower() for w in plan["warnings"])
+
+
+def test_the_allow_list_is_the_templates_and_not_the_lists_this_preset_wrote_itself(client):
+    # once the preset exists its own `only` is the last plan's output, and filtering by it would never let it change
+    _own_as(KEY)
+    live = {"model": "acme/best", "provider": {"only": ["deepinfra/fp8"], "order": ["deepinfra/fp8"]}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        plan = _plan(client)
+    assert plan["config"]["provider"]["only"] == ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
+    assert not any("template" in w for w in plan["warnings"])
 
 
 def test_a_missing_template_blocks_the_plan(client):
@@ -372,7 +450,7 @@ def test_our_own_preset_is_read_back_with_its_version_and_history(client):
     assert [v["version"] for v in plan["versions"]] == [4, 1]
     assert plan["versions"][0]["live"] is True and plan["versions"][1]["live"] is False
     assert plan["config"]["tools"] == current["tools"]  # an edit made in the OpenRouter UI survives
-    assert {c["path"] for c in plan["changes"]} == {"provider.allow_fallbacks", "provider.only", "provider.order"}
+    assert {c["path"] for c in plan["changes"]} == {"provider.only", "provider.order"}
 
 
 def test_a_preset_that_is_already_right_is_unchanged(client):
@@ -674,6 +752,18 @@ def test_the_first_model_cannot_take_every_provider_slot():
     assert merge_endpoints([], 5) == []
 
 
+def test_every_model_that_has_endpoints_is_guaranteed_one_of_its_own():
+    per_model = [("m1", [_ep("a"), _ep("b")]), ("m2", [_ep("c"), _ep("d")]), ("m3", [_ep("e"), _ep("f")])]
+    merged = merge_endpoints(per_model, limit=2)
+    assert [e["tag"] for e in merged] == ["a", "c", "e"]  # three, though the limit is two: m3 would have none
+    assert [e["models"] for e in merged] == [["m1"], ["m2"], ["m3"]]
+    # once each has one, the limit holds again
+    assert [e["tag"] for e in merge_endpoints(per_model, limit=4)] == ["a", "c", "e", "b"]
+    # a shared endpoint serves both and takes one slot
+    shared = merge_endpoints([("m1", [_ep("a"), _ep("b")]), ("m2", [_ep("a"), _ep("c")])], limit=1)
+    assert [(e["tag"], e["models"]) for e in shared] == [("a", ["m1", "m2"])]
+
+
 def test_a_plan_with_several_models_lists_them_and_their_providers(client):
     _settings(max_models=3, max_providers=4)
     with respx.mock(assert_all_called=False) as router:
@@ -685,10 +775,47 @@ def test_a_plan_with_several_models_lists_them_and_their_providers(client):
     assert plan["config"]["models"] == ["acme/best", "acme/steady", "acme/pricey"]
     assert plan["request"]["body"]["models"] == plan["config"]["models"]
     assert plan["reason"] == f"Creates {SLUG} with 3 models, led by best."
-    # only acme/best has endpoint data, so the providers are its four cheapest
-    assert [p["tag"] for p in plan["providers"]] == ["novita/fp4", "deepinfra/fp8", "wafer/bf16", "slow/fp8"]
-    assert all(p["models"] == ["acme/best"] for p in plan["providers"])
     assert plan["runners_up"] == []
+    # only acme/best has endpoint data, and a provider list shared by every model would leave the other two with no
+    # provider they can be served by, so no list is written at all
+    assert plan["providers"] == []
+    assert "provider" not in plan["config"]
+    assert any("steady, pricey" in w and "no provider data" in w for w in plan["warnings"])
+
+
+def _give_endpoints(model_id: str, specs: list[tuple]) -> None:
+    """Endpoints for a model, as (tag, input, output) or (tag, input, output, uptime_1d)."""
+    rows = [
+        {
+            "provider": tag.split("/")[0],
+            "tag": tag,
+            "quantization": "fp8",
+            "input": i,
+            "output": o,
+            "uptime_1d": rest[0] if rest else 99,
+        }
+        for tag, i, o, *rest in specs
+    ]
+    _set_extra(model_id, {"endpoints": rows})
+
+
+def _set_extra(model_id: str, extra: dict[str, Any]) -> None:
+    with session_scope() as session:
+        session.query(Model).filter_by(model_id=model_id).one().extra = extra
+
+
+def test_every_model_in_the_preset_keeps_a_provider_of_its_own_even_past_the_limit(client):
+    _settings(max_models=3, max_providers=2)
+    _give_endpoints("acme/steady", [("steady-a/fp8", 0.1, 0.4), ("steady-b/fp8", 0.2, 0.5)])
+    _give_endpoints("acme/pricey", [("pricey-a/fp8", 1.0, 4.0), ("pricey-b/fp8", 2.0, 5.0)])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    tags = ["novita/fp4", "steady-a/fp8", "pricey-a/fp8"]
+    assert [p["tag"] for p in plan["providers"]] == tags
+    assert [p["models"] for p in plan["providers"]] == [["acme/best"], ["acme/steady"], ["acme/pricey"]]
+    assert plan["config"]["provider"] == {"only": tags, "order": tags}
+    assert any("more than the limit of 2" in w for w in plan["warnings"])
 
 
 def test_growing_the_lineup_says_which_models_were_added(client):
@@ -905,3 +1032,511 @@ def test_a_draft_plan_cannot_be_applied_because_apply_plans_from_what_is_saved(c
         assert post.call_count == 0
     assert response.status_code == 409
     assert "changed" in response.json()["detail"]
+
+
+# ---- who owns a preset ----------------------------------------------------------------------------------------
+
+OTHER_KEY = "sk-or-test-other-key-0987654321"
+
+
+def _state() -> dict[str, Any]:
+    with session_scope() as session:
+        row = session.get(Setting, STATE_KEY)
+        return dict(row.value) if row is not None and row.value else {}
+
+
+def _own_as(key: str = KEY, slug: str = SLUG, **record: Any) -> None:
+    """Record ``slug`` as created under ``key``, the way a successful write now does."""
+    owner = {"fingerprint": owner_fingerprint(BASE, key), "version_at_create": 1, **record}
+    with session_scope() as session:
+        session.merge(Setting(key=STATE_KEY, value={"owned": [slug], "owners": {slug: owner}}))
+
+
+def _use_key(key: str) -> None:
+    with session_scope() as session:
+        session.query(ProviderConfig).filter_by(type="openrouter").update({"api_key_enc": crypto.encrypt(key)})
+
+
+def test_a_preset_made_under_another_key_is_left_alone(client):
+    _own_as(KEY)
+    _use_key(OTHER_KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "someone/elses"}, version=3)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = client.post("/api/presets/plan").json()
+        assert post.call_count == 0
+    assert plan["action"] == "blocked"
+    assert "different OpenRouter key or account" in plan["reason"]
+    assert plan["request"] is None and plan["digest"] is None
+    assert OTHER_KEY not in json.dumps(plan) and KEY not in json.dumps(plan)
+
+
+def test_a_preset_made_under_the_key_in_use_is_still_ours(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "update"
+    assert plan["digest"]
+
+
+def test_a_slug_recorded_before_accounts_were_tracked_is_trusted_once_and_then_tied_to_the_key(client, caplog):
+    _own()  # the form the live instance holds: a bare slug and no record
+    with caplog.at_level("INFO", logger="vibonomics.presets"), respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=3)
+        assert _plan(client)["action"] == "update"
+    assert _state()["owners"][SLUG]["fingerprint"] == owner_fingerprint(BASE, KEY)
+    assert any("adopt" in r.getMessage() and SLUG in r.getMessage() for r in caplog.records)
+    assert KEY not in json.dumps(_state())
+    # the trust is spent: a different key no longer reaches it
+    _use_key(OTHER_KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "someone/elses"}, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "different OpenRouter key or account" in plan["reason"]
+
+
+def test_a_preset_deleted_and_made_again_by_hand_is_no_longer_ours(client):
+    _own_as(KEY, preset_id="p-1", created_at="2026-11-01T00:00:00Z")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "by/hand"}, version=1, id="p-2", created_at="2026-11-04T00:00:00Z")
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "no longer the one Vibonomics created" in plan["reason"]
+    # the same id is the same preset, and a creation time written another way is the same instant
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=4, id="p-1", created_at="2026-11-01T00:00:00+00:00")
+        assert _plan(client)["action"] == "update"
+    # a creation time alone is enough to tell them apart
+    _own_as(KEY, created_at="2026-11-01T00:00:00Z")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "by/hand"}, version=1, created_at="2026-11-04T00:00:00Z")
+        assert _plan(client)["action"] == "blocked"
+
+
+def test_a_response_with_no_id_or_creation_time_leaves_the_key_to_decide(client):
+    _own_as(KEY, preset_id="p-1", created_at="2026-11-01T00:00:00Z")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)  # the live preset names neither
+        assert _plan(client)["action"] == "update"
+
+
+def test_a_create_records_the_account_and_what_openrouter_called_the_preset(client):
+    def create(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(SLUG, sent, version=1, id="p-1", created_at="2026-11-05T00:00:00Z"))
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=create)
+        plan = _plan(client)
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+    state = _state()
+    assert state["owned"] == [SLUG]
+    owner = state["owners"][SLUG]
+    assert owner["fingerprint"] == owner_fingerprint(BASE, KEY)
+    assert (owner["version_at_create"], owner["preset_id"], owner["created_at"]) == (1, "p-1", "2026-11-05T00:00:00Z")
+    assert KEY not in json.dumps(state)
+
+
+def test_a_create_records_the_id_and_time_a_later_read_will_report_not_the_answers_wording(client):
+    def create(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        return httpx.Response(200, json=_preset(SLUG, account.written, version=1, id="create-1", created_at="t0"))
+
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="get-1", created_at="2026-11-05T00:00:01Z")
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=create)
+        plan = _plan(client)
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+        owner = _state()["owners"][SLUG]
+        assert (owner["preset_id"], owner["created_at"]) == ("get-1", "2026-11-05T00:00:01Z")
+        assert _plan(client)["action"] == "unchanged"  # and our own preset is not blocked as replaced
+
+
+def test_the_digest_names_the_account_and_the_version_it_was_planned_against(client):
+    config = {"model": "acme/best"}
+    assert digest_of(SLUG, config, "aaaa", 1) != digest_of(SLUG, config, "bbbb", 1)
+    assert digest_of(SLUG, config, "aaaa", 1) != digest_of(SLUG, config, "aaaa", 2)
+    _own_as(KEY)
+    digests = []
+    for version in (2, 3):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, {"model": "acme/best"}, version=version)
+            digests.append(_plan(client)["digest"])
+    assert digests[0] != digests[1]  # someone made a version in between, so the reviewed plan is stale
+
+
+# ---- a write that did not report itself, and a preset that cannot be read ------------------------------------
+
+
+def _raw(router: respx.Router, slug: str, data: dict[str, Any]) -> None:
+    """The preset GET answers 200 with exactly ``data``."""
+    url = f"{BASE}/presets/{slug}"
+    router.get(url).mock(return_value=httpx.Response(200, json={"data": data}))
+    router.get(f"{url}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+
+
+def test_a_preset_whose_live_version_cannot_be_read_blocks_the_plan_instead_of_planning_from_nothing(client):
+    _own_as(KEY)
+    for data in (
+        {"slug": SLUG, "status": "active"},  # no designated version at all
+        {"slug": SLUG, "designated_version": {"version": 2}},  # a version with no config
+        {"slug": SLUG, "designated_version": {"version": 2, "config": "not a dict"}},
+    ):
+        with respx.mock(assert_all_called=False) as router:
+            _raw(router, SLUG, data)
+            plan = _plan(client)
+        assert plan["action"] == "blocked", data
+        assert "could not read" in plan["reason"] and "live version" in plan["reason"]
+        assert plan["request"] is None
+
+
+def test_a_preset_with_an_empty_config_can_still_be_planned(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _raw(router, SLUG, {"slug": SLUG, "designated_version": {"version": 2, "config": {}}})
+        assert _plan(client)["action"] == "update"
+
+
+def test_a_template_whose_live_version_cannot_be_read_blocks_the_plan(client):
+    _settings(template_slug="my-tools")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _raw(router, "my-tools", {"slug": "my-tools"})
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "my-tools" in plan["reason"] and "live version" in plan["reason"]
+
+
+def _answers(payload: dict[str, Any]):
+    return lambda request: httpx.Response(200, json=payload)
+
+
+def test_a_create_whose_answer_carries_no_version_is_a_failed_write_and_claims_nothing(client):
+    bodies = (
+        {"error": {"message": f"No credits {KEY}", "code": 402}},
+        {"data": {"slug": SLUG, "name": SLUG}},  # no designated version
+        {"data": {"slug": SLUG, "designated_version": {"config": {"model": "acme/best"}}}},  # no version number
+        {"data": {"slug": SLUG, "designated_version": {"version": 1}}},  # no config
+        {"data": {"slug": "someone-else", "designated_version": {"version": 1, "config": {"model": "acme/best"}}}},
+    )
+    for body in bodies:
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, None)
+            post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_answers(body))
+            plan = _plan(client)
+            response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+            assert post.call_count == 1  # and never retried
+        assert response.status_code == 502, body
+        assert KEY not in response.text
+        state = client.get("/api/presets/state").json()
+        assert state["last_status"] == "failed", body
+        assert state["owned"] == [] and state["version"] is None, body
+        assert "owners" not in _state()
+
+
+def test_an_update_whose_answer_carries_no_version_does_not_count_as_written(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_answers({"data": {}}))
+        plan = _plan(client)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+    assert response.status_code == 502
+    state = client.get("/api/presets/state").json()
+    assert state["last_status"] == "failed" and state["version"] is None
+
+
+# ---- a write whose answer was lost -----------------------------------------------------------------------------
+
+
+class _Account:
+    """An OpenRouter account that has the preset only once the write has gone through, whatever the answer was."""
+
+    def __init__(self, router: respx.Router, before: dict[str, Any] | None, version: int = 1, **ids: Any) -> None:
+        self.before, self.version, self.ids = before, version, ids
+        self.written: dict[str, Any] | None = None
+        self.reads = router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=self._get)
+        router.get(f"{BASE}/presets/{SLUG}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+
+    def take(self, request: httpx.Request) -> None:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        self.written, self.version = sent, self.version + (0 if self.before is None else 1)
+
+    def _get(self, request: httpx.Request) -> httpx.Response:
+        config = self.written if self.written is not None else self.before
+        if config is None:
+            return httpx.Response(404, json={"error": {"message": "Preset not found"}})
+        return httpx.Response(200, json=_preset(SLUG, config, version=self.version, **self.ids))
+
+
+def _lost_after_taking(account: _Account, how):
+    def post(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        return how(request)
+
+    return post
+
+
+def _timeout(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("read timed out", request=request)
+
+
+def test_a_create_whose_answer_never_arrived_is_found_by_reading_it_back_and_claimed(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="p-1", created_at="2026-11-05T00:00:00Z")
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, _timeout)
+        )
+        plan = _plan(client)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        assert post.call_count == 1  # never retried
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["applied"] is True and body["version"] == 1 and body["unsaved"] == []
+    assert "read back" in body["message"]
+    state = _state()
+    assert state["owned"] == [SLUG]
+    assert state["owners"][SLUG]["fingerprint"] == owner_fingerprint(BASE, KEY)
+    assert state["owners"][SLUG]["preset_id"] == "p-1"
+    assert client.get("/api/presets/state").json()["last_status"] == "applied"
+    # the next plan is a normal one, not a block on a preset that "Vibonomics did not create"
+    with respx.mock(assert_all_called=False) as router:
+        _Account(router, account.written, version=1, id="p-1", created_at="2026-11-05T00:00:00Z")
+        assert _plan(client)["action"] == "unchanged"
+
+
+def test_a_body_that_is_not_json_is_read_back_the_same_way(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, lambda request: httpx.Response(200, text="<html>gateway</html>"))
+        )
+        plan = _plan(client)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+    assert response.status_code == 200 and response.json()["applied"] is True
+    assert _state()["owned"] == [SLUG]
+
+
+def test_an_update_whose_answer_was_lost_is_reported_as_applied_when_the_preset_has_the_plan(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, {"model": "acme/best"}, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, lambda request: httpx.Response(504, text="gateway timeout"))
+        )
+        plan = _plan(client)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+    assert response.status_code == 200, response.text
+    assert response.json()["applied"] is True and response.json()["version"] == 3
+    assert client.get("/api/presets/state").json()["last_status"] == "applied"
+
+
+def test_a_lost_answer_is_a_failure_when_the_preset_is_not_what_the_plan_wrote(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    with respx.mock(assert_all_called=False) as router:
+        # the preset is not there when the apply plans, and someone has made one of their own by the time it re-reads
+        reads = iter([404, 200])
+
+        def get(request: httpx.Request) -> httpx.Response:
+            if next(reads) == 404:
+                return httpx.Response(404, json={"error": {"message": "Preset not found"}})
+            return httpx.Response(200, json=_preset(SLUG, {"model": "by/hand"}, version=1))
+
+        router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=get)
+        router.get(f"{BASE}/presets/{SLUG}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_timeout)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+    assert response.status_code == 502
+    assert "did not take the update" in response.json()["detail"]
+    assert client.get("/api/presets/state").json()["owned"] == []
+    assert client.get("/api/presets/state").json()["last_status"] == "failed"
+
+
+def test_a_refusal_is_not_read_back(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, lambda request: httpx.Response(400, json={"error": "bad"}))
+        )
+        plan = _plan(client)
+        reads = account.reads.call_count
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        assert account.reads.call_count == reads + 1  # the apply's own plan, and no read after the 400
+    assert response.status_code == 502
+
+
+async def test_a_write_that_is_cancelled_is_still_claimed_when_it_went_through(client, monkeypatch):
+    from vibonomics import http, presets
+
+    async def cancelled(method: str, url: str, **kwargs: Any):
+        account.take(httpx.Request(method, url, content=json.dumps(kwargs["json_body"]).encode()))
+        raise asyncio.CancelledError
+
+    await http.close_client()
+    try:
+        with respx.mock(assert_all_called=False) as router:
+            account = _Account(router, None, id="p-1")
+            monkeypatch.setattr(presets, "request", cancelled)
+            with pytest.raises(asyncio.CancelledError):
+                await presets.apply(None, "schedule")
+    finally:
+        await http.close_client()
+    assert _state()["owned"] == [SLUG]
+    assert _state()["last"]["status"] == "applied"
+
+
+# ---- keys Vibonomics does not own -------------------------------------------------------------------------------
+
+
+def test_a_store_that_drops_a_default_does_not_make_every_sync_write_a_new_version(client):
+    account: _Account
+
+    def stores_less(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        assert account.written is not None
+        (account.written.get("provider") or {}).pop("allow_fallbacks", None)  # whatever it does not keep
+        return httpx.Response(200, json=_preset(SLUG, account.written, version=1, id="p-1"))
+
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="p-1")
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=stores_less)
+        plan = _plan(client)
+        assert "allow_fallbacks" not in json.dumps(plan["config"])  # OpenRouter's own default stands
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()["applied"] is True
+        for _ in range(2):
+            again = _plan(client)
+            assert again["action"] == "unchanged" and again["changes"] == []
+            assert client.post("/api/presets/apply", json={"digest": again["digest"]}).json()["applied"] is False
+        assert post.call_count == 1
+
+
+def test_only_the_keys_vibonomics_owns_decide_whether_the_preset_changes(client):
+    _own_as(KEY)
+    tags = ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
+    live = {
+        "model": "acme/best",
+        "provider": {"only": tags, "order": tags, "allow_fallbacks": False, "data_collection": "deny"},
+        "tools": [{"type": "openrouter:web_search"}],
+    }
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        assert _plan(client)["action"] == "unchanged"
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {**live, "provider": {**live["provider"], "order": tags[::-1]}}, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "update" and [c["path"] for c in plan["changes"]] == ["provider.order"]
+    # and the whole config, the operator's keys included, is still what is sent
+    assert plan["config"]["provider"]["allow_fallbacks"] is False and plan["config"]["tools"] == live["tools"]
+
+
+# ---- the key goes to OpenRouter and nowhere else ---------------------------------------------------------------
+
+GATEWAY = "https://gateway.example.net/v1"
+
+
+def test_a_base_url_override_on_the_provider_row_never_receives_the_key(client):
+    with session_scope() as session:
+        session.query(ProviderConfig).filter_by(type="openrouter").update({"base_url": GATEWAY})
+    with respx.mock(assert_all_called=False) as router:
+        gateway = router.route(host="gateway.example.net").mock(return_value=httpx.Response(200, json={"data": []}))
+        _remote(router, SLUG, None)
+        write = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        router.get(f"{BASE}/presets").mock(return_value=httpx.Response(200, json={"data": [], "total_count": 0}))
+        plan = _plan(client)
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+        assert client.post("/api/presets/list").status_code == 200
+        assert gateway.call_count == 0
+        assert {call.request.url.host for call in router.calls} == {"openrouter.ai"}
+        assert write.call_count == 1 and write.calls[0].request.headers["authorization"] == f"Bearer {KEY}"
+    assert plan["request"]["url"].startswith(BASE)
+    assert any("Base URL" in w and "gateway.example.net" in w for w in plan["warnings"])
+
+
+# ---- churn: equal prices, and a lookup that failed -------------------------------------------------------------
+
+
+def _tags(chosen: list[dict[str, Any]]) -> list[str]:
+    return [e["tag"] for e in chosen]
+
+
+def test_endpoints_that_cost_the_same_keep_the_order_the_preset_already_has():
+    a = {"tag": "a/x", "input": 1, "output": 1, "uptime_1d": 99}
+    b = {"tag": "b/x", "input": 1, "output": 1, "uptime_1d": 60}
+    cheaper = {"tag": "c/x", "input": 0.5, "output": 1, "uptime_1d": 10}
+    assert _tags(choose_endpoints([a, b], TASK, {}, 2)) == ["a/x", "b/x"]  # no history: the steadier first
+    assert _tags(choose_endpoints([a, b], TASK, {}, 2, current=["b/x", "a/x"])) == ["b/x", "a/x"]
+    assert _tags(choose_endpoints([a, b], TASK, {}, 2, current=["b/x"])) == ["b/x", "a/x"]
+    # a price difference still wins over the history
+    assert _tags(choose_endpoints([a, b, cheaper], TASK, {}, 3, current=["b/x", "a/x"]))[0] == "c/x"
+
+
+def test_a_models_refresh_that_reorders_equal_priced_providers_writes_no_new_version(client):
+    _own_as(KEY)
+    _give_endpoints("acme/best", [("a/fp8", 0.1, 0.4, 99), ("b/fp8", 0.1, 0.4, 60)])
+    live = {"model": "acme/best", "provider": {"only": ["b/fp8", "a/fp8"], "order": ["b/fp8", "a/fp8"]}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and plan["config"]["provider"]["order"] == ["b/fp8", "a/fp8"]
+
+
+def _stores(account: _Account):
+    def post(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        return httpx.Response(200, json=_preset(SLUG, account.written, version=1, id="p-1"))
+
+    return post
+
+
+def test_a_failed_endpoint_lookup_does_not_unpin_the_preset(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="p-1")
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_stores(account))
+        plan = _plan(client)
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()["applied"] is True
+    pinned = account.written["provider"]
+    assert pinned["only"] and _state()["pins"] == {SLUG: ["acme/best"]}
+
+    _set_extra("acme/best", {})  # the next refresh could not read the endpoints
+    with respx.mock(assert_all_called=False) as router:
+        _Account(router, account.written, id="p-1")
+        write = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["action"] == "unchanged" and plan["changes"] == []
+        assert plan["config"] == account.written  # what stays live, not an unpinned copy of it
+        assert any(
+            "best" in w and "provider data" in w and "keeps its current providers" in w for w in plan["warnings"]
+        )
+        body = client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()
+        assert body["applied"] is False and "provider data" in body["message"]
+        assert write.call_count == 0
+    assert client.get("/api/presets/state").json()["last_status"] == "unchanged"
+    assert _state()["pins"] == {SLUG: ["acme/best"]}  # still remembered, for when the data is back
+
+    _set_extra("acme/best", {"endpoints": ENDPOINTS})  # and the next good refresh puts it back
+    with respx.mock(assert_all_called=False) as router:
+        _Account(router, account.written, id="p-1")
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and not plan["warnings"]
+
+
+def test_a_model_that_never_had_provider_data_does_not_hold_the_preset_pinned(client):
+    _settings(max_models=2)
+    _own_as(KEY)
+    live = {
+        "model": "acme/best",
+        "models": ["acme/best", "acme/steady"],
+        "provider": {"only": ["novita/fp4"], "order": ["novita/fp4"]},
+    }
+    for pins in (None, {SLUG: ["acme/best"]}):  # an older write, and a write that knew steady had no data
+        with session_scope() as session:
+            session.merge(Setting(key=STATE_KEY, value={**_state(), **({"pins": pins} if pins else {})}))
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, live, version=3)
+            plan = _plan(client)
+        assert plan["action"] == "update", pins  # `only` would keep steady from being served: unpin it
+        assert "provider" not in plan["config"] or "only" not in plan["config"]["provider"]

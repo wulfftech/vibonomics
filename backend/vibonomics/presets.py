@@ -25,17 +25,18 @@ import hashlib
 import json
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import events
 from .db import session_scope
-from .http import FetchError, get_json, request
+from .http import FetchError, get_json, public_url, request, scrub_secrets
 from .jobs import failure_text
 from .orm import Model, ProviderConfig, Setting, utcnow
 from .pricing import Task, task_cost, value_of
@@ -100,6 +101,9 @@ class Remote:
     updated_at: str | None
     status: str = "active"  # an archived preset takes no new versions
     versions: list[dict[str, Any]] = field(default_factory=list)
+    preset_id: str | None = None  # whatever stable id the account gave it; None when the response names none
+    created_at: str | None = None
+    readable: bool = True  # False when the response held no live config to plan from, which is not an empty config
 
 
 @dataclass
@@ -125,6 +129,9 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     draft: bool = False  # made from unsaved settings, so it cannot be applied
+    fingerprint: str | None = None  # which key and host the plan was made for
+    # The listed models whose providers the preset names once this plan stands; None when nothing is to be recorded.
+    pinned: list[str] | None = None
     generated_at: datetime = field(default_factory=utcnow)
 
 
@@ -145,6 +152,7 @@ class Inputs:
     api_key: str | None
     state: dict[str, Any]
     draft: bool = False  # the settings are unsaved ones, offered for a preview
+    ignored_base: str | None = None  # a Base URL override on the provider row, which the preset calls do not use
 
 
 # ---- ranking -------------------------------------------------------------------------------------------------
@@ -204,15 +212,33 @@ def rank(session: Session, settings: AppSettings, provider_ids: list[int]) -> tu
 
 def choose_endpoints(
     endpoints: list[dict[str, Any]],
-    cache_read: float | None,
     task: Task,
     provider_block: dict[str, Any],
     limit: int,
+    *,
+    current: Sequence[str] = (),
+    allow: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
-    """The cheapest endpoints for one task that the preset's own provider filters would still let through."""
+    """The cheapest endpoints for one task that the preset's own provider filters would still let through.
+
+    ``allow`` is a template's own ``only`` list: an endpoint whose provider (by slug, full tag or name) is not on it
+    is skipped. An empty one restricts nothing.
+
+    Each endpoint is costed with its own cache-read price. One that lists none is costed as uncached: the model's
+    listed price is the best endpoint's, and an endpoint without a cache would be ranked ahead on a discount it does
+    not give.
+
+    Endpoints that cost the same go in the order ``current`` (the tags the live preset lists) already has them, and
+    only then by uptime, which changes on every refresh: left to it, equal prices would flip ``order`` and write a
+    new version each time.
+    """
     quantizations = {q.lower() for q in provider_block.get("quantizations") or [] if isinstance(q, str)}
     ignored = {s.lower() for s in provider_block.get("ignore") or [] if isinstance(s, str)}
-    usable: list[tuple[float, float, str, dict[str, Any]]] = []
+    allowed = {s.lower() for s in allow if isinstance(s, str)}
+    position: dict[str, int] = {}
+    for i, tag in enumerate(current):
+        position.setdefault(tag, i)
+    usable: list[tuple[float, int, float, str, dict[str, Any]]] = []
     seen: set[str] = set()
     for ep in endpoints:
         tag, price_in, price_out = ep.get("tag"), ep.get("input"), ep.get("output")
@@ -220,15 +246,19 @@ def choose_endpoints(
             continue
         if quantizations and str(ep.get("quantization") or "").lower() not in quantizations:
             continue
-        if {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider") or "").lower()} & ignored:
+        names = {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider") or "").lower()}
+        if names & ignored or (allowed and not names & allowed):
             continue
-        cost = task_cost(price_in, price_out, cache_read, task)
+        cache = ep.get("cache_read")
+        cost = task_cost(price_in, price_out, cache if isinstance(cache, int | float) else None, task)
         if cost is None:
             continue
         seen.add(tag)
         uptime = ep.get("uptime_1d")
-        usable.append((cost, -(uptime if isinstance(uptime, int | float) else 0), tag, ep))
-    usable.sort(key=lambda u: u[:3])
+        usable.append(
+            (cost, position.get(tag, len(position)), -(uptime if isinstance(uptime, int | float) else 0), tag, ep)
+        )
+    usable.sort(key=lambda u: u[:4])
     return [
         {
             "tag": tag,
@@ -239,7 +269,7 @@ def choose_endpoints(
             "quantization": ep.get("quantization"),
             "task_cost": round(cost, 6),
         }
-        for cost, _uptime, tag, ep in usable[:limit]
+        for cost, _position, _uptime, tag, ep in usable[:limit]
     ]
 
 
@@ -267,9 +297,22 @@ def build_config(base: dict[str, Any] | None, model_ids: list[str], tags: list[s
         # A list left over from another model would name providers that do not serve this one.
         provider.pop("only", None)
         provider.pop("order", None)
-    provider.setdefault("allow_fallbacks", True)
-    config["provider"] = provider
+    # No default is written for the operator (allow_fallbacks is on at OpenRouter already): a key that Vibonomics adds
+    # and the account does not keep would make every later plan differ from the live preset.
+    if provider or "provider" in config:
+        config["provider"] = provider
     return config
+
+
+def owned_view(config: dict[str, Any]) -> dict[str, Any]:
+    """The only keys Vibonomics decides: what a plan is compared on, to tell an update from nothing to do."""
+    provider = config.get("provider") if isinstance(config.get("provider"), dict) else {}
+    return {
+        "model": config.get("model"),
+        "models": config.get("models"),
+        "only": provider.get("only"),
+        "order": provider.get("order"),
+    }
 
 
 def current_models(config: dict[str, Any]) -> list[str]:
@@ -309,8 +352,11 @@ def merge_endpoints(per_model: list[tuple[str, list[dict[str, Any]]]], limit: in
     """One provider list for several models: each model's cheapest endpoint in turn, then its next, up to ``limit``.
 
     An endpoint two models share is listed once and names both. Round-robin, so the first model cannot use every slot.
+    ``only`` is one list for every model in the preset, so a model with endpoints always keeps one of its own, even
+    where that takes the list past ``limit``: a model with none listed could never be served.
     """
     merged: dict[str, dict[str, Any]] = {}
+    served: set[str] = set()
     for rank in range(max((len(eps) for _model, eps in per_model), default=0)):
         for model_id, eps in per_model:
             if rank >= len(eps):
@@ -319,8 +365,10 @@ def merge_endpoints(per_model: list[tuple[str, list[dict[str, Any]]]], limit: in
             if tag in merged:
                 if model_id not in merged[tag]["models"]:
                     merged[tag]["models"].append(model_id)
-            elif len(merged) < limit:
+                served.add(model_id)
+            elif len(merged) < limit or model_id not in served:
                 merged[tag] = {**eps[rank], "models": [model_id]}
+                served.add(model_id)
     return list(merged.values())
 
 
@@ -356,9 +404,24 @@ def unsaved_keys(desired: dict[str, Any], stored: dict[str, Any]) -> list[str]:
     return out
 
 
-def digest_of(slug: str, config: dict[str, Any]) -> str:
-    raw = json.dumps({"slug": slug, "config": config}, sort_keys=True, separators=(",", ":"))
+def digest_of(slug: str, config: dict[str, Any], fingerprint: str | None = None, version: int | None = None) -> str:
+    """Names a plan. The account and the live version are in it, so a plan reviewed against one account, or before
+    someone made another version, is refused by apply."""
+    raw = json.dumps(
+        {"slug": slug, "config": config, "account": fingerprint, "version": version},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def owner_fingerprint(base_url: str, api_key: str) -> str:
+    """Stands for the account a key reaches, for telling one account's preset from another's.
+
+    A hash of the host and the key, cut short: it can say two keys differ without being a way back to either.
+    """
+    host = urlsplit(base_url).netloc.rpartition("@")[2].lower()
+    return hashlib.sha256(f"vibonomics-preset-owner\0{host}\0{api_key}".encode()).hexdigest()[:16]
 
 
 # ---- state ---------------------------------------------------------------------------------------------------
@@ -375,13 +438,22 @@ def read_state() -> dict[str, Any]:
         return _load_state(s)
 
 
-def _update_state(patch: dict[str, Any], own: str | None = None) -> None:
+def _update_state(
+    patch: dict[str, Any], own: str | None = None, owner: dict[str, Any] | None = None, keep_owner: bool = False
+) -> None:
+    """Merge ``patch`` into the stored state. ``own`` adds a slug to ``owned`` and ``owner`` is its account record;
+    ``keep_owner`` leaves a record that is already there alone."""
     with session_scope() as s:
         row = s.get(Setting, STATE_KEY)
         state = dict(row.value) if row is not None and row.value else {}
+        pins = {**(state.get("pins") or {}), **(patch.get("pins") or {})}
         state.update(patch)
+        if pins:
+            state["pins"] = pins
         if own and own not in state.get("owned", []):
             state["owned"] = [*state.get("owned", []), own]
+        if own and owner is not None and not (keep_owner and own in (state.get("owners") or {})):
+            state["owners"] = {**(state.get("owners") or {}), own: owner}
         if row is None:
             s.add(Setting(key=STATE_KEY, value=state))
         else:
@@ -396,6 +468,75 @@ def _record_run(slug: str, status: str, message: str, trigger: str, patch: dict[
 
 def is_owned(state: dict[str, Any], slug: str) -> bool:
     return slug in (state.get("owned") or [])
+
+
+def _same_instant(a: str, b: str) -> bool:
+    try:
+        return datetime.fromisoformat(a.replace("Z", "+00:00")) == datetime.fromisoformat(b.replace("Z", "+00:00"))
+    except ValueError:
+        return a == b
+
+
+def ownership(state: dict[str, Any], slug: str, fingerprint: str, remote: Remote) -> str:
+    """Whether the preset the key reaches under ``slug`` is the one Vibonomics created.
+
+    ``ours``; ``legacy`` (recorded as owned before accounts were tracked, so trusted this once); ``unknown`` (never
+    ours); ``other_account`` (made under another key or host); or ``replaced`` (the same account, but the live preset
+    carries another id or creation time than the one that was created, so it was deleted and made again).
+    """
+    if not is_owned(state, slug):
+        return "unknown"
+    record = (state.get("owners") or {}).get(slug)
+    if not isinstance(record, dict) or not record.get("fingerprint"):
+        return "legacy"
+    if record["fingerprint"] != fingerprint:
+        return "other_account"
+    if record.get("preset_id") and remote.preset_id and str(record["preset_id"]) != remote.preset_id:
+        return "replaced"
+    if (
+        record.get("created_at")
+        and remote.created_at
+        and not _same_instant(str(record["created_at"]), remote.created_at)
+    ):
+        return "replaced"
+    return "ours"
+
+
+def _owner_record(
+    fingerprint: str, version_at_create: int | None, preset_id: str | None, created_at: str | None
+) -> dict[str, Any]:
+    return {
+        "fingerprint": fingerprint,
+        "version_at_create": version_at_create,
+        "preset_id": preset_id,
+        "created_at": created_at,
+        "recorded_at": utcnow().isoformat(),
+    }
+
+
+def _claim_record(
+    plan: Plan, state: dict[str, Any], version: int | None, preset_id: str | None, created_at: str | None
+) -> dict[str, Any]:
+    """The account record to keep once a write has gone through; an update keeps what the create recorded."""
+    if plan.action == "create":
+        return _owner_record(plan.fingerprint or "", version, preset_id, created_at)
+    old = (state.get("owners") or {}).get(plan.slug)
+    if isinstance(old, dict) and old.get("fingerprint") == plan.fingerprint:
+        return {
+            **old,
+            "preset_id": old.get("preset_id") or preset_id,
+            "created_at": old.get("created_at") or created_at,
+        }
+    return _owner_record(plan.fingerprint or "", None, preset_id, created_at)
+
+
+def _stable_id(data: dict[str, Any]) -> tuple[str | None, str | None]:
+    """The id and the creation time a preset response carries, if it carries them."""
+    raw_id, created = data.get("id"), data.get("created_at")
+    return (
+        str(raw_id) if isinstance(raw_id, str | int) and not isinstance(raw_id, bool) and str(raw_id) else None,
+        created if isinstance(created, str) and created else None,
+    )
 
 
 # ---- OpenRouter ----------------------------------------------------------------------------------------------
@@ -414,7 +555,9 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
         if exc.status == 404:
             return None
         raise
-    live = data.get("designated_version") or {}
+    designated = data.get("designated_version")
+    live = designated if isinstance(designated, dict) else {}
+    preset_id, created_at = _stable_id(data)
     remote = Remote(
         slug=slug,
         version=live.get("version"),
@@ -422,6 +565,9 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
         system_prompt=live.get("system_prompt"),
         updated_at=data.get("updated_at"),
         status=str(data.get("status") or "active"),
+        readable=isinstance(live.get("config"), dict),
+        preset_id=preset_id,
+        created_at=created_at,
     )
     try:
         listing = (await get_json(f"{path}/versions", headers=_auth(key), timeout=20, retries=1)).get("data") or []
@@ -446,10 +592,16 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
 # ---- planning ------------------------------------------------------------------------------------------------
 
 
-def _access(resolved: list[Any]) -> tuple[str, str | None]:
+def _access(resolved: list[Any]) -> tuple[str, str | None, str | None]:
+    """OpenRouter's own host, the first key, and the row's Base URL override if it has one.
+
+    The override is never used: it is the operator's gateway for chat traffic, and the account key would go to
+    whatever host it names. Every call here is OpenRouter's, so it goes to OpenRouter.
+    """
     keyed = next((r for r in resolved if r.api_key), None)
-    base = (keyed.base_url if keyed and keyed.base_url else OpenRouterAdapter.spec.default_base_url).rstrip("/")
-    return base, keyed.api_key if keyed else None
+    base = OpenRouterAdapter.spec.default_base_url.rstrip("/")
+    ignored = keyed.base_url if keyed and keyed.base_url and keyed.base_url.rstrip("/") != base else None
+    return base, keyed.api_key if keyed else None, ignored
 
 
 def _openrouter_providers(s: Session) -> list[ProviderConfig]:
@@ -465,7 +617,7 @@ def _openrouter_providers(s: Session) -> list[ProviderConfig]:
 def load_access() -> tuple[str, str | None, dict[str, Any]]:
     """Where to reach OpenRouter, with which key, and what was written before. Ranks nothing."""
     with session_scope() as s:
-        base, key = _access([resolve(p) for p in _openrouter_providers(s)])
+        base, key, _ignored = _access([resolve(p) for p in _openrouter_providers(s)])
         return base, key, _load_state(s)
 
 
@@ -479,8 +631,10 @@ def load_inputs(draft: PresetSettings | None = None) -> Inputs:
         resolved = [resolve(p) for p in providers]
         candidates, task, profile_id = rank(s, settings, [p.id for p in providers])
         state = _load_state(s)
-    base, key = _access(resolved)
-    return Inputs(settings, candidates, task, profile_id, base, key, state, draft=draft is not None)
+    base, key, ignored = _access(resolved)
+    return Inputs(
+        settings, candidates, task, profile_id, base, key, state, draft=draft is not None, ignored_base=ignored
+    )
 
 
 async def list_presets(base: str, key: str, owned: list[str]) -> list[dict[str, Any]]:
@@ -552,6 +706,12 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
     )
     if not inputs.api_key:
         return _blocked(plan, "Add an OpenRouter API key under Settings, Providers first.")
+    plan.fingerprint = owner_fingerprint(inputs.base_url, inputs.api_key)
+    if inputs.ignored_base:
+        plan.warnings.append(
+            f"The OpenRouter provider has a Base URL override ({public_url(inputs.ignored_base)}). Presets are always "
+            f"read and written at {public_url(inputs.base_url)}, so the key is never sent to the override."
+        )
     try:
         remote = await fetch_remote(inputs.base_url, inputs.api_key, cfg.slug)
     except FetchError as exc:
@@ -563,12 +723,40 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
             f"The preset {cfg.slug} is archived on OpenRouter, and an archived preset takes no new versions. "
             "Restore it in the OpenRouter web UI, or give this one another name.",
         )
-    if remote is not None and not is_owned(inputs.state, cfg.slug):
-        return _blocked(
-            plan,
-            f"A preset called {cfg.slug} already exists on this account and Vibonomics did not create it, so it is "
-            "left alone. Give this one another name, or archive that preset in the OpenRouter web UI.",
-        )
+    if remote is not None:
+        owner = ownership(inputs.state, cfg.slug, plan.fingerprint, remote)
+        if owner == "unknown":
+            return _blocked(
+                plan,
+                f"A preset called {cfg.slug} already exists on this account and Vibonomics did not create it, so it "
+                "is left alone. Give this one another name, or archive that preset in the OpenRouter web UI.",
+            )
+        if owner == "other_account":
+            return _blocked(
+                plan,
+                f"A preset called {cfg.slug} exists on this account, but Vibonomics created that name under a "
+                "different OpenRouter key or account than the one in use now, so it is left alone. Give this one "
+                "another name, or archive that preset in the OpenRouter web UI.",
+            )
+        if owner == "replaced":
+            return _blocked(
+                plan,
+                f"The preset {cfg.slug} is no longer the one Vibonomics created: it has another id or creation time, "
+                "so it was deleted and made again. It is left alone. Give this one another name, or archive that "
+                "preset in the OpenRouter web UI.",
+            )
+        if not remote.readable:
+            # Planning from {} would send a config with every field the operator set dropped, and diff against {}.
+            return _blocked(
+                plan,
+                f"The preset {cfg.slug} exists, but OpenRouter returned no live version for it, so Vibonomics "
+                "could not read what it holds and will not write over it. Try again later.",
+            )
+        if owner == "legacy":
+            # Older state named the slug with no account. Trust it this once, and tie it to the key in use now.
+            log.info("Preset %s was recorded as ours before accounts were tracked; adopting it for this key", cfg.slug)
+            record = _owner_record(plan.fingerprint, None, remote.preset_id, remote.created_at)
+            await asyncio.to_thread(_update_state, {}, cfg.slug, record, True)
     if remote is not None and remote.system_prompt:
         return _blocked(
             plan,
@@ -595,6 +783,12 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
             return _blocked(plan, f"Could not read the template preset {cfg.template_slug}: {exc}")
         if template is None:
             return _blocked(plan, f"The template preset {cfg.template_slug} does not exist on this account.")
+        if not template.readable:
+            return _blocked(
+                plan,
+                f"The template preset {cfg.template_slug} exists, but OpenRouter returned no live version for it, so "
+                "Vibonomics could not read what to start from. Try again later.",
+            )
         base_config = template.config
         if template.system_prompt:
             plan.warnings.append(
@@ -603,19 +797,52 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
 
     provider_block = (base_config or {}).get("provider")
     provider_block = provider_block if isinstance(provider_block, dict) else {}
-    plan.providers = merge_endpoints(
-        [
-            (c.model_id, choose_endpoints(c.endpoints, c.cache_read, inputs.task, provider_block, cfg.max_providers))
-            for c in plan.picks
-        ],
-        cfg.max_providers,
+    live_provider = remote.config.get("provider") if remote else None
+    live_provider = live_provider if isinstance(live_provider, dict) else {}
+    live_tags = [t for key in ("order", "only") for t in live_provider.get(key) or [] if isinstance(t, str)]
+    # A template's `only` is the operator's allow-list. Once the preset exists its own `only` is what the last plan
+    # wrote, and filtering by that would stop it ever changing.
+    allow = (
+        [s for s in provider_block.get("only") or [] if isinstance(s, str)]
+        if remote is None and cfg.template_slug
+        else []
     )
-    if not plan.providers:
+    if allow:
         plan.warnings.append(
-            "No provider data for these models (or none that passes the preset's quantization and ignore filters), "
-            "so the preset names no provider and OpenRouter routes as it decides. Provider data comes from the "
-            "'Check OpenRouter endpoint discounts' refresh option."
+            f"The template's provider list (only: {', '.join(allow)}) is applied: only those providers are "
+            "considered for this preset."
         )
+    per_pick = [
+        (
+            c.model_id,
+            choose_endpoints(
+                c.endpoints, inputs.task, provider_block, cfg.max_providers, current=live_tags, allow=allow
+            ),
+        )
+        for c in plan.picks
+    ]
+    bare = [c.name for c, (_id, eps) in zip(plan.picks, per_pick, strict=True) if not eps]
+    if len(bare) == len(plan.picks):
+        plan.warnings.append(
+            "No provider data for these models (or none that passes the preset's quantization, ignore and provider "
+            "list filters), so the preset names no provider and OpenRouter routes as it decides. Provider data comes "
+            "from the 'Check OpenRouter endpoint discounts' refresh option."
+        )
+    elif bare:
+        # `only` is shared by every listed model, so one model with no provider in it could never be served.
+        plan.warnings.append(
+            f"{', '.join(bare)} {'has' if len(bare) == 1 else 'have'} no provider data (or none that passes the "
+            "preset's quantization, ignore and provider list filters), and a provider list would keep "
+            f"{'it' if len(bare) == 1 else 'them'} from being served, so the preset names no provider and OpenRouter "
+            "routes as it decides. Provider data comes from the 'Check OpenRouter endpoint discounts' refresh option."
+        )
+    else:
+        plan.providers = merge_endpoints(per_pick, cfg.max_providers)
+        if len(plan.providers) > cfg.max_providers:
+            plan.warnings.append(
+                f"Each of the {len(plan.picks)} models keeps a provider of its own, so the preset lists "
+                f"{len(plan.providers)} providers, more than the limit of {cfg.max_providers}."
+            )
     unseen = [k for k in UNSEEN_FILTERS if k in provider_block]
     if unseen:
         plan.warnings.append(
@@ -627,8 +854,12 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
     plan.config = build_config(base_config, ids, [p["tag"] for p in plan.providers])
     plan.url = f"{inputs.base_url}/presets/{quote(cfg.slug, safe='')}/chat/completions"
     plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
-    plan.digest = digest_of(cfg.slug, plan.config)
+    plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None)
     plan.changes = diff_config(remote.config if remote else None, plan.config)
+    plan.pinned = ids if plan.providers else []
+    # The models whose providers the live preset named when it was last in step with a plan, and that have none now.
+    known = (inputs.state.get("pins") or {}).get(cfg.slug) or []
+    lost = [c.name for c in plan.picks if c.model_id in known and not c.endpoints]
 
     if remote is None:
         plan.action = "create"
@@ -637,7 +868,7 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
             if len(ids) == 1
             else f"Creates {cfg.slug} with {len(ids)} models, led by {pick.name}."
         )
-    elif plan.config == remote.config:
+    elif owned_view(plan.config) == owned_view(remote.config):
         plan.action = "unchanged"
         best = inputs.candidates[0]
         plan.reason = "Already up to date." + (
@@ -645,6 +876,21 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
             if plan.kept_current
             else ""
         )
+    elif lost and (live_provider.get("only") or live_provider.get("order")):
+        # A failed endpoint lookup, or the option switched off, leaves a model with no data for a while. Writing now
+        # would unpin the preset, and the next good refresh would pin it again: two versions for nothing.
+        names = ", ".join(lost)
+        plan.action = "unchanged"
+        plan.reason = f"Kept as it is: provider data for {names} is missing right now."
+        plan.warnings.append(
+            f"{names} had provider data when the preset was last written and has none now (the endpoint lookup may "
+            "have failed, or 'Check OpenRouter endpoint discounts' is off), so the preset keeps its current providers "
+            "instead of being unpinned. Nothing is written until the data is back."
+        )
+        plan.config = copy.deepcopy(remote.config)
+        plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
+        plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version)
+        plan.changes, plan.pinned = [], None
     elif before != ids:
         plan.action, plan.reason = "update", _model_change(before, plan.picks, inputs.candidates)
     else:
@@ -674,6 +920,100 @@ def _model_change(before: list[str], picks: list[Candidate], candidates: list[Ca
 # ---- applying ------------------------------------------------------------------------------------------------
 
 
+class _Unconfirmed(Exception):
+    """OpenRouter answered a write with a success status but did not report the version it made."""
+
+
+def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    """The preset, its live version and the config OpenRouter stored, from a write's response.
+
+    A 2xx alone proves nothing: an error can ride a 200, and a body with no version means no version was made.
+    """
+    data = body.get("data") if isinstance(body, dict) else None
+    live = data.get("designated_version") if isinstance(data, dict) else None
+    if (
+        isinstance(data, dict)
+        and isinstance(live, dict)
+        and live.get("version") is not None
+        and isinstance(live.get("config"), dict)
+        and data.get("slug", slug) == slug
+    ):
+        return data, live["version"], live["config"]
+    error = body.get("error") if isinstance(body, dict) else None
+    detail = error.get("message") if isinstance(error, dict) else error
+    raise _Unconfirmed(f"the answer named no version of {slug}" + (f" ({str(detail)[:200]})" if detail else ""))
+
+
+async def _settle(
+    plan: Plan,
+    inputs: Inputs,
+    trigger: str,
+    version: Any,
+    stored: dict[str, Any],
+    preset_id: str | None,
+    created_at: str | None,
+    read_back: bool = False,
+) -> Applied:
+    """Record a write that went through: the slug is ours from here on, and the run is logged."""
+    assert plan.config is not None
+    slug = plan.slug
+    unsaved = unsaved_keys(plan.config, stored)
+    verb = "Created" if plan.action == "create" else "Updated"
+    message = f"{verb} {slug} as version {version}: {plan.reason}"
+    if read_back:
+        message += " OpenRouter's answer did not arrive, so this was read back from the preset."
+    if unsaved:
+        message += f" OpenRouter did not keep: {', '.join(unsaved)}."
+    applied = {
+        "slug": slug,
+        "model_id": plan.config.get("model"),
+        "version": version,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
+    owner = _claim_record(plan, inputs.state, version, preset_id, created_at)
+    pins = {"pins": {slug: plan.pinned or []}}
+    await asyncio.to_thread(_update_state, {"applied": applied, **pins}, slug, owner)
+    await asyncio.to_thread(_record_run, slug, "applied", message, trigger)
+    return Applied(version=version, unsaved=unsaved, message=message)
+
+
+async def _identity(
+    inputs: Inputs, slug: str, fallback: tuple[str | None, str | None]
+) -> tuple[str | None, str | None]:
+    """The id and creation time of a new preset as a plain read reports them, which is what later plans compare.
+
+    The create answer may word them another way. A record that no read can match would block our own preset on
+    every plan from then on.
+    """
+    assert inputs.api_key is not None
+    try:
+        seen = await fetch_remote(inputs.base_url, inputs.api_key, slug)
+    except FetchError:
+        return fallback
+    if seen is None or not seen.readable:
+        return fallback
+    return seen.preset_id or fallback[0], seen.created_at or fallback[1]
+
+
+async def _read_back(plan: Plan, inputs: Inputs, trigger: str) -> Applied | None:
+    """After a write whose outcome is unknown, claim it if the preset now holds exactly what the plan sent.
+
+    OpenRouter may have made the version and lost the answer (a timeout, a body that is not JSON, a gateway error).
+    Without this the preset exists, is not recorded as ours, and every later plan is blocked.
+    """
+    assert inputs.api_key is not None
+    try:
+        remote = await fetch_remote(inputs.base_url, inputs.api_key, plan.slug)
+    except FetchError:
+        return None
+    if remote is None or not remote.readable or remote.config != plan.config:
+        return None
+    return await _settle(
+        plan, inputs, trigger, remote.version, remote.config, remote.preset_id, remote.created_at, True
+    )
+
+
 async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]:
     """Write the plan if there is something to write. ``digest`` pins it to a plan the operator reviewed."""
     async with _lock:
@@ -685,41 +1025,42 @@ async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]
         if digest is not None and plan.digest != digest:
             raise PlanChanged("The plan changed since you looked at it. Preview it again.")
         if plan.action not in ("create", "update") or plan.body is None or plan.url is None or plan.config is None:
-            await asyncio.to_thread(_record_run, cfg.slug, plan.action, plan.reason, trigger)
+            # An unchanged preset is in step with this plan, so what it pins is known now.
+            known = {"pins": {cfg.slug: plan.pinned}} if plan.pinned is not None else None
+            await asyncio.to_thread(_record_run, cfg.slug, plan.action, plan.reason, trigger, known)
             return plan, None
         assert inputs.api_key is not None
+        headers = {**_auth(inputs.api_key), "Content-Type": "application/json"}
         try:
             resp = await request(
                 "POST",
                 plan.url,
-                headers={**_auth(inputs.api_key), "Content-Type": "application/json"},
+                headers=headers,
                 json_body=plan.body,
                 timeout=30,
                 retries=0,  # a retried create would leave a second version behind
             )
-            data = (resp.json() or {}).get("data") or {}
-        except (FetchError, ValueError) as exc:
-            message = f"OpenRouter did not take the update: {exc}"
+            data, version, stored = _confirmed(resp.json(), cfg.slug)
+        except asyncio.CancelledError:
+            # Whoever cancelled has stopped waiting, but OpenRouter may have taken the write. Claim it if so, or the
+            # preset it made would be blocked as someone else's.
+            try:
+                await asyncio.wait_for(_read_back(plan, inputs, trigger), 15)
+            except Exception:  # best effort: the cancellation goes on whatever happens here
+                log.warning("Could not check whether the cancelled preset write for %s went through", cfg.slug)
+            raise
+        except (FetchError, ValueError, _Unconfirmed) as exc:
+            # A refusal (4xx) is final. Anything else may have been written with the answer lost on the way back.
+            final = isinstance(exc, FetchError) and exc.status is not None and exc.status < 500
+            if not final and (recovered := await _read_back(plan, inputs, trigger)) is not None:
+                return plan, recovered
+            message = scrub_secrets(f"OpenRouter did not take the update: {exc}", headers)
             await asyncio.to_thread(_record_run, cfg.slug, "failed", message, trigger)
             raise PresetWriteError(message) from exc
-        live = data.get("designated_version") or {}
-        stored = live.get("config") if isinstance(live.get("config"), dict) else {}
-        unsaved = unsaved_keys(plan.config, stored)
-        version = live.get("version")
-        verb = "Created" if plan.action == "create" else "Updated"
-        message = f"{verb} {cfg.slug} as version {version}: {plan.reason}"
-        if unsaved:
-            message += f" OpenRouter did not keep: {', '.join(unsaved)}."
-        applied = {
-            "slug": cfg.slug,
-            "model_id": plan.config.get("model"),
-            "version": version,
-            "at": datetime.now(UTC).isoformat(),
-        }
-        # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
-        await asyncio.to_thread(_update_state, {"applied": applied}, cfg.slug)
-        await asyncio.to_thread(_record_run, cfg.slug, "applied", message, trigger)
-        return plan, Applied(version=version, unsaved=unsaved, message=message)
+        ident = _stable_id(data)
+        if plan.action == "create":
+            ident = await _identity(inputs, cfg.slug, ident)
+        return plan, await _settle(plan, inputs, trigger, version, stored, *ident)
 
 
 async def sync(trigger: str = "schedule") -> None:
