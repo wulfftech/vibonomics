@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,6 +31,33 @@ def resolve(cfg: ProviderConfig) -> ResolvedProvider:
         mgmt_key=_trimmed(mgmt_key),
         base_url=cfg.base_url,
         options=dict(cfg.options or {}),
+        extra_key=_trimmed(extra_key),
+    )
+
+
+def resolve_draft(
+    provider_type: str,
+    name: str,
+    *,
+    api_key: str | None,
+    mgmt_key: str | None,
+    extra_key: str | None,
+    base_url: str | None,
+    options: dict[str, Any] | None,
+) -> ResolvedProvider:
+    """A provider as typed into an unsaved form.
+
+    No environment lookup, unlike ``resolve``: the base URL is the caller's, and an environment key sent to it
+    would be a key the operator never agreed to send there. The test must also check the key that was typed.
+    """
+    return ResolvedProvider(
+        id=0,
+        type=provider_type,
+        name=name,
+        api_key=_trimmed(api_key),
+        mgmt_key=_trimmed(mgmt_key),
+        base_url=(base_url or "").strip() or None,
+        options=dict(options or {}),
         extra_key=_trimmed(extra_key),
     )
 

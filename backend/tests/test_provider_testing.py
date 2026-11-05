@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from vibonomics.api import providers as api
 from vibonomics.db import init_db, session_scope
 from vibonomics.orm import ProviderConfig
+from vibonomics.providers.registry import ADAPTERS
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -244,3 +245,92 @@ def test_a_key_with_a_stray_newline_never_reaches_the_message(monkeypatch):
         assert "Illegal header value" in str(caught.value)
     finally:
         server.shutdown()
+
+
+# -- the draft test never uses environment keys, and never sends a key anywhere the form did not name -----------------
+
+
+@pytest.fixture
+def wire(monkeypatch):
+    """The real ``_run_test`` and adapters, with every outbound request recorded and answered by a stub."""
+    import httpx
+    import respx
+
+    from vibonomics import http
+    from vibonomics.catalog.modelsdev import ModelsDevCatalog
+
+    async def empty_catalog(force: bool = False):
+        return ModelsDevCatalog({})
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(api, "load_catalog", empty_catalog)
+    monkeypatch.setattr(http.asyncio, "sleep", no_wait)
+    # The shared client belongs to the event loop that first used it.
+    monkeypatch.setattr(http, "_client", None)
+    app = FastAPI()
+    app.include_router(api.router)
+    with respx.mock(assert_all_called=False) as router:
+        router.route().mock(return_value=httpx.Response(200, json={"data": []}))
+        yield TestClient(app), router.calls
+
+
+def _sent(calls) -> list[str]:
+    return [f"{call.request.url}\n{dict(call.request.headers)}\n{call.request.content!r}" for call in calls]
+
+
+@pytest.mark.parametrize("ptype", sorted(ADAPTERS))
+def test_a_draft_test_never_sends_an_environment_key(monkeypatch, wire, ptype):
+    client, calls = wire
+    spec = ADAPTERS[ptype].spec
+    monkeypatch.setenv(spec.env_key, "sk-test-env-api")
+    monkeypatch.setenv(spec.env_mgmt_key, "sk-test-env-mgmt")
+    monkeypatch.setenv(spec.env_extra_key, "sk-test-env-extra")
+
+    response = client.post("/api/providers/test", json={"type": ptype, "base_url": "https://attacker.example/v1"})
+
+    assert response.status_code == 200
+    assert not [text for text in _sent(calls) if "sk-test-env" in text], _sent(calls)
+    assert "sk-test-env" not in response.text
+
+
+def test_the_key_typed_into_the_form_is_the_key_tested_even_with_an_environment_key(monkeypatch, wire):
+    client, calls = wire
+    monkeypatch.setenv("VIBONOMICS_CUSTOM_OPENAI_API_KEY", "sk-test-env-api")
+
+    response = client.post(
+        "/api/providers/test",
+        json={"type": "custom-openai", "base_url": "https://llm.example/v1", "api_key": "  sk-test-typed \n"},
+    )
+
+    assert response.json()["ok"] is True, response.json()
+    assert len(calls) == 1
+    assert calls[0].request.headers["authorization"] == "Bearer sk-test-typed"
+    assert calls[0].request.url.host == "llm.example"
+
+
+def test_a_draft_with_no_key_sends_nothing_to_a_foreign_host(monkeypatch, wire):
+    client, calls = wire
+    monkeypatch.setenv("VIBONOMICS_GROQ_API_KEY", "sk-test-env-api")
+
+    response = client.post("/api/providers/test", json={"type": "groq", "base_url": "https://attacker.example/v1"})
+
+    assert response.json()["ok"] is True
+    assert "No API key set" in response.json()["message"]
+    assert len(calls) == 0
+
+
+def test_a_saved_providers_environment_key_stays_home_when_the_test_names_another_host(monkeypatch, wire):
+    client, calls = wire
+    monkeypatch.setenv("VIBONOMICS_GROQ_API_KEY", "sk-test-env-api")
+    with session_scope() as session:
+        row = ProviderConfig(type="groq", name="Env-locked groq", enabled=True, options={})
+        session.add(row)
+        session.flush()
+        provider_id = row.id
+
+    response = client.post(f"/api/providers/{provider_id}/test", json={"base_url": "https://attacker.example/v1"})
+
+    assert "not sent to a different host" in response.json()["message"]
+    assert len(calls) == 0

@@ -18,7 +18,7 @@ from ..db import get_session, session_scope
 from ..http import FetchError
 from ..jobs import run_job, spawn
 from ..orm import Balance, ProviderConfig
-from ..provider_service import env_locked, resolve
+from ..provider_service import env_locked, resolve, resolve_draft
 from ..providers.base import FetchContext, ResolvedProvider
 from ..providers.registry import all_specs, get_adapter_class
 from ..settings_store import load_settings
@@ -282,18 +282,18 @@ async def test_provider_draft(body: ProviderIn) -> TestResult:
         raise HTTPException(400, f"Unknown provider type '{body.type}'")
     if cls.spec.custom and not (body.base_url or "").strip():
         raise HTTPException(400, "A base URL is required for custom providers")
-    transient = ProviderConfig(
-        type=body.type,
-        name=(body.name or cls.spec.name).strip(),
-        base_url=(body.base_url or "").strip() or None,
-        options=body.options or {},
-        api_key_enc=crypto.encrypt(body.api_key) if body.api_key else None,
-        mgmt_key_enc=crypto.encrypt(body.mgmt_key) if body.mgmt_key else None,
-        extra_key_enc=crypto.encrypt(body.extra_key) if body.extra_key else None,
+    draft = resolve_draft(
+        body.type,
+        (body.name or cls.spec.name).strip(),
+        api_key=body.api_key,
+        mgmt_key=body.mgmt_key,
+        extra_key=body.extra_key,
+        base_url=body.base_url,
+        options=body.options,
     )
     with session_scope() as session:
         settings = load_settings(session)
-    return await _run_test(resolve(transient), settings)
+    return await _run_test(draft, settings)
 
 
 @router.post("/{provider_id}/test", response_model=TestResult)
