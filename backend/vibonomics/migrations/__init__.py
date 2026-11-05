@@ -8,6 +8,7 @@ Create a new revision after changing ``orm.py``::
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine
 
 _HERE = Path(__file__).resolve().parent
@@ -51,21 +53,23 @@ def _revision(connection: Connection) -> str | None:
     return MigrationContext.configure(connection).get_current_revision()
 
 
-def _check_foreign_keys(connection: Connection) -> None:
-    """Refuse a migration that left a row pointing at nothing; raising rolls it back."""
-    broken = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
-    if broken:
-        shown = ", ".join(f"{table} row {rowid} -> {parent}" for table, rowid, parent, _fk in broken[:10])
-        raise RuntimeError(f"The migration left {len(broken)} row(s) with a broken foreign key ({shown}); rolled back")
+def _broken_keys(connection: Connection) -> Counter[tuple[str, str]]:
+    """Rows whose foreign key points at nothing, counted per child and parent table."""
+    rows = connection.exec_driver_sql("PRAGMA foreign_key_check")
+    return Counter((table, parent) for table, _rowid, parent, _fk in rows)
 
 
 def _upgrade(connection: Connection, cfg: Config) -> None:
-    before = _revision(connection)
+    if _revision(connection) == ScriptDirectory.from_config(cfg).get_current_head():
+        return
+    # With enforcement off, this count is the only thing that notices a migration orphaning rows. It compares with
+    # the count from before, so a stray row the database already held does not stop it from starting.
+    broken_before = _broken_keys(connection)
     command.upgrade(cfg, "head")
-    # With enforcement off, only this check would notice. It runs when a migration was applied, so a database that
-    # already held a stray row is not refused at every start.
-    if _revision(connection) != before:
-        _check_foreign_keys(connection)
+    worse = _broken_keys(connection) - broken_before
+    if worse:
+        shown = ", ".join(f"{table} -> {parent}: {count}" for (table, parent), count in worse.items())
+        raise RuntimeError(f"The migration left rows with a broken foreign key ({shown}); it was rolled back")
 
 
 def upgrade_to_head(engine: Engine) -> None:

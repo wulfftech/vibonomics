@@ -217,3 +217,41 @@ def test_a_database_from_an_older_release_is_upgraded_with_its_rows_intact(engin
         assert conn.exec_driver_sql("SELECT count(*) FROM provider_configs").scalar() == 1
         assert conn.exec_driver_sql("SELECT count(*) FROM models").scalar() == 1
     assert _foreign_keys_on(engine)
+
+
+def _orphan(engine: Engine) -> None:
+    """A child row whose parent is gone, as a database edited by hand with enforcement off could hold."""
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.exec_driver_sql(
+            "INSERT INTO models (provider_config_id, model_id, name, input_modalities, output_modalities, is_free, "
+            "pricing_source, extra, first_seen, last_seen, active, baseline) "
+            "VALUES (999, 'orphan', 'Orphan', '[]', '[]', 0, '', '{}', '2026-10-01', '2026-10-01', 1, 0)"
+        )
+        conn.commit()
+        conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+
+def test_a_stray_row_the_database_already_held_does_not_stop_a_migration(engine, tmp_path, monkeypatch):
+    migrations.upgrade_to_head(engine)
+    _populate(engine)
+    _orphan(engine)
+    before = _counts(engine)
+    _with_revision(tmp_path, monkeypatch, REBUILD)
+
+    migrations.upgrade_to_head(engine)
+
+    assert _counts(engine) == before
+
+
+def test_a_migration_is_still_refused_for_orphaning_more_rows_than_the_database_held(engine, tmp_path, monkeypatch):
+    migrations.upgrade_to_head(engine)
+    _populate(engine)
+    _orphan(engine)
+    before = _counts(engine)
+    _with_revision(tmp_path, monkeypatch, ORPHAN)
+
+    with pytest.raises(RuntimeError, match="models -> provider_configs"):
+        migrations.upgrade_to_head(engine)
+
+    assert _counts(engine) == before
