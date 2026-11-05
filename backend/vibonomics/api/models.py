@@ -387,7 +387,14 @@ def _model_detail(model_pk: int, catalog: ModelsDevCatalog | None) -> ModelDetai
             metrics=metrics,
             reported_cost_sources=sc.reported_cost_sources if sc else [],
             price_history=[PricePointOut.model_validate(h, from_attributes=True) for h in history],
-            other_offers=sorted(others, key=lambda o: (o.price.input or 0) + (o.price.output or 0)),
+            # An offer with no known price is not the cheapest: it goes last.
+            other_offers=sorted(
+                others,
+                key=lambda o: (
+                    o.price.input is None or o.price.output is None,
+                    (o.price.input or 0) + (o.price.output or 0),
+                ),
+            ),
             endpoints=list((m.extra or {}).get("endpoints") or []),
             tests=[
                 TestResultOut(
