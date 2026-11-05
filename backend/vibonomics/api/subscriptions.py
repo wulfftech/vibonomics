@@ -138,7 +138,8 @@ async def _read_capped(request: Request, limit: int) -> bytes:
 
 
 def _check_token(expected: str | None, provided: str | None) -> None:
-    if not expected or not provided or not hmac.compare_digest(expected, provided):
+    # compare_digest raises TypeError on a str with non-ASCII characters, so compare the bytes.
+    if not expected or not provided or not hmac.compare_digest(expected.encode(), provided.encode()):
         raise HTTPException(status_code=401, detail="Bad subscription ingest token")
 
 

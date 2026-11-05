@@ -386,3 +386,16 @@ def test_the_read_survives_a_snapshot_stored_before_ingest_cleaned_it():
         with session_scope() as session:
             for row in session.query(SubscriptionSnapshot).filter(SubscriptionSnapshot.payload == bad):
                 session.delete(row)
+
+
+def test_a_token_with_characters_outside_ascii_is_a_401_not_a_500():
+    client = _client()
+    client.get("/api/subscription/claude")  # make sure a token exists, so the comparison runs
+    for response in (
+        client.post("/api/subscription/ingest/claude?token=%C3%A9", json={}),
+        # Header values reach the app as latin-1 text, so a raw byte such as \xe9 is a non-ASCII str there.
+        client.post("/api/subscription/ingest/claude", json={}, headers={"X-Vibonomics-Token": b"\xe9"}),
+        client.post("/api/subscription/ingest/claude", json={}, headers={"X-Vibonomics-Token": "café".encode()}),
+    ):
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Bad subscription ingest token"}
