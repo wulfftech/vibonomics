@@ -66,7 +66,39 @@ def grade_answer(answer: str, check: dict[str, Any]) -> tuple[float, str]:
         if not ok_json:
             return 0.0, json_detail
         detail += "; " + json_detail
+    if "lines" in spec:
+        ok_lines, lines_detail = _lines_match(answer, spec["lines"])
+        if not ok_lines:
+            score = 0.0
+        detail += "; " + lines_detail
     return score, detail
+
+
+def _lines_match(answer: str, spec: dict[str, Any]) -> tuple[bool, str]:
+    """Per-line format rules: ``count``, ``prefix``, ``min_words``/``max_words`` (not counting the prefix),
+    ``forbidden_letters``, ``forbidden_words`` and ``last_line_ends_with``. Blank lines are ignored."""
+    lines = [line.strip() for line in answer.strip().splitlines() if line.strip()]
+    if "count" in spec and len(lines) != int(spec["count"]):
+        return False, f"expected {spec['count']} lines, got {len(lines)}"
+    prefix = str(spec.get("prefix") or "")
+    for number, line in enumerate(lines, start=1):
+        if prefix and not line.startswith(prefix):
+            return False, f"line {number} does not start with {prefix!r}"
+        words = line[len(prefix) :].split()
+        if spec.get("min_words") and len(words) < int(spec["min_words"]):
+            return False, f"line {number} has {len(words)} words, under {spec['min_words']}"
+        if spec.get("max_words") and len(words) > int(spec["max_words"]):
+            return False, f"line {number} has {len(words)} words, over {spec['max_words']}"
+        for letter in str(spec.get("forbidden_letters") or ""):
+            if letter.lower() in line.lower():
+                return False, f"line {number} contains the letter {letter!r}"
+        for word in spec.get("forbidden_words") or []:
+            if re.search(rf"\b{re.escape(str(word))}\b", line, re.IGNORECASE):
+                return False, f"line {number} contains the word {word!r}"
+    ending = spec.get("last_line_ends_with")
+    if ending and (not lines or not lines[-1].lower().endswith(str(ending).lower())):
+        return False, f"the last line does not end with {ending!r}"
+    return True, "line rules met"
 
 
 def _strip_fence(text: str) -> str:

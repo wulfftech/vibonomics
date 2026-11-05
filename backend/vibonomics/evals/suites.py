@@ -61,10 +61,12 @@ class SuiteDef:
 def _build() -> dict[str, SuiteDef]:
     from .tasks_chat import CHAT_TASKS, TOOL_TASKS
     from .tasks_coding import AGENTIC_TASKS
+    from .tasks_hard import HARD_AGENTIC, HARD_CHAT, HARD_TOOLS
 
     agentic = {t.id: t for t in AGENTIC_TASKS}
     chat = {t.id: t for t in CHAT_TASKS}
     tools = {t.id: t for t in TOOL_TASKS}
+    hard = (*HARD_AGENTIC, *HARD_TOOLS, *HARD_CHAT)
 
     quick = (
         agentic["agentic-fix-mean"],
@@ -96,9 +98,17 @@ def _build() -> dict[str, SuiteDef]:
         "standard": SuiteDef(
             id="standard",
             name="Standard agentic coding",
-            description="Thirteen tasks across agentic coding, tool use, instruction following and accuracy. "
-            "Takes longer and costs more, but separates models clearly.",
+            description="Fourteen tasks across agentic coding, tool use, instruction following and accuracy. "
+            "Takes longer and costs more, but separates weak models from the rest.",
             tasks=standard,
+        ),
+        "hard": SuiteDef(
+            id="hard",
+            name="Hard",
+            description="Eleven harder tasks for telling apart models that all clear the Standard suite: coding "
+            "tasks whose hidden tests check every stated rule, a three-call tool chain, exact arguments from a "
+            "relative date, and stricter formats and reasoning. Expect most free models to miss some.",
+            tasks=hard,
         ),
     }
 

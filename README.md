@@ -230,7 +230,11 @@ Tests make real API calls on the account behind the selected key. Free models co
 judge costs a few tenths of a cent per task. A model grading other models is as circular as it sounds,
 so wherever a check can decide, a check does.
 
-Two suites ship: **Quick** (seven tasks) for triage and **Standard** (fourteen) for a clearer ranking.
+Three suites ship: **Quick** (seven tasks) for triage, **Standard** (fourteen) for a clearer ranking, and **Hard**
+(eleven) for telling apart models that all clear Standard. Quick and Standard are pass-or-fail on tasks most capable
+models solve, so on a field of decent free models nearly every score is 100; Hard keeps its visible tests thin and
+puts the difficulty in rules only the hidden tests check (what must not be mutated, boundary cases, an exact format,
+an id that has to come from the last tool result). Expect most free models to miss some of it.
 
 | Task family | How it is graded |
 |---|---|

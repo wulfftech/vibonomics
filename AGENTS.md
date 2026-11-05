@@ -79,7 +79,10 @@ docker compose logs -f vibonomics
 - **Evals** (`backend/vibonomics/evals/`): tasks are declarative `TaskDef`s. Every agentic task needs a
   reference solution that passes its visible and hidden tests (`tests/evals/test_suites.py` proves it)
   and a judge rubric. Model-written code only runs through `sandbox_client`, never `subprocess` in the
-  app process. A judge failure must be reported in the run summary, not silently scored as zero.
+  app process. New suites go in `suites.py`; import the suite module before a `tasks_*` module in tests (the task
+  modules import `suites`, which builds the suites from them). Chat tasks can use per-line rules (`lines` in a
+  check) as well as `equals`/`contains_all`/`regex`/`json`. A judge failure must be reported in the run summary,
+  not silently scored as zero.
   A task's error is never a score: errored and ungraded results stay out of averages. A `429` is retried
   with `RATE_LIMIT_BACKOFF` (shared per model) before it counts as an error. The runner never calls a model a
   provider flags `client_restricted`. OpenCode Go (not the Console tier) gets its own user agent and a

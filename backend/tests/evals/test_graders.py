@@ -47,6 +47,41 @@ def test_word_limits():
     assert grade_answer("index speeds up the lookup", spec)[0] == 0
 
 
+def test_line_rules():
+    spec = {
+        "answer": {
+            "lines": {
+                "count": 3,
+                "prefix": "- ",
+                "min_words": 3,
+                "max_words": 5,
+                "forbidden_letters": "z",
+                "forbidden_words": ["data"],
+                "last_line_ends_with": "restore.",
+            }
+        }
+    }
+    good = "- Backups save the day\n- Copies live elsewhere safely\n\n- Practise how to restore."
+    assert grade_answer(good, spec)[0] == 100
+    cases = {
+        "two lines": "- one two three\n- four five six restore.",
+        "no dash": "- one two three\n- four five six\nfive six seven restore.",
+        "too short": "- one two\n- four five six\n- five six seven restore.",
+        "too long": "- one two three four five six\n- four five six\n- five six seven restore.",
+        "letter": "- one two three\n- zebra five six\n- five six seven restore.",
+        "word": "- one two three\n- the Data lives\n- five six seven restore.",
+        "ending": "- one two three\n- four five six\n- five six seven restore",
+    }
+    for name, answer in cases.items():
+        assert grade_answer(answer, spec)[0] == 0, name
+
+
+def test_a_word_rule_matches_whole_words_only():
+    spec = {"answer": {"lines": {"forbidden_words": ["data"]}}}
+    assert grade_answer("A database is fine here.", spec)[0] == 100
+    assert grade_answer("Data is not.", spec)[0] == 0
+
+
 def test_json_grading_accepts_fences():
     spec = {
         "answer": {
