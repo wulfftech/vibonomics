@@ -248,6 +248,35 @@ async def test_gemini_free_tier_models(ctx):
     assert flash.discount == 0.5 and flash.discount_until == "2026-12-31"
 
 
+GEMINI_TABLE = """## Gemini 9 Test
+
+*[`gemini-9-test`](https://ai.google.dev/gemini-api/docs/models/gemini-9-test)*
+
+### Standard
+
+|   | Free Tier | Paid Tier, per 1M tokens in USD |
+|---|---|---|
+| Input price | {free} | $1.00 |
+| Output price | {free} | $4.00 |
+| Context caching price | Not available | $0.10 |
+| Context caching storage price | Not available | $1.00 / 1,000,000 tokens per hour |
+"""
+
+
+@pytest.mark.parametrize(
+    ("free_cell", "free_tier"), [("$0.00", True), ("Free of charge", True), ("Not available", False)]
+)
+def test_gemini_a_free_tier_priced_at_zero_dollars_is_a_free_tier(free_cell, free_tier):
+    (row,) = google.parse_pricing(GEMINI_TABLE.format(free=free_cell))
+    assert row.extra["free_tier"] is free_tier
+
+
+def test_gemini_cache_storage_priced_per_hour_is_not_the_cache_write_price():
+    (row,) = google.parse_pricing(GEMINI_TABLE.format(free="Not available"))
+    assert (row.input, row.output, row.cache_read) == (1.0, 4.0, 0.1)
+    assert row.cache_write is None
+
+
 # -- DeepSeek --------------------------------------------------------------------------------
 
 
@@ -261,6 +290,35 @@ async def test_deepseek_peak_prices_and_off_peak(ctx):
     assert flash.context_length == 1_000_000
     assert flash.max_output == 384_000
     assert offers["deepseek-v4-pro"].price.input == 1.32
+
+
+SHARED_CELLS = """<table>
+<tr><td colspan="3">MODEL</td><td>deepseek-flash</td><td>deepseek-v4-pro</td></tr>
+<tr><td colspan="3">CONTEXT LENGTH</td><td colspan="2">1M</td></tr>
+<tr><td colspan="3">MAX OUTPUT</td><td>DEFAULT: 4K MAXIMUM: 8K</td><td>MAXIMUM: 384K</td></tr>
+<tr><td rowspan="4">PRICING</td><td rowspan="2">1M INPUT TOKENS (CACHE MISS)</td><td>OFF-PEAK</td>
+<td colspan="2">$0.15</td></tr>
+<tr><td>PEAK</td><td colspan="2">$0.3</td></tr>
+<tr><td rowspan="2">1M OUTPUT TOKENS</td><td>OFF-PEAK</td><td>$0.6</td><td>$1.98</td></tr>
+<tr><td>PEAK</td><td>$1.2</td><td>$3.96</td></tr>
+</table>"""
+
+
+def test_deepseek_a_price_cell_spanning_both_models_prices_both():
+    rows = {r.model_id: r for r in deepseek.parse_pricing(SHARED_CELLS)}
+    assert (rows["deepseek-flash"].input, rows["deepseek-flash"].output) == (0.3, 1.2)
+    # The shared input cell used to give only the first model a price, and the second none on that row.
+    assert (rows["deepseek-v4-pro"].input, rows["deepseek-v4-pro"].output) == (0.3, 3.96)
+    assert rows["deepseek-v4-pro"].extra["off_peak_prices"]["input"] == 0.15
+    assert rows["deepseek-flash"].extra["off_peak_prices"]["input"] == 0.15
+
+
+def test_deepseek_max_output_is_the_maximum_not_the_default():
+    rows = {r.model_id: r for r in deepseek.parse_pricing(SHARED_CELLS)}
+    assert rows["deepseek-flash"].extra["max_output"] == 8_000  # "DEFAULT: 4K MAXIMUM: 8K"
+    assert rows["deepseek-v4-pro"].extra["max_output"] == 384_000
+    assert rows["deepseek-flash"].extra["context_length"] == 1_000_000
+    assert rows["deepseek-v4-pro"].extra["context_length"] == 1_000_000
 
 
 @respx.mock
