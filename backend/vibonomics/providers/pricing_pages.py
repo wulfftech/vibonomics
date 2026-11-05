@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
-from ..catalog.modelsdev import normalize_model_key
+from ..catalog.modelsdev import normalize_model_key, snapshot_suffix
 from .base import ModelOffer, Price
 from .common import parse_money, strip_markdown
 
@@ -24,10 +24,14 @@ _PROMO = re.compile(
     re.I | re.S,
 )
 _PROMO_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*off", re.I)
-_STRIKE = re.compile(r"~~\s*\$?\s*(?P<before>\d+(?:\.\d+)?)\s*~~\s*\$?\s*(?P<after>\d+(?:\.\d+)?)")
+_STRIKE = re.compile(r"~~(.*?)~~")
 _PARENS = re.compile(r"\s*\([^()]*\)")
 _FREE_WORDS = {"free", "free of charge", "$0", "0", "0.00"}
 _UNAVAILABLE = {"not available", "-", "—", "–", "", "n/a", "contact sales", "contact us", "enterprise"}
+
+
+def _today() -> date:
+    return datetime.now(UTC).date()
 
 
 def parse_date(text: str) -> str | None:
@@ -48,6 +52,8 @@ def parse_promo(text: str | None) -> tuple[float | None, float | None, str | Non
     if m:
         current, later = float(m.group("now")), float(m.group("later"))
         until = parse_date(m.group("date"))
+        if until and date.fromisoformat(until) < _today():
+            return later, None, None, None  # "through" is inclusive; after it the page's own later price applies
         pct = round((1 - current / later) * 100) if later else None
         note = f"{pct}% off" if pct else "Promotional price"
         if until:
@@ -61,9 +67,16 @@ def parse_price_cell(cell: str | None) -> tuple[float | None, float | None, str 
     if cell is None:
         return None, None, None, None
     text = strip_markdown(cell)
-    strike = _STRIKE.search(text)
-    if strike:
-        before, after = float(strike.group("before")), float(strike.group("after"))
+    if "~~" in text:
+        # The live price is whatever is left outside the struck list price, wherever the strike sits.
+        struck = _STRIKE.findall(text)
+        rest = _STRIKE.sub(" ", text)
+        after = parse_money(rest)
+        if not struck or "~~" in rest or after is None:
+            # A strike that cannot be paired, or that nothing replaces, says nothing safe about the live price:
+            # None keeps the offer's own, where the list price would stand in as the live one.
+            return None, None, None, None
+        before = parse_money(" ".join(struck))
         pct = _PROMO_PCT.search(text)
         note = (
             f"{float(pct.group(1)):g}% off"
@@ -118,15 +131,23 @@ class PagePrice:
         return self.input is not None or self.output is not None
 
 
-def _offer_index(offers: list[ModelOffer]) -> dict[str, ModelOffer]:
-    index: dict[str, ModelOffer] = {}
+def _offer_index(offers: list[ModelOffer]) -> dict[str, list[tuple[str, ModelOffer]]]:
+    """Offers by normalised key, each with the text the key came from (its date still on it), in offer order."""
+    index: dict[str, list[tuple[str, ModelOffer]]] = {}
     for offer in offers:
-        for key in (offer.model_id, offer.name):
-            if key:
-                index.setdefault(normalize_model_key(key), offer)
-        if offer.canonical_id:
-            index.setdefault(normalize_model_key(offer.canonical_id.split("/")[-1]), offer)
+        for text in (offer.model_id, offer.name, offer.canonical_id.split("/")[-1] if offer.canonical_id else None):
+            if text:
+                index.setdefault(normalize_model_key(text), []).append((text, offer))
     return index
+
+
+def _same_snapshot(a: str, b: str) -> bool:
+    """Whether two names for one model can be one release: a date or version may be dropped from one side only.
+
+    ``normalize_model_key`` drops it from both, which made ``mistral-large-2512`` the same model as ``-2411``.
+    """
+    sa, sb = snapshot_suffix(a), snapshot_suffix(b)
+    return sa is None or sb is None or sa == sb
 
 
 def _exact_key(value: str) -> str:
@@ -147,13 +168,13 @@ def _loose_offer(offers: list[ModelOffer], row: PagePrice) -> ModelOffer | None:
     if row.model_id:
         key = normalize_model_key(row.model_id)
         for offer in offers:
-            if normalize_model_key(offer.model_id) == key:
+            if normalize_model_key(offer.model_id) == key and _same_snapshot(offer.model_id, row.model_id):
                 return offer
     index = _offer_index(offers)
     for variant in name_variants(row.name):
-        offer = index.get(normalize_model_key(variant))
-        if offer is not None:
-            return offer
+        for text, offer in index.get(normalize_model_key(variant), ()):
+            if _same_snapshot(text, variant):
+                return offer
     return None
 
 
