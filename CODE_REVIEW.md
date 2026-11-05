@@ -31,7 +31,7 @@ a breach of an `AGENTS.md` rule. **Low** = an edge case, hardening, or UX. Confi
 | `ruff check`, `ruff format --check` | pass |
 | `pytest -q` (Python 3.12, as root, in a container with a proxied network) | 449 passed, **2 failed**: see B-3 and S-1. Both pass in GitHub CI. |
 | `npm run typecheck`, `npm run lint`, `npm test` (152 tests), `npm run build` | pass |
-| `npm run format:check` | **fails** on `src/components/models/ModelTable.tsx` (CI-1) |
+| `npm run format:check` | **failed** on `src/components/models/ModelTable.tsx` (CI-1); passes after `683a31f` |
 | GitHub CI on `main` | **red for the last 5 pushes** (runs 43–47, from `10ca321` on): frontend "Format check" fails, so the frontend Tests and Build steps have been **skipped in CI** since 2026-11-04 |
 | `openapi.json` / `schema.d.ts` vs the backend | in sync (re-exported and diffed) |
 | Migration head vs `orm.py` | in sync (`compare_metadata` returned `[]`) |
@@ -44,8 +44,8 @@ These have the best ratio of harm to effort.
 
 1. **PR-1:** the draft provider test sends env-supplied keys to any `base_url` in the request. On the live instance
    (no password) that takes one POST.
-2. **CI-1:** run `npx prettier --write src/components/models/ModelTable.tsx`. CI goes green and the frontend tests
-   run in CI again.
+2. ~~**CI-1:** run `npx prettier --write src/components/models/ModelTable.tsx`.~~ **Fixed in `683a31f`** (this
+   review's PR), so the frontend tests and build run in CI again.
 3. **J-1:** Claude subscription percentages ≤ 1.5 are multiplied by 100, so 1% shows as 100%.
 4. **PR-2, PR-3:** a key that straddles the 300-character cut survives the scrub, and cross-origin redirects forward
    `x-api-key` (the OUTSTANDING item, now confirmed).
@@ -72,7 +72,7 @@ These have the best ratio of harm to effort.
 
 ## Auth, app shell, config, CI, Docker (lead)
 
-**CI-1 — High (process) — `frontend/src/components/models/ModelTable.tsx:14-22`. [lead-verified]**
+**CI-1 — High (process) — `frontend/src/components/models/ModelTable.tsx:14-22`. [lead-verified] — FIXED in `683a31f`.**
 - `3b753b8` removed an import, and the multi-line import that is left now fits on one line, so Prettier wants it
   joined.
 - CI's frontend job stops at "Format check". Typecheck and lint still run, but **vitest and the production build have
