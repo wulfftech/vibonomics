@@ -235,6 +235,29 @@ async def test_a_key_the_provider_echoes_never_reaches_the_error(response):
 
 @pytest.mark.asyncio
 @respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(401, text="x" * 280 + KEY),
+        httpx.Response(401, json={"error": {"message": "y" * 280 + KEY}}),
+    ],
+    ids=["plain-text-body", "json-error-message"],
+)
+async def test_a_key_echoed_across_the_300_character_cut_is_still_scrubbed(response):
+    respx.post("https://example.test/v1/chat/completions").mock(return_value=response)
+    target = ChatTarget(
+        wire="openai", base_url="https://example.test/v1", model="m", headers={"Authorization": f"Bearer {KEY}"}
+    )
+    client = LLMClient(target)
+    with pytest.raises(ChatError) as caught:
+        await client.chat([{"role": "user", "content": "hi"}])
+    await client.aclose()
+    assert "sk-live" not in str(caught.value)
+    assert KEY[8:16] not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_a_key_echoed_by_anthropic_never_reaches_the_error():
     body = {"type": "error", "error": {"message": f"invalid x-api-key {KEY}"}}
     respx.post("https://example.test/v1/messages").mock(return_value=httpx.Response(200, json=body))

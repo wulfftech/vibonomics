@@ -106,7 +106,8 @@ async def request(
             await asyncio.sleep(2.0 * (attempt + 1))
             continue
         if resp.status_code >= 400:
-            body = scrub_secrets(resp.text[:300].replace("\n", " "), headers, params)
+            # Scrub before cutting: a key the remote echoes across the cut would no longer match in full.
+            body = scrub_secrets(resp.text.replace("\n", " "), headers, params)[:300]
             raise FetchError(f"{method} {_redact(url)}: HTTP {resp.status_code} {body}", status=resp.status_code)
         return resp
     raise FetchError(f"{method} {_redact(url)}: {scrub_secrets(str(last_exc), headers, params)}")
