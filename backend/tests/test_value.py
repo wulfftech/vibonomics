@@ -31,6 +31,7 @@ MODELS: dict[str, tuple[float, float, float | None, dict]] = {
     "acme/better-70:batch": (0.05, 0.25, 70, {}),
     "acme/pricier-70": (1.0, 1.0, 70, {}),
     "acme/direct": (1.0, 4.0, 66, {"extra": {"batch_discount": 0.5}}),
+    "acme/free-95:free": (0.0, 0.0, 95, {"is_free": True, "extra": {"client_restricted": "opencode"}}),
 }
 
 
@@ -239,6 +240,51 @@ def test_providers_match_by_type_as_well_as_name(client):
     data = _ask(client, [{"provider": "OpenRouter", "model": "acme/cheap-60:batch"}], task=TASK)
     assert data["models"][0]["found"] is True
     assert data["models"][0]["provider_name"] == PROVIDER
+
+
+def test_a_model_only_one_client_may_call_is_not_ranked_or_picked_by_default(client):
+    # The free OpenCode Console tier answers 403 to every client but OpenCode, which a program calling this is not.
+    data = _ask(client, ["acme/cheap-60:batch", "acme/free-95:free"], task=TASK)
+    by = {r["model"]: r for r in data["models"]}
+    restricted = by["acme/free-95:free"]
+    assert restricted["client_restricted"] == "opencode"
+    assert (restricted["eligible"], restricted["rank"]) == (False, None)
+    assert "opencode" in restricted["note"] and "403" in restricted["note"]
+    assert by["acme/cheap-60:batch"]["client_restricted"] is None
+    assert data["pick"]["model"] == "acme/cheap-60:batch"
+    assert "free-95" not in data["reason"]
+
+
+def test_a_program_can_opt_in_to_models_only_one_client_may_call(client):
+    data = _ask(client, ["acme/cheap-60:batch", "acme/free-95:free"], task=TASK, include_client_restricted=True)
+    assert data["pick"]["model"] == "acme/free-95:free"
+    assert data["models"][1]["client_restricted"] == "opencode" and data["models"][1]["rank"] == 1
+
+
+def test_a_model_named_twice_is_ranked_once_against_the_others(client):
+    named = [
+        "acme/cheap-60:batch",
+        "acme/mid-64:batch",
+        "acme/cheap-60:batch",
+        {"provider": "OpenRouter", "model": "acme/cheap-60:batch"},  # the same model reached by the provider's type
+    ]
+    data = _ask(client, named, task=TASK)
+    rows = data["models"]
+    assert [r["model"] for r in rows] == ["acme/cheap-60:batch", "acme/mid-64:batch"] + ["acme/cheap-60:batch"] * 2
+    assert [r["rank"] for r in rows] == [1, 2, None, None]
+    assert [r["eligible"] for r in rows] == [True, True, False, False]
+    assert rows[2]["note"] == "Named more than once in the request" and rows[2]["found"] is True
+    assert "best value of the 2 that qualify" in data["reason"]
+    assert "Next is acme/mid-64:batch" in data["reason"]
+
+
+def test_a_tiny_task_never_costs_zero_while_its_value_is_finite(client):
+    data = _ask(client, ["acme/cheap-60:batch"], task={"input_tokens": 1, "output_tokens": 0})
+    row = data["models"][0]
+    assert row["task_cost"] == pytest.approx(1e-7)
+    assert row["value"] == pytest.approx(row["score"] / row["task_cost"], rel=1e-3)
+    # ... and an ordinary cost keeps its figures
+    assert _ask(client, ["acme/big-90"], task=TASK)["models"][0]["task_cost"] == pytest.approx(0.08)
 
 
 def test_bad_requests(client):
