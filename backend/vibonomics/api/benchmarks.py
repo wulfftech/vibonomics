@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +11,7 @@ from .. import events
 from ..benchmarks.registry import SOURCES
 from ..catalog.modelsdev import load_catalog
 from ..db import get_session, session_scope
+from ..http import FetchError
 from ..jobs import rematch_scores
 from ..orm import BenchmarkScore, ModelAlias
 from ..scoring import source_in_use
@@ -71,6 +72,14 @@ def score_rows(
 
 @router.put("/aliases", response_model=dict)
 async def set_alias(body: AliasIn) -> dict[str, int]:
+    catalog = await load_catalog()
+    if catalog.degraded:
+        raise HTTPException(
+            503, "The model catalogue is not available, so the alias cannot be checked. Try again later."
+        )
+    if body.canonical_id is not None and body.canonical_id not in catalog.canonical_index():
+        # Otherwise the scores would attach to nothing and the name would leave the unmatched list.
+        raise HTTPException(422, f"'{body.canonical_id}' is not a model in the catalogue")
     with session_scope() as s:
         existing = s.scalars(
             select(ModelAlias).where(ModelAlias.source == body.source, ModelAlias.source_model == body.source_model)
@@ -79,7 +88,10 @@ async def set_alias(body: AliasIn) -> dict[str, int]:
             existing.canonical_id = body.canonical_id
         else:
             s.add(ModelAlias(source=body.source, source_model=body.source_model, canonical_id=body.canonical_id))
-    matched = await rematch_scores()
+    try:
+        matched = await rematch_scores()
+    except FetchError as exc:  # the catalogue went away after the check above
+        raise HTTPException(503, str(exc)) from exc
     events.publish("benchmarks.changed", {})
     return {"matched": matched}
 

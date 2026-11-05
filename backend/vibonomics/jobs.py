@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, bindparam, delete, func, select, update
+from sqlalchemy import and_, bindparam, delete, false, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -627,8 +627,7 @@ async def rematch_scores() -> int:
     catalog = await load_catalog()
     if catalog.degraded:
         raise FetchError(f"{_no_catalogue(catalog)}, so the stored scores cannot be rematched")
-    operator_aliases = await asyncio.to_thread(_load_operator_aliases)
-    matcher = Matcher(catalog, operator_aliases)
+    matcher = Matcher(catalog)
     table = BenchmarkScore.__table__
     statement = (
         update(table)
@@ -646,6 +645,13 @@ async def rematch_scores() -> int:
     def _apply() -> int:
         matched = 0
         with session_scope() as s:
+            # Takes the write lock before the aliases are read, as persist_scores does with its delete: an alias
+            # saved after this waits and is applied by its own rematch. Read earlier, two quick saves could commit
+            # out of order and the older rematch would revert the newer mapping.
+            s.execute(update(table).where(false()).values(canonical_id=table.c.canonical_id))
+            matcher.operator_aliases = {
+                (a.source, a.source_model): a.canonical_id for a in s.scalars(select(ModelAlias))
+            }
             stored = s.execute(
                 select(table.c.source, table.c.metric, table.c.source_model, table.c.effort, table.c.extra)
             ).all()

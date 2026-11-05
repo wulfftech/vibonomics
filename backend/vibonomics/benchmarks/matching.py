@@ -294,6 +294,12 @@ class Matcher:
                 return cid, "fuzzy"
         return None, "unmatched"
 
+    @staticmethod
+    def _warn_stale(kind: str, source: str, source_model: str, target: str) -> None:
+        if (source, source_model.lower()) not in _warned_stale:
+            _warned_stale.add((source, source_model.lower()))
+            log.warning("%s alias %s %r names %s, which is not in the catalogue", kind, source, source_model, target)
+
     def match(
         self, source: str, source_model: str, model_ids: list[str] | None = None, fallback_ids: list[str] | None = None
     ) -> tuple[str | None, str]:
@@ -305,7 +311,12 @@ class Matcher:
         """
         key = (source, source_model)
         if key in self.operator_aliases:
-            return self.operator_aliases[key], "operator"
+            target = self.operator_aliases[key]
+            # As for a curated alias below: one to a model the catalogue no longer lists would attach the scores to
+            # nothing and drop the name from the unmatched list the operator maps from.
+            if target is None or target in self.index:
+                return target, "operator"
+            self._warn_stale("Operator", source, source_model, target)
         curated = curated_aliases().get(source, {})
         if source_model.lower() in curated:
             target = curated[source_model.lower()]
@@ -313,9 +324,7 @@ class Matcher:
             # the scores to nothing, and hide the name from the unmatched list. None means "ignore this name".
             if target is None or target in self.index:
                 return target, "curated"
-            if (source, source_model.lower()) not in _warned_stale:
-                _warned_stale.add((source, source_model.lower()))
-                log.warning("Curated alias %s %r names %s, which is not in the catalogue", source, source_model, target)
+            self._warn_stale("Curated", source, source_model, target)
 
         hints = _clean(model_ids or [])
         names = _clean([source_model, *hints])

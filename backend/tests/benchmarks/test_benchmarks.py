@@ -330,6 +330,21 @@ def test_curated_arena_aliases_reach_their_catalogue_ids():
         assert matcher.match("arena", name.lower()) == (cid, "curated"), name
 
 
+def test_an_operator_alias_to_a_model_the_catalogue_lacks_does_not_count_as_a_match(caplog):
+    gone = {("livebench", "Mystery Model"): "acme/gone"}
+    matcher = Matcher(_catalog(("acme/m1", "M1")), gone)
+    with caplog.at_level("WARNING"):
+        # Stale, so it counts as unmatched and the name stays on the list the operator maps from.
+        assert matcher.match("livebench", "Mystery Model") == (None, "unmatched")
+        assert matcher.match("livebench", "Mystery Model", ["acme/m1"]) == ("acme/m1", "id")
+    assert "acme/gone" in caplog.text and "not in the catalogue" in caplog.text
+    # An alias to a model it does list applies, and so does "ignore this name".
+    listed = Matcher(_catalog(("acme/m1", "M1")), {("livebench", "Mystery Model"): "acme/m1"})
+    assert listed.match("livebench", "Mystery Model") == ("acme/m1", "operator")
+    ignored = Matcher(_catalog(("acme/m1", "M1")), {("livebench", "M1"): None})
+    assert ignored.match("livebench", "M1") == (None, "operator")
+
+
 def test_a_curated_alias_to_a_model_the_catalogue_lacks_does_not_count_as_a_match(caplog):
     name = "Kimi K2 Preview (0711)"
     without = Matcher(_catalog(("openai/gpt-6", "GPT-6")))
@@ -811,22 +826,14 @@ async def test_a_rematch_cannot_hand_one_row_the_match_computed_for_another(data
     jobs.persist_scores("livebench", [mystery], refresh_matcher)
     _alias("livebench", "Mystery Model", "acme/m1")
 
-    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+    async def load_catalog_then_a_refresh_lands(force: bool = False) -> ModelsDevCatalog:
+        # The refresh replaces the source's rows after the rematch has started. Once the rematch is writing, a
+        # refresh waits for it (it holds the write lock from its first statement), so this is the latest it can land.
+        new = ScoreRecord(metric="coding", source_model="Brand New Model", value=2.0)
+        await asyncio.to_thread(jobs.persist_scores, "livebench", [new, mystery], refresh_matcher)
         return catalog
 
-    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
-    real_match = Matcher.match
-    refreshed: list[int] = []
-
-    def match_then_a_refresh_lands(self, *args, **kwargs):
-        if not refreshed:
-            refreshed.append(1)
-            # The refresh replaces the source's rows after the rematch read them and before it writes.
-            new = ScoreRecord(metric="coding", source_model="Brand New Model", value=2.0)
-            jobs.persist_scores("livebench", [new, mystery], refresh_matcher)
-        return real_match(self, *args, **kwargs)
-
-    monkeypatch.setattr(Matcher, "match", match_then_a_refresh_lands)
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog_then_a_refresh_lands)
     try:
         await jobs.rematch_scores()
         with session_scope() as s:
