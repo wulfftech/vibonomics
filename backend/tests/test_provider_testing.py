@@ -310,6 +310,7 @@ def wire(monkeypatch):
     import respx
 
     from vibonomics import http
+    from vibonomics.catalog import modelsdev
     from vibonomics.catalog.modelsdev import ModelsDevCatalog
 
     async def empty_catalog(force: bool = False):
@@ -325,6 +326,7 @@ def wire(monkeypatch):
     app = FastAPI()
     app.include_router(api.router)
     with respx.mock(assert_all_called=False) as router:
+        router.get(modelsdev.URL).mock(side_effect=httpx.ConnectError("no route"))
         router.route().mock(return_value=httpx.Response(200, json={"data": []}))
         yield TestClient(app), router.calls
 
@@ -372,6 +374,27 @@ def test_a_draft_with_no_key_sends_nothing_to_a_foreign_host(monkeypatch, wire):
     assert response.json()["ok"] is True
     assert "No API key set" in response.json()["message"]
     assert len(calls) == 0
+
+
+def test_a_provider_test_goes_ahead_when_models_dev_cannot_be_reached(monkeypatch, wire, tmp_path):
+    from types import SimpleNamespace
+
+    from vibonomics.catalog import modelsdev
+
+    client, calls = wire
+    # The real loader, with nothing cached: this used to raise before the test's own error handling began.
+    monkeypatch.setattr(api, "load_catalog", modelsdev.load_catalog)
+    monkeypatch.setattr(modelsdev, "get_config", lambda: SimpleNamespace(cache_dir=tmp_path))
+    monkeypatch.setattr(modelsdev, "_cache", None)
+
+    response = client.post(
+        "/api/providers/test",
+        json={"type": "custom-openai", "base_url": "https://llm.example/v1", "api_key": "sk-test-typed"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True, response.json()
+    assert calls[-1].request.url.host == "llm.example"
 
 
 def test_a_saved_providers_environment_key_stays_home_when_the_test_names_another_host(monkeypatch, wire):

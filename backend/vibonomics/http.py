@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -176,20 +177,37 @@ def _redact_urls(text: str) -> str:
     return _URL_IN_TEXT.sub(lambda match: _redact(match.group(0)), text)
 
 
+def _read_cache(cache_file: Path, validate: Callable[[Any], bool] | None) -> Any | None:
+    """The cached JSON, or None when there is none worth using (missing, unreadable, or failing ``validate``)."""
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if validate is None or validate(data) else None
+
+
 async def cached_json(
     url: str,
     cache_file: Path,
     *,
     headers: dict[str, str] | None = None,
     timeout: float = 120.0,
+    validate: Callable[[Any], bool] | None = None,
 ) -> Any:
-    """Fetch JSON, falling back to the last good copy on disk when the network fails."""
+    """Fetch JSON, falling back to the last good copy on disk when the network fails.
+
+    ``validate`` says whether an answer has the shape the caller expects. A 200 that fails it counts as a failed
+    fetch: it is neither returned nor written over the good copy, which would then hold an error body.
+    """
     try:
         data = await get_json(url, headers=headers, timeout=timeout)
+        if validate is not None and not validate(data):
+            raise FetchError(f"{_redact(url)}: the response was not the expected shape")
     except FetchError:
-        if cache_file.exists():
+        cached = _read_cache(cache_file, validate)
+        if cached is not None:
             log.warning("Using cached copy of %s", _redact(url))
-            return json.loads(cache_file.read_text(encoding="utf-8"))
+            return cached
         raise
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)

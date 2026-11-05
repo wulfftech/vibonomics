@@ -6,16 +6,20 @@ Used as the base model list and price source for every provider, and as the sour
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import get_config
-from ..http import cached_json
+from ..http import FetchError, cached_json
+
+log = logging.getLogger(__name__)
 
 URL = "https://models.dev/api.json"
 _MAX_AGE_SECONDS = 15 * 60
+_RETRY_SECONDS = 60
 
 
 @dataclass
@@ -36,8 +40,10 @@ def creator_of(canonical_id: str | None) -> str | None:
 
 
 class ModelsDevCatalog:
-    def __init__(self, data: dict[str, Any]):
+    def __init__(self, data: dict[str, Any], degraded: str | None = None):
         self.data = data
+        self.degraded = degraded
+        """Why this catalogue is empty when models.dev could not be reached and no earlier copy exists."""
         self._canonical: dict[str, CanonicalInfo] | None = None
 
     # -- providers ---------------------------------------------------------------------------
@@ -47,11 +53,17 @@ class ModelsDevCatalog:
         return value if isinstance(value, dict) else None
 
     def models(self, provider_id: str) -> dict[str, dict[str, Any]]:
+        if self.degraded:
+            # An adapter builds its model list from this. Empty would read as "the provider has no models" and
+            # the refresh would deactivate every row it has; an error leaves them as they were.
+            raise FetchError(f"models.dev is unavailable and there is no earlier copy: {self.degraded}")
         p = self.provider(provider_id)
         return p.get("models", {}) if p else {}
 
     def model(self, provider_id: str, model_id: str) -> dict[str, Any] | None:
-        return self.models(provider_id).get(model_id)
+        # Not via models(): a lookup that finds nothing is enrichment that is missing, not a refusal.
+        p = self.provider(provider_id)
+        return p.get("models", {}).get(model_id) if p else None
 
     def canonical_for(self, provider_id: str, model_id: str) -> str | None:
         m = self.model(provider_id, model_id)
@@ -112,15 +124,38 @@ def normalize_model_key(value: str) -> str:
     return s
 
 
+def _is_catalog(data: Any) -> bool:
+    """models.dev answers ``{provider_id: {..., "models": {...}}}``; anything else is an error body or a stub."""
+    return isinstance(data, dict) and any(
+        isinstance(provider, dict) and isinstance(provider.get("models"), dict) for provider in data.values()
+    )
+
+
 _cache: tuple[float, ModelsDevCatalog] | None = None
+"""When the catalogue held here stops being fresh (``time.monotonic``), and the catalogue."""
 
 
 async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+    """The catalogue, from models.dev, else the last good copy on disk, else the one already in memory.
+
+    With none of those it returns an empty catalogue whose ``degraded`` says why, rather than raising: most of what
+    asks for it only enriches (descriptions, canonical ids), and a provider test or a refresh of providers that
+    don't depend on it should not fail because models.dev is down. It is retried after a minute, not on every call.
+    """
     global _cache
     now = time.monotonic()
-    if not force and _cache and now - _cache[0] < _MAX_AGE_SECONDS:
+    if not force and _cache and now < _cache[0]:
         return _cache[1]
-    data = await cached_json(URL, get_config().cache_dir / "models.dev.json", timeout=120)
-    catalog = ModelsDevCatalog(data if isinstance(data, dict) else {})
-    _cache = (now, catalog)
+    try:
+        data = await cached_json(URL, get_config().cache_dir / "models.dev.json", timeout=120, validate=_is_catalog)
+    except FetchError as exc:
+        previous = _cache[1] if _cache and not _cache[1].degraded else None
+        log.warning(
+            "models.dev is unavailable (%s); %s", exc, "using the copy in memory" if previous else "going on without it"
+        )
+        catalog = previous or ModelsDevCatalog({}, degraded=str(exc))
+        _cache = (now + _RETRY_SECONDS, catalog)
+        return catalog
+    catalog = ModelsDevCatalog(data)
+    _cache = (now + _MAX_AGE_SECONDS, catalog)
     return catalog
