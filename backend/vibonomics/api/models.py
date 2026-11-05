@@ -13,9 +13,10 @@ from sqlalchemy.orm import Session
 
 from ..catalog.modelsdev import ModelsDevCatalog, load_catalog
 from ..db import get_session, session_scope
-from ..http import FetchError
+from ..http import FetchError, public_url
 from ..orm import EvalResult, Model, PriceHistory, ProviderConfig
 from ..provider_service import resolve
+from ..providers.base import FetchContext
 from ..providers.registry import get_adapter_class
 from ..scoring import ModelScores, compute_scores, own_test_scores, score_key
 from ..settings_store import AppSettings, UsageProfile, load_settings
@@ -257,15 +258,21 @@ def build_snippets(m: Model, provider: ProviderConfig, routing: Routing | None =
     if cls is None:
         return []
     spec = cls.spec
-    resolved = resolve(provider)
-    base_url = (resolved.base_url or spec.default_base_url).rstrip("/")
-    md_provider = (m.extra or {}).get("modelsdev_provider") or (spec.modelsdev_ids[0] if spec.modelsdev_ids else None)
+    # The adapter knows where this account's key works (Moonshot's China platform, Z.ai's coding endpoint) and how
+    # OpenCode serves one model; it needs nothing from the catalogue to say so.
+    adapter = cls(resolve(provider), FetchContext(catalog=ModelsDevCatalog({}), settings=AppSettings()))
+    extra = m.extra or {}
+    # Snippets reach visitors of an open-read instance, so a custom URL goes out without its credentials or query.
+    base_url = public_url(adapter.base_url)
+    anthropic_url = adapter.anthropic_base_url
+    route = adapter.model_route(extra)
+    md_provider = extra.get("modelsdev_provider") or (spec.modelsdev_ids[0] if spec.modelsdev_ids else None)
     env_key = spec.type.upper().replace("-", "_") + "_API_KEY"
     ctx = SnippetContext(
         spec=spec,
         provider_name=provider.name,
         base_url=base_url,
-        anthropic_base_url=spec.anthropic_base_url,
+        anthropic_base_url=public_url(anthropic_url) if anthropic_url else None,
         model_id=m.model_id,
         model_name=m.name,
         context_length=m.context_length,
@@ -278,7 +285,8 @@ def build_snippets(m: Model, provider: ProviderConfig, routing: Routing | None =
         price_input=m.price_input,
         price_output=m.price_output,
         routing=routing,
-        client_restricted=(m.extra or {}).get("client_restricted") or None,
+        client_restricted=extra.get("client_restricted") or None,
+        route=route,
     )
     return [SnippetOut(**s.to_dict()) for s in generate(ctx)]
 

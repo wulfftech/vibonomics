@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from ..http import USER_AGENT, FetchError, get_json, get_text, public_url
-from .base import BalanceInfo, ChatTarget, ModelOffer, ProviderAdapter, ProviderSpec
+from .base import BalanceInfo, ChatTarget, ModelOffer, ModelRoute, ProviderAdapter, ProviderSpec, Wire
 from .common import modelsdev_offers, openai_model_ids, parse_markdown_tables
 from .pricing_pages import PagePrice, apply_page_prices, find_column, parse_price_cell
 
@@ -287,22 +287,33 @@ class _OpenCodeBase(ProviderAdapter):
             "test run or balance refresh is what would reject a bad key."
         )
 
+    def _served_on(self, endpoint: dict[str, Any] | None) -> tuple[str, str]:
+        """(``openai``, ``anthropic`` or ``google``, base URL) for a model's models.dev endpoint entry."""
+        npm = str((endpoint or {}).get("npm") or "")
+        api = str((endpoint or {}).get("api") or self.openai_base).rstrip("/")
+        return ("google" if "google" in npm else "anthropic" if "anthropic" in npm else "openai"), api
+
+    def model_route(self, extra: dict[str, Any]) -> ModelRoute:
+        endpoint = extra.get("endpoint")
+        route, api = self._served_on(endpoint if isinstance(endpoint, dict) else None)
+        if route == "google" or not _on_opencode(api):
+            return ModelRoute("other")
+        return ModelRoute("anthropic" if route == "anthropic" else "openai", api)
+
     def chat_target(self, model_id: str) -> ChatTarget:
-        endpoint = self._endpoint_for(model_id) or {}
-        npm = str(endpoint.get("npm") or "")
-        api = str(endpoint.get("api") or self.openai_base).rstrip("/")
+        route, api = self._served_on(self._endpoint_for(model_id))
         if not _on_opencode(api):
             # models.dev is community-edited and fetched at runtime; the key goes only where OpenCode serves.
             raise FetchError(
                 f"models.dev lists {model_id} at {public_url(api)}, outside opencode.ai; "
                 "Vibonomics will not send the OpenCode key there."
             )
-        if "google" in npm:
+        if route == "google":
             raise FetchError(
                 "This model is served on OpenCode's Gemini route, which Vibonomics cannot call with its two "
                 "supported APIs (OpenAI chat completions and Anthropic messages)."
             )
-        wire = "anthropic" if "anthropic" in npm else "openai"
+        wire: Wire = "anthropic" if route == "anthropic" else "openai"
         if self.subscription:
             # Go's docs ask any client other than OpenCode to name itself in its own user agent and to send a stable
             # id per conversation in x-opencode-session, and answer HTTP 400 without it. That is the documented way

@@ -147,6 +147,15 @@ class ChatTarget:
     """A header the provider asks every client to fill with a stable id per conversation (OpenCode Go)."""
 
 
+@dataclass(frozen=True)
+class ModelRoute:
+    """How one model is reached when it differs between a provider's models (OpenCode: one route each)."""
+
+    wire: Literal["openai", "anthropic", "other"]
+    """``other`` is a route a generic client cannot use: OpenCode's Gemini route, or an endpoint it does not own."""
+    base_url: str | None = None
+
+
 @dataclass
 class ResolvedProvider:
     id: int
@@ -175,6 +184,15 @@ class ProviderAdapter:
     @property
     def base_url(self) -> str:
         return (self.cfg.base_url or self.spec.default_base_url).rstrip("/")
+
+    @property
+    def anthropic_base_url(self) -> str | None:
+        """The Anthropic-compatible base URL for this account (a provider with two platforms has one per platform)."""
+        return self.spec.anthropic_base_url
+
+    def model_route(self, extra: dict[str, Any]) -> ModelRoute | None:
+        """Where one model is served, from what its last refresh stored; None when ``base_url`` serves them all."""
+        return None
 
     def auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.cfg.api_key}"} if self.cfg.api_key else {}
