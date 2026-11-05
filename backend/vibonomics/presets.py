@@ -212,7 +212,6 @@ def rank(session: Session, settings: AppSettings, provider_ids: list[int]) -> tu
 
 def choose_endpoints(
     endpoints: list[dict[str, Any]],
-    cache_read: float | None,
     task: Task,
     provider_block: dict[str, Any],
     limit: int,
@@ -220,6 +219,10 @@ def choose_endpoints(
     current: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """The cheapest endpoints for one task that the preset's own provider filters would still let through.
+
+    Each endpoint is costed with its own cache-read price. One that lists none is costed as uncached: the model's
+    listed price is the best endpoint's, and an endpoint without a cache would be ranked ahead on a discount it does
+    not give.
 
     Endpoints that cost the same go in the order ``current`` (the tags the live preset lists) already has them, and
     only then by uptime, which changes on every refresh: left to it, equal prices would flip ``order`` and write a
@@ -240,7 +243,8 @@ def choose_endpoints(
             continue
         if {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider") or "").lower()} & ignored:
             continue
-        cost = task_cost(price_in, price_out, cache_read, task)
+        cache = ep.get("cache_read")
+        cost = task_cost(price_in, price_out, cache if isinstance(cache, int | float) else None, task)
         if cost is None:
             continue
         seen.add(tag)
@@ -793,9 +797,7 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
     per_pick = [
         (
             c.model_id,
-            choose_endpoints(
-                c.endpoints, c.cache_read, inputs.task, provider_block, cfg.max_providers, current=live_tags
-            ),
+            choose_endpoints(c.endpoints, inputs.task, provider_block, cfg.max_providers, current=live_tags),
         )
         for c in plan.picks
     ]

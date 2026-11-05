@@ -187,26 +187,52 @@ def _plan(client: TestClient) -> dict[str, Any]:
 
 
 def test_the_cheapest_endpoints_for_one_task_come_first_and_the_unusable_are_skipped():
-    chosen = choose_endpoints(ENDPOINTS, None, TASK, {}, 3)
+    chosen = choose_endpoints(ENDPOINTS, TASK, {}, 3)
     assert [e["tag"] for e in chosen] == ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
     assert chosen[0]["task_cost"] == pytest.approx((600_000 * 0.08 + 20_000 * 0.35) / 1e6)
-    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, None, TASK, {}, 10)][-1] == "slow/fp8"
+    assert [e["tag"] for e in choose_endpoints(ENDPOINTS, TASK, {}, 10)][-1] == "slow/fp8"
 
 
 def test_the_presets_own_provider_filters_narrow_the_choice():
-    only_fp8 = choose_endpoints(ENDPOINTS, None, TASK, {"quantizations": ["FP8"]}, 5)
+    only_fp8 = choose_endpoints(ENDPOINTS, TASK, {"quantizations": ["FP8"]}, 5)
     assert [e["tag"] for e in only_fp8] == ["deepinfra/fp8", "slow/fp8"]
-    ignoring = choose_endpoints(ENDPOINTS, None, TASK, {"ignore": ["Novita", "wafer"]}, 5)
+    ignoring = choose_endpoints(ENDPOINTS, TASK, {"ignore": ["Novita", "wafer"]}, 5)
     assert [e["tag"] for e in ignoring] == ["deepinfra/fp8", "slow/fp8"]
 
 
 def test_the_cache_price_counts_toward_which_endpoint_is_cheapest():
     cheap_cache = [
         {"tag": "a/x", "input": 1.0, "output": 1.0},
-        {"tag": "b/x", "input": 1.2, "output": 1.0},
+        {"tag": "b/x", "input": 1.2, "output": 1.0, "cache_read": 0.0},
     ]
-    assert choose_endpoints(cheap_cache, 0.0, TASK, {}, 1)[0]["tag"] == "a/x"
-    assert choose_endpoints(cheap_cache, 0.0, Task(1000, 1000, 0.0), {}, 2)[0]["task_cost"] == pytest.approx(0.002)
+    assert choose_endpoints(cheap_cache, TASK, {}, 1)[0]["tag"] == "b/x"  # free cache reads at an 80% hit rate
+    uncached = choose_endpoints(cheap_cache, Task(1000, 1000, 0.0), {}, 2)  # and with no hits the cache is no help
+    assert [e["tag"] for e in uncached] == ["a/x", "b/x"] and uncached[0]["task_cost"] == pytest.approx(0.002)
+
+
+def test_each_endpoint_is_costed_with_its_own_cache_price_and_none_means_uncached():
+    # at an 80% hit rate the endpoint that caches is the cheaper one, though its input price is the higher
+    plain = {"tag": "plain/x", "input": 0.08, "output": 0.35, "uptime_1d": 99}
+    nulled = {"tag": "nulled/x", "input": 0.08, "output": 0.35, "cache_read": None, "uptime_1d": 98}
+    caching = {"tag": "caching/x", "input": 0.10, "output": 0.40, "cache_read": 0.01, "uptime_1d": 97}
+    # 0.01 is the model's own listed cache price, which an endpoint with no price of its own must not borrow
+    chosen = choose_endpoints([plain, nulled, caching], TASK, {}, 3)
+    assert [e["tag"] for e in chosen] == ["caching/x", "plain/x", "nulled/x"]
+    assert chosen[0]["task_cost"] == pytest.approx((600_000 * (0.10 * 0.2 + 0.01 * 0.8) + 20_000 * 0.40) / 1e6)
+    assert chosen[1]["task_cost"] == pytest.approx((600_000 * 0.08 + 20_000 * 0.35) / 1e6)  # 0.055, uncached
+
+
+def test_the_plan_pins_the_caching_endpoint_ahead_of_the_one_with_the_lower_sticker_price(client):
+    rows = [
+        {"provider": "Plain", "tag": "plain/x", "input": 0.08, "output": 0.35, "uptime_1d": 99},
+        {"provider": "Caching", "tag": "caching/x", "input": 0.10, "output": 0.40, "cache_read": 0.01, "uptime_1d": 99},
+    ]
+    _set_extra("acme/best", {"endpoints": rows})  # the shape the OpenRouter adapter stores
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert [p["tag"] for p in plan["providers"]] == ["caching/x", "plain/x"]
+    assert plan["config"]["provider"]["order"] == ["caching/x", "plain/x"]
 
 
 def test_a_config_keeps_everything_but_the_model_and_the_provider_lists():
@@ -1380,11 +1406,11 @@ def test_endpoints_that_cost_the_same_keep_the_order_the_preset_already_has():
     a = {"tag": "a/x", "input": 1, "output": 1, "uptime_1d": 99}
     b = {"tag": "b/x", "input": 1, "output": 1, "uptime_1d": 60}
     cheaper = {"tag": "c/x", "input": 0.5, "output": 1, "uptime_1d": 10}
-    assert _tags(choose_endpoints([a, b], None, TASK, {}, 2)) == ["a/x", "b/x"]  # no history: the steadier first
-    assert _tags(choose_endpoints([a, b], None, TASK, {}, 2, current=["b/x", "a/x"])) == ["b/x", "a/x"]
-    assert _tags(choose_endpoints([a, b], None, TASK, {}, 2, current=["b/x"])) == ["b/x", "a/x"]
+    assert _tags(choose_endpoints([a, b], TASK, {}, 2)) == ["a/x", "b/x"]  # no history: the steadier first
+    assert _tags(choose_endpoints([a, b], TASK, {}, 2, current=["b/x", "a/x"])) == ["b/x", "a/x"]
+    assert _tags(choose_endpoints([a, b], TASK, {}, 2, current=["b/x"])) == ["b/x", "a/x"]
     # a price difference still wins over the history
-    assert _tags(choose_endpoints([a, b, cheaper], None, TASK, {}, 3, current=["b/x", "a/x"]))[0] == "c/x"
+    assert _tags(choose_endpoints([a, b, cheaper], TASK, {}, 3, current=["b/x", "a/x"]))[0] == "c/x"
 
 
 def test_a_models_refresh_that_reorders_equal_priced_providers_writes_no_new_version(client):
