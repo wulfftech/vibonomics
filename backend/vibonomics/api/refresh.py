@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -70,6 +70,6 @@ def refresh_status(session: Session = Depends(get_session)) -> RefreshStatus:
 
 
 @router.get("/runs", response_model=list[RefreshRunOut])
-def refresh_runs(limit: int = 50, session: Session = Depends(get_session)) -> list[RefreshRunOut]:
-    runs = session.scalars(select(RefreshRun).order_by(RefreshRun.id.desc()).limit(min(limit, 500))).all()
+def refresh_runs(limit: int = Query(50, ge=1, le=500), session: Session = Depends(get_session)) -> list[RefreshRunOut]:
+    runs = session.scalars(select(RefreshRun).order_by(RefreshRun.id.desc()).limit(limit)).all()
     return [RefreshRunOut.model_validate(r, from_attributes=True) for r in runs]

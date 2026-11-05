@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 
 import pytest
+from alembic.autogenerate import compare_metadata
+from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
@@ -14,6 +16,7 @@ from vibonomics import migrations
 from vibonomics.db import make_engine
 from vibonomics.orm import (
     Balance,
+    Base,
     EvalResult,
     EvalRun,
     Model,
@@ -124,6 +127,16 @@ def _foreign_keys_on(engine: Engine) -> bool:
 
 def test_there_is_one_migration_head():
     assert len(ScriptDirectory.from_config(migrations._alembic_config()).get_heads()) == 1
+
+
+def test_the_migrations_build_what_the_models_declare_including_the_refresh_run_index(engine):
+    migrations.upgrade_to_head(engine)
+
+    with engine.connect() as conn:
+        context = MigrationContext.configure(conn, opts={"compare_type": True, "render_as_batch": True})
+        assert compare_metadata(context, Base.metadata) == []
+        indexes = {row[1] for row in conn.exec_driver_sql("PRAGMA index_list(refresh_runs)")}
+    assert "ix_refresh_runs_kind_id" in indexes
 
 
 def test_a_batch_rebuild_of_a_parent_table_keeps_every_child_row(engine, tmp_path, monkeypatch):

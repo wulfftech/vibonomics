@@ -7,11 +7,12 @@ import logging
 import math
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, bindparam, delete, select, update
+from sqlalchemy import and_, bindparam, delete, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from . import events, usage
 from .benchmarks.base import BenchContext, ScoreRecord
@@ -29,6 +30,8 @@ log = logging.getLogger(__name__)
 
 PROVIDER_TIMEOUT = 300
 BALANCE_TIMEOUT = 60
+# About 55 rows a day, so this keeps the table near 5,000 rows.
+RUN_RETENTION_DAYS = 90
 _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 KINDS = ("models", "balances", "benchmarks", "usage")
 
@@ -124,8 +127,29 @@ async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | N
             )
 
 
+def _prune_runs(s: Session) -> None:
+    """Drop run rows past the retention window, apart from the ones other screens still read.
+
+    Those are each kind's latest run (the status page) and its latest good one (the "scores as of" time on the
+    value route), which can both be older than the window for a kind that no longer runs.
+    """
+    latest = select(func.max(RefreshRun.id)).group_by(RefreshRun.kind)
+    latest_good = (
+        select(func.max(RefreshRun.id)).where(RefreshRun.status.in_(("ok", "partial"))).group_by(RefreshRun.kind)
+    )
+    s.execute(
+        delete(RefreshRun).where(
+            RefreshRun.started_at < now() - timedelta(days=RUN_RETENTION_DAYS),
+            RefreshRun.status != "running",
+            RefreshRun.id.not_in(latest),
+            RefreshRun.id.not_in(latest_good),
+        )
+    )
+
+
 def _start_run(kind: str, trigger: str) -> int:
     with session_scope() as s:
+        _prune_runs(s)
         run = RefreshRun(kind=kind, trigger=trigger, status="running")
         s.add(run)
         s.flush()
