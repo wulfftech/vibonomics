@@ -600,6 +600,180 @@ async def test_a_rematch_with_models_dev_down_leaves_the_stored_scores_alone(dat
     assert _stored_matches("downtest") == [("Some Model", "acme/m1", "id", 7.0)]
 
 
+# -- A response in a shape the source does not know ---------------------------------------------
+
+OR_MODELS = "https://openrouter.ai/api/v1/models"
+OR_KEY = "sk-or-test-1234567890"
+AA_MODEL = {
+    "id": "acme/m1",
+    "canonical_slug": "acme/m1-2026",
+    "benchmarks": {"artificial_analysis": {"coding_index": 40}},
+}
+DESIGN_MODEL = {
+    "id": "acme/m1",
+    "benchmarks": {"design_arena": [{"category": "website", "elo": 1200, "rank": 3, "win_rate": 0.6}]},
+}
+UNEXPECTED_MODEL_LISTS = {
+    "an error body": {"error": {"message": "rate limited"}},
+    "a list": [],
+    "data is not a list": {"data": "nope"},
+    "no models": {"data": []},
+    "models without the block": {"data": [{"id": "acme/m1", "pricing": {}}]},
+}
+
+
+def _bench_context(api_key: str | None = None):
+    from vibonomics.benchmarks.base import BenchContext
+    from vibonomics.settings_store import AppSettings
+
+    return BenchContext(catalog=_catalog(), settings=AppSettings(), api_key=api_key)
+
+
+@pytest.mark.parametrize("payload", UNEXPECTED_MODEL_LISTS.values(), ids=UNEXPECTED_MODEL_LISTS.keys())
+@pytest.mark.parametrize("source_id", ["openrouter-aa", "openrouter-designarena"])
+async def test_a_model_list_in_a_shape_the_openrouter_sources_do_not_know_is_an_error_not_an_empty_source(
+    source_id, payload
+):
+    import httpx
+    import respx
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get(OR_MODELS).mock(return_value=httpx.Response(200, json=payload))
+        with pytest.raises(FetchError, match=r"unexpected|no .* in"):
+            await SOURCES[source_id](_bench_context()).fetch()
+
+
+async def test_the_openrouter_sources_still_read_a_model_list_in_the_expected_shape():
+    import httpx
+    import respx
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get(OR_MODELS).mock(return_value=httpx.Response(200, json={"data": [AA_MODEL, DESIGN_MODEL]}))
+        aa = await SOURCES["openrouter-aa"](_bench_context()).fetch()
+        design = await SOURCES["openrouter-designarena"](_bench_context()).fetch()
+
+    assert [(r.metric, r.source_model, r.value) for r in aa] == [("coding_index", "acme/m1", 40.0)]
+    assert [(r.metric, r.source_model, r.value) for r in design] == [("website_elo", "acme/m1", 1200.0)]
+
+
+def _store_settings(*, aa_on: bool = False, key: str | None = None) -> None:
+    from vibonomics import crypto
+    from vibonomics.settings_store import AppSettings, BenchmarkSourceSettings, save_settings
+
+    settings = AppSettings()
+    settings.benchmarks.aa_terms_acknowledged = True
+    settings.benchmarks.sources["openrouter-aa"] = BenchmarkSourceSettings(enabled=aa_on)
+    settings.benchmarks.sources["openrouter-datasets"] = BenchmarkSourceSettings(
+        enabled=True, api_key_enc=crypto.encrypt(key) if key else None
+    )
+    with session_scope() as s:
+        save_settings(s, settings)
+
+
+@pytest.fixture
+def stored_settings(database):
+    yield _store_settings
+    _store_settings()
+
+
+async def _refresh_only(monkeypatch, source_id: str) -> None:
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return _catalog(("acme/m1", "M1"))
+
+    monkeypatch.setattr(events, "_loop", None)
+    monkeypatch.setattr(jobs, "SOURCES", {source_id: SOURCES[source_id]})
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+    await jobs.run_job("benchmarks")
+
+
+async def test_a_response_in_an_unknown_shape_keeps_the_stored_scores_and_fails_the_run(stored_settings, monkeypatch):
+    import httpx
+    import respx
+
+    stored_settings(aa_on=True)
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get(OR_MODELS).mock(return_value=httpx.Response(200, json={"data": [AA_MODEL]}))
+        await _refresh_only(monkeypatch, "openrouter-aa")
+        assert _stored_matches("openrouter-aa") == [("acme/m1", "acme/m1", "id", 40.0)]
+
+        route.mock(return_value=httpx.Response(200, json={"error": {"message": "overloaded"}}))
+        await _refresh_only(monkeypatch, "openrouter-aa")
+
+    assert _stored_matches("openrouter-aa") == [("acme/m1", "acme/m1", "id", 40.0)]
+    run = _last_benchmark_run()
+    assert run.status == "failed" and "unexpected" in run.message
+
+
+SESSION_COST_URL = "https://openrouter.ai/api/v1/datasets/session-cost"
+BENCHMARKS_URL = "https://openrouter.ai/api/v1/benchmarks"
+GPQA = {
+    "source": "openrouter",
+    "benchmark_type": "gpqa_diamond",
+    "model_permaslug": "acme/m1",
+    "accuracy": 0.5,
+    "display_name": "M1",
+}
+SESSION_COST = {
+    "data": [{"model_permaslug": "acme/m1", "median_session_cost_usd": 1.5, "turn_range": "10-49-turns"}],
+    "meta": {},
+}
+
+
+def _datasets_mock(router, benchmarks: object, session_cost: object) -> None:
+    import httpx
+
+    router.get(OR_MODELS).mock(return_value=httpx.Response(200, json={"data": []}))
+    router.get(BENCHMARKS_URL).mock(return_value=httpx.Response(200, json=benchmarks))
+    router.get(SESSION_COST_URL).mock(return_value=httpx.Response(200, json=session_cost))
+
+
+async def test_session_costs_in_an_unknown_shape_are_a_partial_failure_that_keeps_their_stored_scores(
+    stored_settings, monkeypatch
+):
+    import respx
+
+    stored_settings(key=OR_KEY)
+    good = {"data": [GPQA], "meta": {}}
+    with respx.mock(assert_all_called=False) as router:
+        _datasets_mock(router, good, SESSION_COST)
+        await _refresh_only(monkeypatch, "openrouter-datasets")
+        assert _stored_metrics("openrouter-datasets") == {"gpqa_diamond": 50.0, "session_cost": 1.5}
+
+        _datasets_mock(router, good, {"error": "no such dataset"})
+        await _refresh_only(monkeypatch, "openrouter-datasets")
+
+    # The accuracy is refreshed; the session cost it could not read is not deleted.
+    assert _stored_metrics("openrouter-datasets") == {"gpqa_diamond": 50.0, "session_cost": 1.5}
+    run = _last_benchmark_run()
+    assert run.status == "partial" and "session-cost" in run.message
+
+
+@pytest.mark.parametrize("session_cost", [{"error": "nope"}, [], {"data": "nope"}, {"data": [{"cell": 1}]}])
+async def test_the_datasets_source_reports_session_costs_it_cannot_read(session_cost):
+    import respx
+
+    with respx.mock(assert_all_called=False) as router:
+        _datasets_mock(router, {"data": [GPQA], "meta": {}}, session_cost)
+        source = SOURCES["openrouter-datasets"](_bench_context(OR_KEY))
+        records = await source.fetch()
+
+    assert [r.metric for r in records] == ["gpqa_diamond"]
+    assert len(source.partial_errors) == 1
+
+
+async def test_the_datasets_source_reports_a_benchmark_list_with_nothing_it_can_use():
+    import respx
+
+    other = {"source": "artificial_analysis", "benchmark_type": "x", "model_permaslug": "a/b", "accuracy": 1}
+    with respx.mock(assert_all_called=False) as router:
+        _datasets_mock(router, {"data": [other], "meta": {}}, SESSION_COST)
+        source = SOURCES["openrouter-datasets"](_bench_context(OR_KEY))
+        records = await source.fetch()
+
+    assert [r.metric for r in records] == ["session_cost"]
+    assert len(source.partial_errors) == 1
+
+
 # -- Aliases edited while a refresh runs ------------------------------------------------------
 
 
