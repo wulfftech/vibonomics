@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from ..catalog.modelsdev import ModelsDevCatalog, normalize_model_key
+from ..catalog.modelsdev import ModelsDevCatalog, creator_of, normalize_model_key
 
 log = logging.getLogger(__name__)
 _warned_stale: set[tuple[str, str]] = set()
@@ -178,6 +178,10 @@ class Matcher:
         self.operator_aliases = operator_aliases or {}
         self.index = catalog.canonical_index()
         self._by_provider_id: dict[str, str] = {}
+        # A bare provider id ("deepseek-chat") is listed by every reseller that carries it, and they need not agree.
+        # The creator's own listing decides it; with none, an id that points at more than one model matches nothing.
+        listed: dict[str, set[str]] = {}
+        listed_by_creator: dict[str, set[str]] = {}
         for pid, provider in catalog.data.items():
             if not isinstance(provider, dict):
                 continue
@@ -185,8 +189,14 @@ class Matcher:
                 cid = m.get("canonical_model_id")
                 if not cid:
                     continue
-                self._by_provider_id.setdefault(mid.lower(), cid)
+                listed.setdefault(mid.lower(), set()).add(cid)
+                if pid == creator_of(cid):
+                    listed_by_creator.setdefault(mid.lower(), set()).add(cid)
                 self._by_provider_id.setdefault(f"{pid}/{mid}".lower(), cid)
+        for key, cids in listed.items():
+            cids = listed_by_creator.get(key) or cids
+            if len(cids) == 1:
+                self._by_provider_id.setdefault(key, next(iter(cids)))
         # Exact ids keep their snapshot suffix ("qwen3.8-max-0902"), so a dated benchmark name can
         # reach the dated model before date-stripped keys collapse it onto the undated one.
         self._by_exact = _unique([(exact_key(cid), cid) for cid in self.index])

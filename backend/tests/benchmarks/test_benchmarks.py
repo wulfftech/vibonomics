@@ -237,6 +237,36 @@ def test_matcher_keeps_dated_snapshots_apart(order):
     assert match("DeepSeek-V4.1-Flash-20260101") == flash[0]
 
 
+def _listing(provider: str, model_id: str, canonical: str) -> tuple[str, dict]:
+    return provider, {"id": provider, "models": {model_id: {"id": model_id, "canonical_model_id": canonical}}}
+
+
+@pytest.mark.parametrize("order", [1, -1], ids=["reseller first", "creator first"])
+def test_a_bare_provider_id_means_the_creators_listing_not_the_first_one_listed(order):
+    reseller = _listing("reseller", "deepseek-chat", "deepseek/deepseek-v3")
+    creator = _listing("deepseek", "deepseek-chat", "deepseek/deepseek-v3.1")
+    matcher = Matcher(ModelsDevCatalog(dict([reseller, creator][::order])))
+
+    assert matcher.match("livebench", "deepseek-chat", ["deepseek-chat"]) == ("deepseek/deepseek-v3.1", "id")
+
+
+@pytest.mark.parametrize("order", [1, -1], ids=["listed", "reversed"])
+def test_a_bare_provider_id_that_two_resellers_map_differently_matches_nothing(order):
+    one = _listing("reseller-a", "shared-model", "acme/shared-one")
+    two = _listing("reseller-b", "shared-model", "acme/shared-two")
+    matcher = Matcher(ModelsDevCatalog(dict([one, two][::order])))
+
+    assert matcher.match("livebench", "mystery", ["shared-model"])[0] is None
+    # Reached through its provider, the same id is still unambiguous.
+    assert matcher.match("livebench", "mystery", ["reseller-a/shared-model"]) == ("acme/shared-one", "id")
+
+
+def test_a_bare_provider_id_with_one_canonical_model_still_matches():
+    matcher = Matcher(ModelsDevCatalog(dict([_listing("reseller", "only-model", "acme/only-model")])))
+
+    assert matcher.match("livebench", "mystery", ["only-model"]) == ("acme/only-model", "id")
+
+
 def _aa_model(name: str, slug: str, creator: str) -> dict:
     return {
         "name": name,
