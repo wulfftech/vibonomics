@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from . import events
 from .db import session_scope
-from .http import FetchError, get_json, request
+from .http import FetchError, get_json, request, scrub_secrets
 from .jobs import failure_text
 from .orm import Model, ProviderConfig, Setting, utcnow
 from .pricing import Task, task_cost, value_of
@@ -102,6 +102,7 @@ class Remote:
     versions: list[dict[str, Any]] = field(default_factory=list)
     preset_id: str | None = None  # whatever stable id the account gave it; None when the response names none
     created_at: str | None = None
+    readable: bool = True  # False when the response held no live config to plan from, which is not an empty config
 
 
 @dataclass
@@ -506,7 +507,8 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
         if exc.status == 404:
             return None
         raise
-    live = data.get("designated_version") or {}
+    designated = data.get("designated_version")
+    live = designated if isinstance(designated, dict) else {}
     preset_id, created_at = _stable_id(data)
     remote = Remote(
         slug=slug,
@@ -515,6 +517,7 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
         system_prompt=live.get("system_prompt"),
         updated_at=data.get("updated_at"),
         status=str(data.get("status") or "active"),
+        readable=isinstance(live.get("config"), dict),
         preset_id=preset_id,
         created_at=created_at,
     )
@@ -681,6 +684,13 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
                 "so it was deleted and made again. It is left alone. Give this one another name, or archive that "
                 "preset in the OpenRouter web UI.",
             )
+        if not remote.readable:
+            # Planning from {} would send a config with every field the operator set dropped, and diff against {}.
+            return _blocked(
+                plan,
+                f"The preset {cfg.slug} exists, but OpenRouter returned no live version for it, so Vibonomics "
+                "could not read what it holds and will not write over it. Try again later.",
+            )
         if owner == "legacy":
             # Older state named the slug with no account. Trust it this once, and tie it to the key in use now.
             log.info("Preset %s was recorded as ours before accounts were tracked; adopting it for this key", cfg.slug)
@@ -712,6 +722,12 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
             return _blocked(plan, f"Could not read the template preset {cfg.template_slug}: {exc}")
         if template is None:
             return _blocked(plan, f"The template preset {cfg.template_slug} does not exist on this account.")
+        if not template.readable:
+            return _blocked(
+                plan,
+                f"The template preset {cfg.template_slug} exists, but OpenRouter returned no live version for it, so "
+                "Vibonomics could not read what to start from. Try again later.",
+            )
         base_config = template.config
         if template.system_prompt:
             plan.warnings.append(
@@ -791,6 +807,54 @@ def _model_change(before: list[str], picks: list[Candidate], candidates: list[Ca
 # ---- applying ------------------------------------------------------------------------------------------------
 
 
+class _Unconfirmed(Exception):
+    """OpenRouter answered a write with a success status but did not report the version it made."""
+
+
+def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    """The preset, its live version and the config OpenRouter stored, from a write's response.
+
+    A 2xx alone proves nothing: an error can ride a 200, and a body with no version means no version was made.
+    """
+    data = body.get("data") if isinstance(body, dict) else None
+    live = data.get("designated_version") if isinstance(data, dict) else None
+    if (
+        isinstance(data, dict)
+        and isinstance(live, dict)
+        and live.get("version") is not None
+        and isinstance(live.get("config"), dict)
+        and data.get("slug", slug) == slug
+    ):
+        return data, live["version"], live["config"]
+    error = body.get("error") if isinstance(body, dict) else None
+    detail = error.get("message") if isinstance(error, dict) else error
+    raise _Unconfirmed(f"the answer named no version of {slug}" + (f" ({str(detail)[:200]})" if detail else ""))
+
+
+async def _settle(
+    plan: Plan, inputs: Inputs, trigger: str, data: dict[str, Any], version: Any, stored: dict[str, Any]
+) -> Applied:
+    """Record a write that OpenRouter confirmed: the slug is ours from here on, and the run is logged."""
+    assert plan.config is not None
+    slug = plan.slug
+    unsaved = unsaved_keys(plan.config, stored)
+    verb = "Created" if plan.action == "create" else "Updated"
+    message = f"{verb} {slug} as version {version}: {plan.reason}"
+    if unsaved:
+        message += f" OpenRouter did not keep: {', '.join(unsaved)}."
+    applied = {
+        "slug": slug,
+        "model_id": plan.config.get("model"),
+        "version": version,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
+    owner = _claim_record(plan, inputs.state, version, data)
+    await asyncio.to_thread(_update_state, {"applied": applied}, slug, owner)
+    await asyncio.to_thread(_record_run, slug, "applied", message, trigger)
+    return Applied(version=version, unsaved=unsaved, message=message)
+
+
 async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]:
     """Write the plan if there is something to write. ``digest`` pins it to a plan the operator reviewed."""
     async with _lock:
@@ -805,39 +869,22 @@ async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]
             await asyncio.to_thread(_record_run, cfg.slug, plan.action, plan.reason, trigger)
             return plan, None
         assert inputs.api_key is not None
+        headers = {**_auth(inputs.api_key), "Content-Type": "application/json"}
         try:
             resp = await request(
                 "POST",
                 plan.url,
-                headers={**_auth(inputs.api_key), "Content-Type": "application/json"},
+                headers=headers,
                 json_body=plan.body,
                 timeout=30,
                 retries=0,  # a retried create would leave a second version behind
             )
-            data = (resp.json() or {}).get("data") or {}
-        except (FetchError, ValueError) as exc:
-            message = f"OpenRouter did not take the update: {exc}"
+            data, version, stored = _confirmed(resp.json(), cfg.slug)
+        except (FetchError, ValueError, _Unconfirmed) as exc:
+            message = scrub_secrets(f"OpenRouter did not take the update: {exc}", headers)
             await asyncio.to_thread(_record_run, cfg.slug, "failed", message, trigger)
             raise PresetWriteError(message) from exc
-        live = data.get("designated_version") or {}
-        stored = live.get("config") if isinstance(live.get("config"), dict) else {}
-        unsaved = unsaved_keys(plan.config, stored)
-        version = live.get("version")
-        verb = "Created" if plan.action == "create" else "Updated"
-        message = f"{verb} {cfg.slug} as version {version}: {plan.reason}"
-        if unsaved:
-            message += f" OpenRouter did not keep: {', '.join(unsaved)}."
-        applied = {
-            "slug": cfg.slug,
-            "model_id": plan.config.get("model"),
-            "version": version,
-            "at": datetime.now(UTC).isoformat(),
-        }
-        # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
-        owner = _claim_record(plan, inputs.state, version, data)
-        await asyncio.to_thread(_update_state, {"applied": applied}, cfg.slug, owner)
-        await asyncio.to_thread(_record_run, cfg.slug, "applied", message, trigger)
-        return plan, Applied(version=version, unsaved=unsaved, message=message)
+        return plan, await _settle(plan, inputs, trigger, data, version, stored)
 
 
 async def sync(trigger: str = "schedule") -> None:

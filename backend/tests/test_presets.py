@@ -1029,3 +1029,83 @@ def test_the_digest_names_the_account_and_the_version_it_was_planned_against(cli
             _remote(router, SLUG, {"model": "acme/steady"}, version=version)
             digests.append(_plan(client)["digest"])
     assert digests[0] != digests[1]  # someone made a version in between, so the reviewed plan is stale
+
+
+# ---- a write that did not report itself, and a preset that cannot be read ------------------------------------
+
+
+def _raw(router: respx.Router, slug: str, data: dict[str, Any]) -> None:
+    """The preset GET answers 200 with exactly ``data``."""
+    url = f"{BASE}/presets/{slug}"
+    router.get(url).mock(return_value=httpx.Response(200, json={"data": data}))
+    router.get(f"{url}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+
+
+def test_a_preset_whose_live_version_cannot_be_read_blocks_the_plan_instead_of_planning_from_nothing(client):
+    _own_as(KEY)
+    for data in (
+        {"slug": SLUG, "status": "active"},  # no designated version at all
+        {"slug": SLUG, "designated_version": {"version": 2}},  # a version with no config
+        {"slug": SLUG, "designated_version": {"version": 2, "config": "not a dict"}},
+    ):
+        with respx.mock(assert_all_called=False) as router:
+            _raw(router, SLUG, data)
+            plan = _plan(client)
+        assert plan["action"] == "blocked", data
+        assert "could not read" in plan["reason"] and "live version" in plan["reason"]
+        assert plan["request"] is None
+
+
+def test_a_preset_with_an_empty_config_can_still_be_planned(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _raw(router, SLUG, {"slug": SLUG, "designated_version": {"version": 2, "config": {}}})
+        assert _plan(client)["action"] == "update"
+
+
+def test_a_template_whose_live_version_cannot_be_read_blocks_the_plan(client):
+    _settings(template_slug="my-tools")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _raw(router, "my-tools", {"slug": "my-tools"})
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "my-tools" in plan["reason"] and "live version" in plan["reason"]
+
+
+def _answers(payload: dict[str, Any]):
+    return lambda request: httpx.Response(200, json=payload)
+
+
+def test_a_create_whose_answer_carries_no_version_is_a_failed_write_and_claims_nothing(client):
+    bodies = (
+        {"error": {"message": f"No credits {KEY}", "code": 402}},
+        {"data": {"slug": SLUG, "name": SLUG}},  # no designated version
+        {"data": {"slug": SLUG, "designated_version": {"config": {"model": "acme/best"}}}},  # no version number
+        {"data": {"slug": SLUG, "designated_version": {"version": 1}}},  # no config
+        {"data": {"slug": "someone-else", "designated_version": {"version": 1, "config": {"model": "acme/best"}}}},
+    )
+    for body in bodies:
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, None)
+            post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_answers(body))
+            plan = _plan(client)
+            response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+            assert post.call_count == 1  # and never retried
+        assert response.status_code == 502, body
+        assert KEY not in response.text
+        state = client.get("/api/presets/state").json()
+        assert state["last_status"] == "failed", body
+        assert state["owned"] == [] and state["version"] is None, body
+        assert "owners" not in _state()
+
+
+def test_an_update_whose_answer_carries_no_version_does_not_count_as_written(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/steady"}, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_answers({"data": {}}))
+        plan = _plan(client)
+        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+    assert response.status_code == 502
+    state = client.get("/api/presets/state").json()
+    assert state["last_status"] == "failed" and state["version"] is None
