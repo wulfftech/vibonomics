@@ -16,7 +16,9 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from ..http import USER_AGENT, FetchError, get_json, get_text
+import httpx
+
+from ..http import USER_AGENT, FetchError, get_json, get_text, public_url
 from .base import BalanceInfo, ChatTarget, ModelOffer, ProviderAdapter, ProviderSpec
 from .common import modelsdev_offers, openai_model_ids, parse_markdown_tables
 from .pricing_pages import PagePrice, apply_page_prices, find_column, parse_price_cell
@@ -65,6 +67,17 @@ CLIENT_RESTRICTED = "opencode"
 
 # OpenCode Go asks clients for a stable id per conversation in this header, for routing and prompt caching.
 SESSION_HEADER = "x-opencode-session"
+
+
+def _on_opencode(url: str) -> bool:
+    """Whether ``url`` is https on opencode.ai itself (the Console and Go APIs both live there)."""
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL:
+        return False
+    return (
+        parsed.scheme == "https" and parsed.host == "opencode.ai" and parsed.port in (None, 443) and not parsed.userinfo
+    )
 
 
 def parse_pricing(markdown: str) -> list[PagePrice]:
@@ -278,6 +291,12 @@ class _OpenCodeBase(ProviderAdapter):
         endpoint = self._endpoint_for(model_id) or {}
         npm = str(endpoint.get("npm") or "")
         api = str(endpoint.get("api") or self.openai_base).rstrip("/")
+        if not _on_opencode(api):
+            # models.dev is community-edited and fetched at runtime; the key goes only where OpenCode serves.
+            raise FetchError(
+                f"models.dev lists {model_id} at {public_url(api)}, outside opencode.ai; "
+                "Vibonomics will not send the OpenCode key there."
+            )
         if "google" in npm:
             raise FetchError(
                 "This model is served on OpenCode's Gemini route, which Vibonomics cannot call with its two "

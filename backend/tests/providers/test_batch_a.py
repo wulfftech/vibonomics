@@ -320,6 +320,56 @@ async def test_opencode_chat_routing(ctx):
         adapter.chat_target("gemini-4-argon")
 
 
+@pytest.mark.parametrize(
+    "api",
+    [
+        "https://attacker.example/v1",
+        "http://opencode.ai/inference/openai/v1",
+        "https://opencode.ai.attacker.example/v1",
+        "https://opencode.ai@attacker.example/v1",
+        "https://opencode.ai:8443/inference/openai/v1",
+        "https://sub.opencode.ai/v1",
+        "//attacker.example/v1",
+        "attacker.example/v1",
+    ],
+    ids=["other-host", "plain-http", "suffix-host", "userinfo-trick", "other-port", "subdomain", "no-scheme", "bare"],
+)
+@pytest.mark.parametrize("cls", [opencode.OpenCodeAdapter, opencode.OpenCodeGoAdapter])
+async def test_opencode_never_sends_its_key_to_a_host_models_dev_names_outside_opencode_ai(ctx, cls, api):
+    # models.dev is a community-edited catalogue fetched at runtime; one bad endpoint must not redirect the key.
+    pid = cls.spec.modelsdev_ids[0]
+    catalog = ModelsDevCatalog(
+        {
+            pid: {
+                "id": pid,
+                "models": {"odd": {"id": "odd", "provider": {"npm": "@ai-sdk/openai-compatible", "api": api}}},
+            }
+        }
+    )
+    adapter = make(cls, FetchContext(catalog=catalog, settings=AppSettings()), key="sk-test-opencode")
+
+    with pytest.raises(FetchError, match=r"outside opencode\.ai"):
+        adapter.chat_target("odd")
+
+
+@pytest.mark.parametrize(
+    ("cls", "api"),
+    [
+        (opencode.OpenCodeAdapter, opencode.ZEN_API),
+        (opencode.OpenCodeAdapter, "https://opencode.ai/inference/anthropic/v1"),
+        (opencode.OpenCodeGoAdapter, opencode.GO_API),
+        (opencode.OpenCodeGoAdapter, "https://opencode.ai/inference/go/anthropic/v1"),
+        (opencode.OpenCodeAdapter, "https://OpenCode.ai:443/inference/openai/v1/"),
+    ],
+)
+async def test_opencode_endpoints_on_opencode_ai_are_used(ctx, cls, api):
+    pid = cls.spec.modelsdev_ids[0]
+    catalog = ModelsDevCatalog({pid: {"id": pid, "models": {"ok": {"id": "ok", "provider": {"api": api}}}}})
+    adapter = make(cls, FetchContext(catalog=catalog, settings=AppSettings()), key="sk-test-opencode")
+
+    assert adapter.chat_target("ok").base_url == api.rstrip("/")
+
+
 async def test_opencode_go_asks_for_a_session_id_and_names_itself_but_the_console_tier_does_not(ctx):
     # Go's docs: a client other than OpenCode names itself in its user agent and sends a stable id per conversation
     # in x-opencode-session; without it Go answers HTTP 400. The free Console tier gets neither: it admits only
