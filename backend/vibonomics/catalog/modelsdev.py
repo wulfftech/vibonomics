@@ -99,18 +99,32 @@ class ModelsDevCatalog:
         return self._canonical
 
     def guess_canonical(self, model_id: str, name: str | None = None) -> str | None:
-        """Best-effort canonical id for a model id the catalogue doesn't list directly."""
+        """Best-effort canonical id for a model id the catalogue doesn't list directly.
+
+        An exact id wins. Otherwise the candidates are the models that differ from it only by a date, a version
+        number or ``-free``; of those the exact spelling is taken, then the undated model over a dated snapshot, and
+        a tie is no answer, since a guess would hand one model another's scores.
+        """
         index = self.canonical_index()
         if model_id in index:
             return model_id
-        key = normalize_model_key(model_id.split("/")[-1].split(":")[0])
-        for cid in index:
-            if normalize_model_key(cid.split("/")[-1]) == key:
-                return cid
-        return None
+        bare = model_id.split("/")[-1].split(":")[0].lower()
+        key = normalize_model_key(bare)
+        candidates = [cid for cid in index if normalize_model_key(cid.split("/")[-1]) == key]
+        if len(candidates) > 1:
+            candidates = [cid for cid in candidates if cid.split("/")[-1].lower() == bare] or candidates
+        if len(candidates) > 1:
+            candidates = [cid for cid in candidates if snapshot_suffix(cid) is None] or candidates
+        return candidates[0] if len(candidates) == 1 else None
 
 
 _DATE_SUFFIX = re.compile(r"[-_@](20\d{2}[-_]?\d{2}[-_]?\d{2}|\d{4}|\d{6}|\d{8})$")
+
+
+def snapshot_suffix(value: str) -> str | None:
+    """The date or version number a model id ends in (``-2411``, ``-2026-09-21``), digits only, else None."""
+    match = _DATE_SUFFIX.search(re.sub(r"\s+", "-", value.lower().strip().split("/")[-1].split(":")[0]))
+    return re.sub(r"\D", "", match.group(1)) if match else None
 
 
 def normalize_model_key(value: str) -> str:

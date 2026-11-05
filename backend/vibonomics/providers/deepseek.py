@@ -28,10 +28,25 @@ _MODES = {"OFF-PEAK", "PEAK"}
 
 
 def _size(text: str) -> int | None:
-    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KM])", text or "", re.I)
+    # "DEFAULT: 4K MAXIMUM: 8K": the model can write the maximum, which is the figure that is wanted.
+    m = re.search(r"MAXIMUM:?\s*([0-9]+(?:\.[0-9]+)?)\s*([KM])", text or "", re.I) or re.search(
+        r"([0-9]+(?:\.[0-9]+)?)\s*([KM])", text or "", re.I
+    )
     if not m:
         return None
     return int(float(m.group(1)) * (1_000_000 if m.group(2).upper() == "M" else 1_000))
+
+
+def _colspan(cell: Any) -> int:
+    try:
+        return min(max(int(cell.get("colspan") or 1), 1), 50)  # the page is third-party: no unbounded spans
+    except (TypeError, ValueError):
+        return 1
+
+
+def _spread(values: list[str], spans: list[int]) -> list[str]:
+    """Value cells one per model column: a cell that spans several columns (``colspan``) is every model's."""
+    return [value for value, span in zip(values, spans, strict=True) for _ in range(span)]
 
 
 def _record(
@@ -57,7 +72,9 @@ def parse_pricing(html: str) -> list[PagePrice]:
     soup = BeautifulSoup(html, "html.parser")
     rows: list[PagePrice] = []
     for table in soup.find_all("table"):
-        grid = [[c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])] for tr in table.find_all("tr")]
+        cells = [tr.find_all(["th", "td"]) for tr in table.find_all("tr")]
+        grid = [[c.get_text(" ", strip=True) for c in row] for row in cells]
+        spans = [[_colspan(c) for c in row] for row in cells]
         if not grid or not grid[0] or grid[0][0].upper() != "MODEL":
             continue
         model_ids = [re.sub(r"\s*\(\d+\)$", "", c).strip() for c in grid[0][1:]]
@@ -66,7 +83,7 @@ def parse_pricing(html: str) -> list[PagePrice]:
         max_out: dict[str, int | None] = dict.fromkeys(model_ids)
         current_label: str | None = None
 
-        for row in grid[1:]:
+        for row, row_spans in zip(grid[1:], spans[1:], strict=True):
             if not row:
                 continue
             upper = [c.upper() for c in row]
@@ -75,17 +92,23 @@ def parse_pricing(html: str) -> list[PagePrice]:
                 current_label = upper[label_idx]
                 mode_idx = label_idx + 1
                 mode = upper[mode_idx] if mode_idx < len(upper) and upper[mode_idx] in _MODES else None
-                _record(entries, model_ids, current_label, mode, row[mode_idx + 1 :])
+                _record(
+                    entries,
+                    model_ids,
+                    current_label,
+                    mode,
+                    _spread(row[mode_idx + 1 :], row_spans[mode_idx + 1 :]),
+                )
                 continue
             if upper[0] in _MODES and current_label is not None:
-                _record(entries, model_ids, current_label, upper[0], row[1:])
+                _record(entries, model_ids, current_label, upper[0], _spread(row[1:], row_spans[1:]))
                 continue
             if upper[0] == "CONTEXT LENGTH" and len(row) >= 2:
-                values = row[1:]
+                values = _spread(row[1:], row_spans[1:])
                 for idx, mid in enumerate(model_ids):
                     context[mid] = _size(values[idx] if idx < len(values) else values[0])
             elif upper[0] == "MAX OUTPUT" and len(row) >= 2:
-                values = row[1:]
+                values = _spread(row[1:], row_spans[1:])
                 for idx, mid in enumerate(model_ids):
                     max_out[mid] = _size(values[idx] if idx < len(values) else values[0])
         for mid in model_ids:

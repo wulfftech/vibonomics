@@ -7,6 +7,7 @@ fixture is a small subset of the real catalogue.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -65,6 +66,25 @@ async def test_anthropic_prices_from_page(ctx):
     assert opus.extra["cache_write_1h"] == 8.0
 
 
+def test_anthropic_keeps_the_first_pricing_table_and_ignores_a_later_one_with_the_same_headers():
+    # A priority-tier or long-context table below the standard one must not override the standard prices.
+    later = (
+        "\n\n## Priority Tier\n\n"
+        "| Model | Base input tokens | 5m cache writes | 1h cache writes | Cache hits and refreshes | Output tokens |\n"
+        "| :-- | :-- | :-- | :-- | :-- | :-- |\n"
+        "| Claude Opus 5.5 | $9 / MTok | $11 / MTok | $18 / MTok | $0.90 / MTok | $45 / MTok |\n"
+        "| Claude Opus 5 | $10 / MTok | $12 / MTok | $20 / MTok | $1 / MTok | $50 / MTok |\n"
+        "| Claude Sonnet 9 | $6 / MTok | $7 / MTok | $12 / MTok | $0.60 / MTok | $30 / MTok |\n"
+    )
+    rows = {r.name: r for r in anthropic.parse_pricing(text("anthropic_pricing.md") + later)}
+    assert (rows["Claude Opus 5.5"].input, rows["Claude Opus 5.5"].output) == (4.0, 20.0)
+    assert rows["Claude Opus 5"].input == 5.0
+    assert "Claude Sonnet 9" not in rows
+    assert len(anthropic.parse_pricing(text("anthropic_pricing.md") + later)) == len(
+        anthropic.parse_pricing(text("anthropic_pricing.md"))
+    )
+
+
 @respx.mock
 async def test_anthropic_keeps_catalogue_prices_when_page_fails(ctx):
     respx.get(anthropic.PRICING_URL).mock(side_effect=httpx.ConnectError("boom"))
@@ -72,20 +92,51 @@ async def test_anthropic_keeps_catalogue_prices_when_page_fails(ctx):
     assert offers and all(o.extra.get("pricing_page_error") for o in offers)
 
 
+def _freeze_anthropic_clock(monkeypatch, now: datetime) -> None:
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(anthropic, "datetime", Frozen)
+
+
+def _cost_report(month_cents: str, trailing_cents: str):
+    """A cost-report mock whose answer depends on the window asked for: the month starts on the 1st at midnight."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        month = request.url.params["starting_at"].endswith("-01T00:00:00Z")
+        return httpx.Response(200, json={"data": [{"results": [{"amount": month_cents if month else trailing_cents}]}]})
+
+    return answer
+
+
 @respx.mock
-async def test_anthropic_admin_spend(ctx):
-    route = respx.get(f"{anthropic.API}/v1/organizations/cost_report").mock(
-        return_value=httpx.Response(200, json={"data": [{"results": [{"amount": "1000"}, {"amount": "234.5"}]}]})
-    )
+async def test_anthropic_admin_spend(ctx, monkeypatch):
+    _freeze_anthropic_clock(monkeypatch, datetime(2026, 11, 5, 12, 0, tzinfo=UTC))
+    route = respx.get(f"{anthropic.API}/v1/organizations/cost_report").mock(side_effect=_cost_report("1234.5", "9900"))
     info = await make(anthropic.AnthropicAdapter, ctx, key="sk-ant-x", mgmt="sk-ant-admin01-x").fetch_balance()
     assert info.status == "ok"
     # The headline is the calendar month, the figure the Console's billing page budgets against.
     assert info.account_used == 12.35
     assert info.details["month_to_date"] == 12.35
-    assert info.details["last_30_days"] == 12.35
+    # The trailing 30 days reach back into October, so they are their own request, not the month again.
+    assert info.details["last_30_days"] == 99.0
     assert info.details["spend_period"] == "this month"
     starts = [call.request.url.params["starting_at"] for call in route.calls]
-    assert starts[0].endswith("-01T00:00:00Z")
+    assert starts == ["2026-11-01T00:00:00Z", "2026-10-06T12:00:00Z"]
+
+
+@respx.mock
+async def test_anthropic_reuses_the_month_for_the_trailing_window_only_when_they_start_on_the_same_day(
+    ctx, monkeypatch
+):
+    # On the 31st of a 31-day month, 30 days back is the 1st.
+    _freeze_anthropic_clock(monkeypatch, datetime(2026, 12, 31, 12, 0, tzinfo=UTC))
+    route = respx.get(f"{anthropic.API}/v1/organizations/cost_report").mock(side_effect=_cost_report("1234.5", "9900"))
+    info = await make(anthropic.AnthropicAdapter, ctx, key="sk-ant-x", mgmt="sk-ant-admin01-x").fetch_balance()
+    assert info.details["month_to_date"] == info.details["last_30_days"] == 12.35
+    assert route.call_count == 1
 
 
 async def test_anthropic_balances_without_admin_key(ctx):
@@ -197,6 +248,35 @@ async def test_gemini_free_tier_models(ctx):
     assert flash.discount == 0.5 and flash.discount_until == "2026-12-31"
 
 
+GEMINI_TABLE = """## Gemini 9 Test
+
+*[`gemini-9-test`](https://ai.google.dev/gemini-api/docs/models/gemini-9-test)*
+
+### Standard
+
+|   | Free Tier | Paid Tier, per 1M tokens in USD |
+|---|---|---|
+| Input price | {free} | $1.00 |
+| Output price | {free} | $4.00 |
+| Context caching price | Not available | $0.10 |
+| Context caching storage price | Not available | $1.00 / 1,000,000 tokens per hour |
+"""
+
+
+@pytest.mark.parametrize(
+    ("free_cell", "free_tier"), [("$0.00", True), ("Free of charge", True), ("Not available", False)]
+)
+def test_gemini_a_free_tier_priced_at_zero_dollars_is_a_free_tier(free_cell, free_tier):
+    (row,) = google.parse_pricing(GEMINI_TABLE.format(free=free_cell))
+    assert row.extra["free_tier"] is free_tier
+
+
+def test_gemini_cache_storage_priced_per_hour_is_not_the_cache_write_price():
+    (row,) = google.parse_pricing(GEMINI_TABLE.format(free="Not available"))
+    assert (row.input, row.output, row.cache_read) == (1.0, 4.0, 0.1)
+    assert row.cache_write is None
+
+
 # -- DeepSeek --------------------------------------------------------------------------------
 
 
@@ -210,6 +290,35 @@ async def test_deepseek_peak_prices_and_off_peak(ctx):
     assert flash.context_length == 1_000_000
     assert flash.max_output == 384_000
     assert offers["deepseek-v4-pro"].price.input == 1.32
+
+
+SHARED_CELLS = """<table>
+<tr><td colspan="3">MODEL</td><td>deepseek-flash</td><td>deepseek-v4-pro</td></tr>
+<tr><td colspan="3">CONTEXT LENGTH</td><td colspan="2">1M</td></tr>
+<tr><td colspan="3">MAX OUTPUT</td><td>DEFAULT: 4K MAXIMUM: 8K</td><td>MAXIMUM: 384K</td></tr>
+<tr><td rowspan="4">PRICING</td><td rowspan="2">1M INPUT TOKENS (CACHE MISS)</td><td>OFF-PEAK</td>
+<td colspan="2">$0.15</td></tr>
+<tr><td>PEAK</td><td colspan="2">$0.3</td></tr>
+<tr><td rowspan="2">1M OUTPUT TOKENS</td><td>OFF-PEAK</td><td>$0.6</td><td>$1.98</td></tr>
+<tr><td>PEAK</td><td>$1.2</td><td>$3.96</td></tr>
+</table>"""
+
+
+def test_deepseek_a_price_cell_spanning_both_models_prices_both():
+    rows = {r.model_id: r for r in deepseek.parse_pricing(SHARED_CELLS)}
+    assert (rows["deepseek-flash"].input, rows["deepseek-flash"].output) == (0.3, 1.2)
+    # The shared input cell used to give only the first model a price, and the second none on that row.
+    assert (rows["deepseek-v4-pro"].input, rows["deepseek-v4-pro"].output) == (0.3, 3.96)
+    assert rows["deepseek-v4-pro"].extra["off_peak_prices"]["input"] == 0.15
+    assert rows["deepseek-flash"].extra["off_peak_prices"]["input"] == 0.15
+
+
+def test_deepseek_max_output_is_the_maximum_not_the_default():
+    rows = {r.model_id: r for r in deepseek.parse_pricing(SHARED_CELLS)}
+    assert rows["deepseek-flash"].extra["max_output"] == 8_000  # "DEFAULT: 4K MAXIMUM: 8K"
+    assert rows["deepseek-v4-pro"].extra["max_output"] == 384_000
+    assert rows["deepseek-flash"].extra["context_length"] == 1_000_000
+    assert rows["deepseek-v4-pro"].extra["context_length"] == 1_000_000
 
 
 @respx.mock

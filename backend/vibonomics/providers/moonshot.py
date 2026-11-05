@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 API = "https://api.moonshot.ai/v1"
 API_CN = "https://api.moonshot.cn/v1"
+ANTHROPIC_CN = "https://api.moonshot.cn/anthropic"
 
 
 class MoonshotAdapter(ProviderAdapter):
@@ -52,6 +53,11 @@ class MoonshotAdapter(ProviderAdapter):
         if self.cfg.base_url:
             return self.cfg.base_url.rstrip("/")
         return API_CN if self.is_cn else API
+
+    @property
+    def anthropic_base_url(self) -> str | None:
+        # A key only works on the platform that issued it.
+        return ANTHROPIC_CN if self.is_cn else self.spec.anthropic_base_url
 
     async def fetch_models(self) -> list[ModelOffer]:
         catalog = self.ctx.catalog

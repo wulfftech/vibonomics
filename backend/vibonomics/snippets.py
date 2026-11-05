@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 from urllib.parse import urlparse
 
-from .providers.base import ProviderSpec
+from .providers.base import ModelRoute, ProviderSpec
 
 
 @dataclass(frozen=True)
@@ -85,6 +85,9 @@ class SnippetContext:
     """An OpenRouter provider choice; ignored for any other endpoint."""
     client_restricted: str | None = None
     """The one harness id (``opencode``) that may call this model; every other client gets HTTP 403."""
+    route: ModelRoute | None = None
+    """Where and on which wire this one model is served, when that is not the same for all of a provider's models
+    (OpenCode). Then ``base_url`` is only the provider's default; None means ``base_url`` and ``spec.wire`` apply."""
 
 
 # --- helpers -----------------------------------------------------------------------------------
@@ -125,16 +128,32 @@ def _json(obj: Any) -> str:
     return json.dumps(obj, indent=2, ensure_ascii=False)
 
 
+def _quoted(value: str) -> str:
+    """A double-quoted string that is valid YAML and valid TOML for any text, with no raw character outside printable
+    ASCII: DEL and the C1 controls (a model id comes from a third-party endpoint) are not allowed unescaped in either,
+    and YAML reads NEL and the line separators as line breaks. ``json.dumps(ensure_ascii=True)`` would write an
+    astral character as a surrogate pair, which TOML refuses, so those get the ``\\U`` form both formats have.
+    """
+
+    def escape(match: re.Match[str]) -> str:
+        code = ord(match.group())
+        if 0xD800 <= code <= 0xDFFF:  # a lone surrogate has no valid escape
+            return "\\ufffd"
+        return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+    return re.sub(r"[^\x20-\x7e]", escape, json.dumps(value, ensure_ascii=False))
+
+
 def _yq(value: str) -> str:
-    """A YAML scalar for ``value``: plain when unambiguous, otherwise double-quoted (JSON is valid YAML)."""
+    """A YAML scalar for ``value``: plain when unambiguous, otherwise double-quoted."""
     if _PLAIN_YAML.fullmatch(value) and value.lower() not in _YAML_KEYWORDS:
         return value
-    return json.dumps(value, ensure_ascii=False)
+    return _quoted(value)
 
 
 def _tq(value: str) -> str:
-    """A TOML basic string (JSON string escapes are a subset of TOML's)."""
-    return json.dumps(value, ensure_ascii=False)
+    """A TOML basic string."""
+    return _quoted(value)
 
 
 def _py(value: Any) -> str:
@@ -178,9 +197,14 @@ def _pinned(ctx: SnippetContext) -> dict[str, Any] | None:
     return ctx.routing.provider_block() if ctx.routing and _is_openrouter(ctx) else None
 
 
+def _wire(ctx: SnippetContext) -> str:
+    """The API ``base_url`` speaks for this model: its own route when the provider has one per model."""
+    return ctx.route.wire if ctx.route else ctx.spec.wire
+
+
 def _anthropic_root(ctx: SnippetContext) -> str | None:
     """Anthropic-compatible base URL without a trailing ``/v1`` (what ANTHROPIC_BASE_URL expects)."""
-    url = ctx.anthropic_base_url or (ctx.base_url if ctx.spec.wire == "anthropic" else None)
+    url = ctx.anthropic_base_url or (ctx.base_url if _wire(ctx) == "anthropic" else None)
     if not url:
         return None
     url = url.rstrip("/")
@@ -275,7 +299,7 @@ def _ui_lines(ctx: SnippetContext) -> tuple[str, list[str], str]:
 
 def _vscode_copilot(ctx: SnippetContext) -> Snippet:
     anthropic_root = _anthropic_root(ctx)
-    messages = ctx.spec.wire == "anthropic" and anthropic_root is not None
+    messages = _wire(ctx) == "anthropic" and anthropic_root is not None
     context, output, _ = _window(ctx)
     model: dict[str, Any] = {
         "id": ctx.model_id,
@@ -775,7 +799,7 @@ def _crush(ctx: SnippetContext) -> Snippet:
     pid = _slug(ctx.spec.type)
     if not pid.startswith("custom"):
         pid = f"custom-{pid}"  # don't replace Crush's own built-in provider of the same name
-    if ctx.spec.wire == "anthropic" and (root := _anthropic_root(ctx)):
+    if _wire(ctx) == "anthropic" and (root := _anthropic_root(ctx)):
         provider = [
             f"provider add {pid} --type anthropic \\",
             f"  --name {shlex.quote(ctx.provider_name)} \\",
@@ -969,13 +993,32 @@ _CAN_PIN = {"vscode-copilot", "continue", "opencode", "aider-routing", "curl", "
 _RESTRICTED_CLIENTS = {"opencode": "OpenCode"}
 
 
+# Harnesses built on the models.dev catalogue find a model's route themselves, so their snippets name no URL of ours
+# and are right on every route.
+_ROUTE_AWARE: tuple[Builder, ...] = (_kilo, _opencode)
+# The only other builders that can speak Anthropic's messages API.
+_MESSAGES: tuple[Builder, ...] = (_vscode_copilot, _claude_code, _crush)
+
+
+def _context_for(build: Builder, ctx: SnippetContext) -> SnippetContext | None:
+    """The context ``build`` should see, or None when this harness cannot reach the model on its route."""
+    route = ctx.route
+    if route is None or build in _ROUTE_AWARE:
+        return ctx
+    if route.base_url and (route.wire == "openai" or (route.wire == "anthropic" and build in _MESSAGES)):
+        return replace(ctx, base_url=route.base_url)
+    return None
+
+
 def generate(ctx: SnippetContext) -> list[Snippet]:
     """Snippets valid for this provider/model, most useful first (VS Code harnesses lead)."""
     routing = ctx.routing if _is_openrouter(ctx) else None
     if routing and routing.variant:
         # ":floor" and ":nitro" ride on the model id, so every builder carries them without knowing.
         ctx = replace(ctx, model_id=f"{ctx.model_id}:{routing.variant}")
-    snippets = [s for build in _BUILDERS if (s := build(ctx)) is not None]
+    snippets = [
+        s for build in _BUILDERS if (seen := _context_for(build, ctx)) is not None and (s := build(seen)) is not None
+    ]
     if pinned := _pinned(ctx):
         slug = pinned["order"][0]
         two_files = any(s.id == "aider-routing" for s in snippets)

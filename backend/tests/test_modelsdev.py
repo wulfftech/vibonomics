@@ -121,6 +121,38 @@ async def test_unreachable_with_no_copy_gives_an_empty_catalogue_that_says_why()
     assert catalog.guess_canonical("acme-1") is None
 
 
+def _catalog(*canonical_ids: str) -> modelsdev.ModelsDevCatalog:
+    models = {cid: {"id": cid, "canonical_model_id": cid} for cid in canonical_ids}
+    return modelsdev.ModelsDevCatalog({"acme": {"id": "acme", "models": models}})
+
+
+def test_a_free_suffix_maps_to_the_undated_model_not_a_dated_snapshot():
+    catalog = _catalog("deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash")
+    assert catalog.guess_canonical("deepseek-v4.1-flash-free") == "deepseek/deepseek-v4.1-flash"
+    # and the order the catalogue lists them in does not matter
+    reordered = _catalog("deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-1017")
+    assert reordered.guess_canonical("deepseek-v4.1-flash-free") == "deepseek/deepseek-v4.1-flash"
+
+
+def test_an_exact_match_beats_any_guess():
+    catalog = _catalog("deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash")
+    assert catalog.guess_canonical("deepseek/deepseek-v4.1-flash-1017") == "deepseek/deepseek-v4.1-flash-1017"
+    # the same name as a snapshot's own, written as a bare id
+    assert catalog.guess_canonical("deepseek-v4.1-flash-1017") == "deepseek/deepseek-v4.1-flash-1017"
+
+
+def test_a_tie_between_models_is_not_guessed():
+    # Two creators with one name, or two snapshots and no undated model: either could be the one meant.
+    assert _catalog("a/model-x", "b/model-x").guess_canonical("model-x-free") is None
+    assert _catalog("a/model-x-1017", "a/model-x-0813").guess_canonical("model-x-free") is None
+
+
+def test_a_single_match_is_still_taken():
+    assert _catalog("a/model-x-1017").guess_canonical("model-x-free") == "a/model-x-1017"
+    assert _catalog("a/model-x").guess_canonical("model-x:free") == "a/model-x"
+    assert _catalog("a/model-x").guess_canonical("model-y") is None
+
+
 @respx.mock
 async def test_an_empty_catalogue_refuses_to_list_models_rather_than_list_none():
     """Adapters build their model list from models(); an empty list would read as 'the provider has no models'."""

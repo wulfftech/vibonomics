@@ -23,7 +23,7 @@ _ROW_KEYS = {
     "input price": "input",
     "output price": "output",
     "context caching price": "cache_read",
-    "context caching storage": "cache_write",
+    # Not "context caching storage": that is priced per token-hour, which is no price to write a token to the cache.
     "cached input price": "cache_read",
 }
 
@@ -60,9 +60,7 @@ def parse_pricing(markdown: str) -> list[PagePrice]:
                 if field is None:
                     continue
                 free_cell = row.get(free_col)
-                if not is_unavailable(free_cell) and (
-                    is_free_text(free_cell) or (parse_price_cell(free_cell)[0] or 1) == 0
-                ):
+                if not is_unavailable(free_cell) and (is_free_text(free_cell) or parse_price_cell(free_cell)[0] == 0):
                     free_tier = True
                 current, listed, until, note = parse_price_cell(row.get(paid_col))
                 price = values.setdefault(field, PagePrice(name=title))

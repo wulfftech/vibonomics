@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import UTC, datetime
 
@@ -30,6 +31,7 @@ MODELS: dict[str, tuple[float, float, float | None, dict]] = {
     "acme/better-70:batch": (0.05, 0.25, 70, {}),
     "acme/pricier-70": (1.0, 1.0, 70, {}),
     "acme/direct": (1.0, 4.0, 66, {"extra": {"batch_discount": 0.5}}),
+    "acme/free-95:free": (0.0, 0.0, 95, {"is_free": True, "extra": {"client_restricted": "opencode"}}),
 }
 
 
@@ -240,12 +242,139 @@ def test_providers_match_by_type_as_well_as_name(client):
     assert data["models"][0]["provider_name"] == PROVIDER
 
 
+def test_a_model_only_one_client_may_call_is_not_ranked_or_picked_by_default(client):
+    # The free OpenCode Console tier answers 403 to every client but OpenCode, which a program calling this is not.
+    data = _ask(client, ["acme/cheap-60:batch", "acme/free-95:free"], task=TASK)
+    by = {r["model"]: r for r in data["models"]}
+    restricted = by["acme/free-95:free"]
+    assert restricted["client_restricted"] == "opencode"
+    assert (restricted["eligible"], restricted["rank"]) == (False, None)
+    assert "opencode" in restricted["note"] and "403" in restricted["note"]
+    assert by["acme/cheap-60:batch"]["client_restricted"] is None
+    assert data["pick"]["model"] == "acme/cheap-60:batch"
+    assert "free-95" not in data["reason"]
+
+
+def test_a_program_can_opt_in_to_models_only_one_client_may_call(client):
+    data = _ask(client, ["acme/cheap-60:batch", "acme/free-95:free"], task=TASK, include_client_restricted=True)
+    assert data["pick"]["model"] == "acme/free-95:free"
+    assert data["models"][1]["client_restricted"] == "opencode" and data["models"][1]["rank"] == 1
+
+
+def test_a_model_named_twice_is_ranked_once_against_the_others(client):
+    named = [
+        "acme/cheap-60:batch",
+        "acme/mid-64:batch",
+        "acme/cheap-60:batch",
+        {"provider": "OpenRouter", "model": "acme/cheap-60:batch"},  # the same model reached by the provider's type
+    ]
+    data = _ask(client, named, task=TASK)
+    rows = data["models"]
+    assert [r["model"] for r in rows] == ["acme/cheap-60:batch", "acme/mid-64:batch"] + ["acme/cheap-60:batch"] * 2
+    assert [r["rank"] for r in rows] == [1, 2, None, None]
+    assert [r["eligible"] for r in rows] == [True, True, False, False]
+    assert rows[2]["note"] == "Named more than once in the request" and rows[2]["found"] is True
+    assert "best value of the 2 that qualify" in data["reason"]
+    assert "Next is acme/mid-64:batch" in data["reason"]
+
+
+def test_a_tiny_task_never_costs_zero_while_its_value_is_finite(client):
+    data = _ask(client, ["acme/cheap-60:batch"], task={"input_tokens": 1, "output_tokens": 0})
+    row = data["models"][0]
+    assert row["task_cost"] == pytest.approx(1e-7)
+    assert row["value"] == pytest.approx(row["score"] / row["task_cost"], rel=1e-3)
+    # ... and an ordinary cost keeps its figures
+    assert _ask(client, ["acme/big-90"], task=TASK)["models"][0]["task_cost"] == pytest.approx(0.08)
+
+
 def test_bad_requests(client):
     one = [{"provider": PROVIDER, "model": "acme/cheap-60:batch"}]
     assert client.post("/api/models/value", json={"models": []}).status_code == 422
     assert client.post("/api/models/value", json={"models": one, "profile": "nope"}).status_code == 422
     empty = {"input_tokens": 0, "output_tokens": 0}
     assert client.post("/api/models/value", json={"models": one, "task": empty}).status_code == 422
+
+
+def test_a_body_over_the_cap_is_refused_and_not_parsed(client):
+    # The one POST an open-read visitor may call: nobody should be able to make it hold or echo megabytes.
+    body = {"models": [{"provider": PROVIDER, "model": "acme/cheap-60:batch"}], "task": TASK, "pad": "x" * 200_000}
+    response = client.post("/api/models/value", json=body)
+    assert response.status_code == 413
+    assert len(response.content) < 500
+    assert "x" * 100 not in response.text
+
+
+def test_a_body_just_under_the_cap_still_works(client):
+    body = {"models": [{"provider": PROVIDER, "model": "acme/cheap-60:batch"}], "task": TASK, "pad": "x" * 100_000}
+    assert client.post("/api/models/value", json=body).status_code == 200
+
+
+def test_a_streamed_body_is_cut_off_at_the_cap_not_read_to_the_end(client):
+    chunk = b"x" * 65_536
+    pulled = 0
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        nonlocal pulled
+        if pulled >= 20:  # 1.3 MB on offer
+            return {"type": "http.disconnect"}
+        pulled += 1
+        return {"type": "http.request", "body": chunk, "more_body": pulled < 20}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/api/models/value",
+        "raw_path": b"/api/models/value",
+        "query_string": b"",
+        "root_path": "",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("testclient", 50000),
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],  # no content-length
+    }
+    asyncio.run(create_app()(scope, receive, send))
+    assert sent[0]["status"] == 413
+    assert pulled <= 4, "the body was read well past the cap"
+
+
+def test_a_validation_error_does_not_echo_the_input(client):
+    echoed = "P" * 5_000
+    response = client.post("/api/models/value", json={"models": [{"provider": echoed, "model": "m"}]})
+    assert response.status_code == 422
+    assert echoed not in response.text
+    assert '"input"' not in response.text
+    assert len(response.content) < 1_000
+    detail = response.json()["detail"]
+    assert detail[0]["loc"] == ["body", "models", 0, "provider"]
+
+
+def test_malformed_json_gets_a_short_422(client):
+    response = client.post(
+        "/api/models/value", content=b'{"models": [' + b"zzzz" * 20_000, headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert "zzzz" not in response.text
+
+
+def test_a_body_with_hundreds_of_errors_gets_a_bounded_answer(client):
+    refs = [{"provider": "", "model": ""}] * 200
+    response = client.post("/api/models/value", json={"models": refs})
+    assert response.status_code == 422
+    assert len(response.json()["detail"]) <= 20
+    assert len(response.content) < 5_000
+
+
+def test_the_request_body_is_still_in_the_api_schema():
+    schema = create_app().openapi()
+    post = schema["paths"]["/api/models/value"]["post"]
+    assert post["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/ValueRequest"}
+    assert {"ValueRequest", "ValueModelRef", "ValueTaskIn"} <= set(schema["components"]["schemas"])
 
 
 def test_the_password_guard_covers_it(client, monkeypatch):

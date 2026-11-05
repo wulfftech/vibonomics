@@ -115,3 +115,31 @@ def test_the_scoring_work_runs_off_the_event_loop(monkeypatch, seeded):
 
     assert TestClient(create_app()).get(f"/api/models/{seeded}").status_code == 200
     assert on_the_loop == [False]
+
+
+def test_other_offers_with_no_price_sort_last_not_as_the_cheapest(monkeypatch, seeded):
+    _stub_catalog(monkeypatch, CATALOG)
+    names = ["Other offers test A", "Other offers test B", "Other offers test C"]
+    prices = [(None, None), (1.0, 2.0), (0.5, 0.5)]
+    with session_scope() as session:
+        session.execute(delete(ProviderConfig).where(ProviderConfig.name.in_(names)))
+        for name, (price_in, price_out) in zip(names, prices, strict=True):
+            provider = ProviderConfig(type="custom-openai", name=name, enabled=True, options={})
+            session.add(provider)
+            session.flush()
+            session.add(
+                Model(
+                    provider_config_id=provider.id,
+                    model_id="acme-1",
+                    name="Acme One",
+                    canonical_id="acme/one",
+                    price_input=price_in,
+                    price_output=price_out,
+                )
+            )
+    try:
+        offers = TestClient(create_app()).get(f"/api/models/{seeded}").json()["other_offers"]
+    finally:
+        with session_scope() as session:
+            session.execute(delete(ProviderConfig).where(ProviderConfig.name.in_(names)))
+    assert [o["provider_name"] for o in offers] == ["Other offers test C", "Other offers test B", "Other offers test A"]

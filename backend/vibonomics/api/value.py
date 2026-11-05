@@ -13,11 +13,14 @@ Read-only, and behind the password guard like the rest of ``/api``: a client of 
 from __future__ import annotations
 
 import math
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -29,9 +32,65 @@ from ..scoring import ModelScores, compute_scores, own_test_scores, score_key
 from ..settings_store import AppSettings, load_settings
 from .models import PriceOut, ScoresOut
 
-router = APIRouter(prefix="/api/models", tags=["models"])
+MAX_BODY_BYTES = 128 * 1024
+MAX_ERRORS = 20
 
 Dimension = Literal["composite", "intelligence", "coding", "agentic"]
+
+
+async def _read_capped(request: Request) -> bytes:
+    """The request body, refused with 413 as soon as it passes the cap instead of after it is all in memory."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Request too large")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _replay(raw: bytes) -> Callable[[], Awaitable[dict[str, Any]]]:
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    return receive
+
+
+class _CappedRoute(APIRoute):
+    """This is the one POST a visitor to an open-read instance may call, so it reads its body under a cap and does
+    not hand a bad one back: FastAPI's own 422 repeats every offending ``input`` in full.
+
+    A route class rather than a ``Request`` parameter keeps the typed body, and so the request schema in the API
+    document, as it was.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
+        handler = super().get_route_handler()
+
+        async def capped(request: Request) -> Response:
+            raw = await _read_capped(request)
+            try:
+                return await handler(Request(request.scope, _replay(raw)))
+            except RequestValidationError as exc:
+                detail = [
+                    {"type": e["type"], "loc": list(e["loc"]), "msg": e["msg"]} for e in exc.errors()[:MAX_ERRORS]
+                ]
+                raise HTTPException(status_code=422, detail=detail) from None
+
+        return capped
+
+
+router = APIRouter(prefix="/api/models", tags=["models"], route_class=_CappedRoute)
 
 
 class ValueModelRef(BaseModel):
@@ -75,6 +134,11 @@ class ValueRequest(BaseModel):
         "score at least as well as the pick and give better value (with no pick, the best values at or above "
         "min_score). Free offers are left out.",
     )
+    include_client_restricted: bool = Field(
+        False,
+        description="Rank, and possibly pick, a model that only one client may call (the OpenCode Console's free "
+        "tier answers 403 to every other client). Off by default: a program using this API is not that client.",
+    )
 
 
 class ValueTaskOut(BaseModel):
@@ -106,6 +170,11 @@ class ValueRow(BaseModel):
     discount_since: datetime | None = None
     new_discount: bool = False
     price_drop: bool = False
+    client_restricted: str | None = Field(
+        None,
+        description="The only client that may call this model (`opencode` for the OpenCode Console's free tier); "
+        "such a model is not eligible unless the request sets include_client_restricted",
+    )
     batch_discount: float | None = Field(None, description="The provider's own batch API discount, for a direct offer")
     prices_as_of: datetime | None = None
     score: float | None = Field(None, description="The requested dimension's score, 0-100")
@@ -195,20 +264,29 @@ def _score(
         discount_since=m.discount_since if m.discount else None,
         new_discount=bool(m.discount and m.discount_since and m.discount_since >= disc_cut),
         price_drop=bool(m.price_drop_since and m.price_drop_since >= disc_cut),
+        client_restricted=(m.extra or {}).get("client_restricted") or None,
         batch_discount=_batch_discount(m),
         prices_as_of=provider.last_refresh_at,
         score=score,
         scores=ScoresOut(**sc.summary()) if sc else ScoresOut(),
-        task_cost=round(cost, 6) if cost is not None else None,
+        task_cost=_significant(cost) if cost is not None else None,
         value=round(value, 1) if value is not None and math.isfinite(value) else None,
     )
     return _Scored(row=row, value=value, index=index)
 
 
-def _judge(entry: _Scored, dimension: Dimension, min_score: float | None) -> None:
+def _significant(x: float, digits: int = 6) -> float:
+    """``x`` to ``digits`` significant figures. Decimal places would turn a tiny task's cost into 0.0 beside a finite
+    value, and a client that divides the score by it would divide by zero."""
+    return float(f"{x:.{digits}g}")
+
+
+def _judge(entry: _Scored, dimension: Dimension, min_score: float | None, include_restricted: bool) -> None:
     row = entry.row
     if not row.active:
         row.note = f"No longer in {row.provider_name}'s model list"
+    elif row.client_restricted and not include_restricted:
+        row.note = f"Only the {row.client_restricted} client may call it; any other gets HTTP 403"
     elif row.task_cost is None:
         row.note = "No price"
     elif row.score is None:
@@ -234,7 +312,8 @@ def _describe(entry: _Scored) -> str:
     # free, such as a subscription plan.
     if row.is_free or row.value is None:
         return f"{row.score:g} for nothing"
-    return f"{row.score:g} for ${row.task_cost:.4f} a task, {row.value:,.0f} points per dollar"
+    cost = f"{row.task_cost:.4f}" if (row.task_cost or 0) >= 1e-4 else f"{row.task_cost:.2g}"
+    return f"{row.score:g} for ${cost} a task, {row.value:,.0f} points per dollar"
 
 
 def _reason(ranked: list[_Scored], dimension: Dimension, min_score: float | None) -> str:
@@ -275,6 +354,7 @@ def models_value(body: ValueRequest, session: Session = Depends(get_session)) ->
         return _score(ref, m, by_id[m.provider_config_id], sc, body.dimension, task, free_cost, disc_cut, index)
 
     entries: list[_Scored] = []
+    judged: set[int | None] = set()  # the models already in the ranking, by Model.id
     for i, ref in enumerate(body.models):
         if not matched[i]:
             note = f"No enabled provider called {ref.provider}"
@@ -287,7 +367,12 @@ def models_value(body: ValueRequest, session: Session = Depends(get_session)) ->
             continue
         # Two providers of one type can both list a model: the live, cheaper offer stands for it.
         best = min(candidates, key=lambda e: (not e.row.active, _sort_key(e)[2], e.row.id or 0))
-        _judge(best, body.dimension, body.min_score)
+        if best.row.id in judged:
+            # The same model named again, or by another name for its provider: it would be ranked against itself.
+            best.row.note = "Named more than once in the request"
+        else:
+            judged.add(best.row.id)
+            _judge(best, body.dimension, body.min_score, body.include_client_restricted)
         entries.append(best)
 
     ranked = sorted((e for e in entries if e.row.eligible), key=_sort_key)
@@ -307,7 +392,7 @@ def models_value(body: ValueRequest, session: Session = Depends(get_session)) ->
             if m.id in named:
                 continue
             entry = scored(ValueModelRef(provider=by_id[m.provider_config_id].type, model=m.model_id), m, len(entries))
-            _judge(entry, body.dimension, floor)
+            _judge(entry, body.dimension, floor, body.include_client_restricted)
             if not entry.row.eligible or (pick and (entry.value or 0) <= (pick.value or 0)):
                 continue
             entry.row.eligible = False  # not a candidate for this request's pick, only a suggestion

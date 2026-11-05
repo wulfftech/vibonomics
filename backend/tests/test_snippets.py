@@ -300,6 +300,22 @@ def test_provider_with_anthropic_base_url():
     assert parse(with_responses["codex"])["model_provider"] == "deepseek"
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    ["my\x7fmodel", "my\u0085model", "my model", "model-\U0001f600", "acme/café", 'quo"te\\', "tab\tid"],
+    ids=["del", "next-line", "line-separator", "astral", "accented", "quotes", "tab"],
+)
+def test_odd_characters_in_a_model_id_break_no_yaml_or_toml(model_id):
+    # Model ids come from third-party endpoints; DEL is not valid inside a YAML or TOML string, and JSON's surrogate
+    # pairs for an astral character are not valid in TOML.
+    s = by_id(generate(make_ctx(CUSTOM, model_id)))
+    assert parse(s["continue"])["models"][0]["model"] == model_id
+    assert parse(s["aider"])["model"] == f"openai/{model_id}"
+    codex = parse(s["codex"])
+    assert codex["model"] == model_id
+    assert "\x7f" not in s["continue"].content + s["aider"].content + s["codex"].content
+
+
 def test_claude_models_are_not_resized():
     ctx = make_ctx(OPENROUTER, "anthropic/claude-sonnet-5.5", context_length=1_000_000, max_output=16_000)
     env = parse(by_id(generate(ctx))["claude-code"])["env"]
