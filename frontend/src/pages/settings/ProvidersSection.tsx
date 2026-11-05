@@ -311,7 +311,8 @@ function ProviderForm({
                       api_key: provider.api_key_locked ? undefined : (apiKey ?? undefined),
                       mgmt_key: provider.mgmt_key_locked ? undefined : (mgmtKey ?? undefined),
                       extra_key: provider.extra_key_locked ? undefined : (extraKey ?? undefined),
-                      base_url: baseUrl.trim() || undefined,
+                      // '' is sent as it is: Save resets the override on '', so Test must too.
+                      base_url: baseUrl.trim(),
                       options: optionPayload(),
                     },
                   },

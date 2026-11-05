@@ -125,7 +125,7 @@ class TestResult(BaseModel):
 
 
 class ProviderTestOverride(BaseModel):
-    """Values from an unsaved form; only the fields present replace the stored ones."""
+    """Values from an unsaved form; only the fields present replace the stored ones (``options`` as a whole)."""
 
     api_key: str | None = None
     mgmt_key: str | None = None
@@ -349,7 +349,8 @@ def _override(cfg: ResolvedProvider, body: ProviderTestOverride | None) -> Resol
     if body.base_url is not None:
         cfg.base_url = body.base_url.strip() or None
     if body.options is not None:
-        cfg.options = {**cfg.options, **{k: v for k, v in body.options.items() if v not in (None, "")}}
+        # Replace, as update_provider does: Save stores exactly this, so a cleared option must test as cleared.
+        cfg.options = dict(body.options)
     return cfg
 
 

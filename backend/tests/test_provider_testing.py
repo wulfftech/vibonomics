@@ -131,13 +131,35 @@ def test_blank_base_url_means_the_default_host_and_keeps_the_key(monkeypatch):
     assert response.json()["message"].split("|")[0] == "stored-key"
 
 
+def test_a_cleared_base_url_tests_the_default_host_without_the_key_saved_for_the_override(monkeypatch):
+    with session_scope() as session:
+        row = ProviderConfig(
+            type="groq",
+            name="Groq behind a gateway",
+            enabled=True,
+            api_key_enc=api.crypto.encrypt("gateway-key"),
+            base_url="https://gateway.example/v1",
+            options={},
+        )
+        session.add(row)
+        session.flush()
+        provider_id = row.id
+    client = _client(monkeypatch)
+
+    cleared = client.post(f"/api/providers/{provider_id}/test", json={"base_url": ""})
+
+    message = cleared.json()["message"]
+    assert message.split(" The saved key")[0].split("|") == ["None", "None", "None", "None"]
+    assert "The saved key was not sent to a different host" in message
+
+
 def test_draft_requires_custom_base_url(monkeypatch):
     client = _client(monkeypatch)
     response = client.post("/api/providers/test", json={"type": "custom-openai", "api_key": "x"})
     assert response.status_code == 400
 
 
-def test_override_is_non_destructive():
+def test_override_replaces_the_options_as_save_does():
     base = api.ResolvedProvider(
         id=1,
         type="openrouter",
@@ -149,8 +171,39 @@ def test_override_is_non_destructive():
     )
     overridden = api._override(base, api.ProviderTestOverride(api_key="new", options={"b": "2"}))
     assert overridden.api_key == "new"
-    assert overridden.options == {"a": "1", "b": "2"}
+    assert overridden.options == {"b": "2"}
     # The dataclass mutates in place; the caller builds it fresh per request.
+
+
+def test_options_left_out_of_a_test_stay_as_saved():
+    base = api.ResolvedProvider(
+        id=1, type="openrouter", name="x", api_key=None, mgmt_key=None, base_url=None, options={"a": "1"}
+    )
+    assert api._override(base, api.ProviderTestOverride(api_key="new")).options == {"a": "1"}
+
+
+def test_clearing_an_option_clears_it_in_the_test_too(wire):
+    """Save stores the options as sent, so Test has to check them as sent: a cleared region is no region."""
+    client, calls = wire
+    with session_scope() as session:
+        row = ProviderConfig(
+            type="moonshot",
+            name="Moonshot with a region",
+            enabled=True,
+            api_key_enc=api.crypto.encrypt("sk-test-stored"),
+            options={"region": "cn"},
+        )
+        session.add(row)
+        session.flush()
+        provider_id = row.id
+
+    saved = client.post(f"/api/providers/{provider_id}/test")
+    assert saved.json()["ok"] is True
+    assert calls[-1].request.url.host == "api.moonshot.cn"
+
+    cleared = client.post(f"/api/providers/{provider_id}/test", json={"options": {}})
+    assert cleared.json()["ok"] is True
+    assert calls[-1].request.url.host == "api.moonshot.ai"
 
 
 def test_refresh_targets_one_provider(monkeypatch):
