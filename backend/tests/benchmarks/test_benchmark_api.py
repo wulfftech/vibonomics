@@ -116,6 +116,22 @@ def test_withdrawing_the_terms_deletes_the_rows_of_a_source_that_needs_them(clie
     assert (_stored(AA), _stored(OPEN)) == (0, 1)
 
 
+def test_a_save_still_succeeds_when_the_stored_rows_cannot_be_cleared(client, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    _put_benchmarks(client, aa_enabled=True, terms=True)
+    _seed_both_sources()
+
+    def locked():
+        raise OperationalError("DELETE FROM benchmark_scores", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(jobs, "session_scope", locked)
+    _put_benchmarks(client, aa_enabled=False, terms=True)  # asserts the 200
+
+    monkeypatch.setattr(jobs, "session_scope", session_scope)
+    assert _served(client) == [(OPEN, "open model")]  # hidden by the route, and removed by a later save or refresh
+
+
 def test_saving_settings_that_leave_a_source_on_keeps_its_rows(client):
     _put_benchmarks(client, aa_enabled=True, terms=True)
     _seed_both_sources()

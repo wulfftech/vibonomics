@@ -428,13 +428,18 @@ def _persist_balance(provider_id: int, info: BalanceInfo) -> None:
 def purge_unused_benchmark_rows(settings: AppSettings) -> int:
     """Delete the stored scores of every source that is off, or that needs terms the operator has not acknowledged.
 
-    Nothing refreshes such a source again, so its rows would otherwise stay for good.
+    Nothing refreshes such a source again, so its rows would otherwise stay for good. A failure is logged, not raised:
+    the routes already hide those rows, and the next refresh tries again.
     """
     unused = [sid for sid, cls in SOURCES.items() if not source_in_use(settings, sid, cls.spec)]
     if not unused:
         return 0
-    with session_scope() as s:
-        return s.execute(delete(BenchmarkScore).where(BenchmarkScore.source.in_(unused))).rowcount or 0
+    try:
+        with session_scope() as s:
+            return s.execute(delete(BenchmarkScore).where(BenchmarkScore.source.in_(unused))).rowcount or 0
+    except SQLAlchemyError as exc:
+        log.warning("Could not delete the scores of sources that are off: %s", failure_text(exc))
+        return 0
 
 
 async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
