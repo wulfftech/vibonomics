@@ -114,7 +114,11 @@ def _api_app() -> FastAPI:
         if sandbox_guard.refuses(request.scope):
             return JSONResponse({"detail": "Requests from the sandbox network are refused"}, status_code=403)
         path = _route_path(request)
-        open_path = path.startswith("/api/auth/") or path.startswith("/api/subscription/ingest/")
+        ingest = path.startswith("/api/subscription/ingest/")
+        # The ingest route is left out: its secret token is what protects it, and a page on another site has none.
+        if path.startswith("/api/") and not ingest and auth.is_cross_site_write(request):
+            return JSONResponse({"detail": "Cross-site requests are refused"}, status_code=403)
+        open_path = path.startswith("/api/auth/") or ingest
         if (
             path.startswith("/api/")
             and not open_path
