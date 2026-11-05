@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 import uvicorn
 
 from .config import get_config
+
+
+def _forwarded_allow_ips() -> str:
+    """Which peers may set X-Forwarded-For and X-Forwarded-Proto: anyone (``*``) unless the operator narrows it."""
+    return (os.environ.get("VIBONOMICS_FORWARDED_ALLOW_IPS") or "").strip() or "*"
 
 
 def main() -> None:
@@ -28,7 +34,7 @@ def main() -> None:
         port=cfg.port,
         log_level=cfg.log_level,
         proxy_headers=True,
-        forwarded_allow_ips="*",
+        forwarded_allow_ips=_forwarded_allow_ips(),
     )
 
 
