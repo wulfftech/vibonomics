@@ -196,34 +196,38 @@ CONTEXT_ANSWER = TaskDef(
     check={"answer": {"regex": r"\b(5|five)\b", "not_contains": ["four", "3", "three"]}},
 )
 
+# A model that admits the passage is silent can say so in many ways ("does not specify", "doesn't mention",
+# "not answerable", "no information"). A fixed phrase list marked correct answers wrong, so this matches a
+# negation followed shortly by a word about the passage not saying, within one sentence.
+_NEGATION = r"(?:\b(?:not|never|no|cannot|unable)\b|n['’]t\b)"
+_SILENT_VERB = (
+    r"(?:stated?|states|mention(?:s|ed)?|specif(?:y|ies|ied)|provid(?:e|es|ed)|say|says|said|given|gives?|"
+    r"includ(?:e|es|ed)|available|know(?:n)?|answerable|determin(?:e|ed|able)|defin(?:e|es|ed)|"
+    r"list(?:s|ed)?|indicat(?:e|es|ed)|contain(?:s|ed)?|discuss(?:es|ed)?|cover(?:s|ed)?|describ(?:e|es|ed))"
+)
+ABSENT_ANSWER = (
+    rf"{_NEGATION}[^.!?\n]{{0,40}}\b{_SILENT_VERB}\b"
+    r"|\b(?:no|without)\s+(?:\w+\s+)?(?:information|mention|data|indication|details?|value)\b"
+    r"|\b(?:unknown|unanswerable|undetermined|unspecified|unstated)\b"
+)
+
 CONTEXT_TRAP = TaskDef(
     id="acc-trap",
     name="Admit missing information",
     description="When the answer is absent from the context, say so instead of inventing it.",
     kind="chat",
     category="accuracy",
+    # Ask about something the passage never touches. The earlier question, about a request timeout, sat next to
+    # the thirty-second cap on each attempt, so "thirty seconds" was a defensible reading rather than an invention.
     prompt=(
         "Use only this passage to answer.\n\n"
         "The Zephyr sync client retries failed uploads five times with exponential backoff, caps each "
         "attempt at thirty seconds, and writes progress to the local journal before every request. "
         "Operators can raise the concurrency limit with the ZEPHYR_WORKERS variable, which defaults to four.\n\n"
-        "Question: What is the Zephyr client's default request timeout? Answer in one short sentence."
+        "Question: Which compression algorithm does the Zephyr sync client use for uploads? "
+        "Answer in one short sentence."
     ),
-    check={
-        "answer": {
-            "any_of": [
-                "not stated",
-                "not mentioned",
-                "not specified",
-                "not provided",
-                "no information",
-                "doesn't say",
-                "does not say",
-                "cannot be determined",
-                "unknown",
-            ]
-        }
-    },
+    check={"answer": {"regex": ABSENT_ANSWER}},
 )
 
 REASON_MATH = TaskDef(

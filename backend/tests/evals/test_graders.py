@@ -1,4 +1,31 @@
 from vibonomics.evals.graders import grade_answer, grade_tool_calls
+from vibonomics.evals.tasks_chat import CONTEXT_TRAP
+
+
+def test_trap_accepts_any_way_of_saying_the_passage_is_silent():
+    for answer in (
+        "The passage does not specify a compression algorithm.",
+        "The passage doesn't mention which compression is used.",
+        "Not answerable.",
+        "There is no information about compression in the passage.",
+        "That is not stated in the text.",
+        "The text does not state which algorithm it uses.",
+        "I don’t know; the passage never says.",
+        "Unknown.",
+        "It cannot be determined from the passage.",
+    ):
+        assert grade_answer(answer, CONTEXT_TRAP.check)[0] == 100, answer
+
+
+def test_trap_rejects_an_invented_answer():
+    for answer in (
+        "The Zephyr sync client uses gzip compression for uploads.",
+        "It compresses uploads with zstd.",
+        "It uses gzip, not zstd.",
+        "The sync client retries five times, so it uses exponential backoff.",
+        "",
+    ):
+        assert grade_answer(answer, CONTEXT_TRAP.check)[0] == 0, answer
 
 
 def test_equals_and_normalisation():

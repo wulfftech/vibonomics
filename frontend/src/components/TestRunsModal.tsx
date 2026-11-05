@@ -487,7 +487,7 @@ function RunsBody({ initialRunId }: { initialRunId: number | null }) {
 
   return (
     <Grid gap="md">
-      <Grid.Col span={{ base: 12, md: 4 }}>
+      <Grid.Col span={{ base: 12, md: 3 }}>
         <ScrollArea.Autosize mah="70vh" offsetScrollbars>
           <Stack gap="xs">
             {runs.data.map((run) => (
@@ -502,7 +502,7 @@ function RunsBody({ initialRunId }: { initialRunId: number | null }) {
           </Stack>
         </ScrollArea.Autosize>
       </Grid.Col>
-      <Grid.Col span={{ base: 12, md: 8 }}>
+      <Grid.Col span={{ base: 12, md: 9 }}>
         {current !== null ? (
           <RunDetail key={current} runId={current} suiteName={suiteName} onDeleted={() => setSelected(null)} />
         ) : (
@@ -525,7 +525,7 @@ export function TestRunsModal({
 }) {
   const mobile = useMediaQuery('(max-width: 48em)');
   return (
-    <Modal opened={opened} onClose={onClose} title="Test runs" size="xl" fullScreen={mobile}>
+    <Modal opened={opened} onClose={onClose} title="Test runs" size="90rem" fullScreen={mobile}>
       {opened && <RunsBody key={initialRunId ?? 'latest'} initialRunId={initialRunId} />}
     </Modal>
   );
