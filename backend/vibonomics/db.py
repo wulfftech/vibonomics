@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
+from fastapi import Depends
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -58,10 +59,19 @@ def session_scope() -> Iterator[Session]:
         session.close()
 
 
-def get_session() -> Iterator[Session]:
-    """FastAPI dependency."""
+def _request_session() -> Iterator[Session]:
     with session_scope() as session:
         yield session
+
+
+def get_session(session: Session = Depends(_request_session, scope="function")) -> Session:
+    """FastAPI dependency.
+
+    A dependency that yields is closed after the response has been sent unless it has function scope. Closing is
+    where this one commits, so with the default scope a failed commit still reached the client as a 2xx and the
+    rows were silently not stored.
+    """
+    return session
 
 
 def init_db() -> None:
