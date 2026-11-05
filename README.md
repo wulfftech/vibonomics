@@ -438,6 +438,12 @@ Behind a reverse proxy, set `VIBONOMICS_URL_BASE` to the sub-path and forward `X
 `X-Forwarded-For`. The app reads both. Put your proxy's own authentication in front of it if you want
 more than `VIBONOMICS_PASSWORD`; Vibonomics has no user accounts.
 
+The app refuses any change that a web page on another site sent: a `POST`, `PUT` or `DELETE` whose browser says
+`Sec-Fetch-Site: cross-site`, or, from a browser that sends no such header (plain HTTP to a LAN address), whose
+`Origin` is not the `Host`. A script such as `curl` sends neither header and is not affected. If your proxy
+rewrites `Host` and the app then refuses the UI's own changes over plain HTTP, have the proxy pass `X-Forwarded-Host`
+or list the public name in `VIBONOMICS_ALLOWED_HOSTS`.
+
 Proxy authentication and the status line do not mix. The ingest endpoint is exempt from Vibonomics' own
 login guard because its caller has no browser session, but a proxy authenticator in front of it will still
 answer that caller with a redirect to a login portal, and the snapshot is lost. Point the status line at an
