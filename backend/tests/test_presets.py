@@ -1332,3 +1332,26 @@ def test_only_the_keys_vibonomics_owns_decide_whether_the_preset_changes(client)
     assert plan["action"] == "update" and [c["path"] for c in plan["changes"]] == ["provider.order"]
     # and the whole config, the operator's keys included, is still what is sent
     assert plan["config"]["provider"]["allow_fallbacks"] is False and plan["config"]["tools"] == live["tools"]
+
+
+# ---- the key goes to OpenRouter and nowhere else ---------------------------------------------------------------
+
+GATEWAY = "https://gateway.example.net/v1"
+
+
+def test_a_base_url_override_on_the_provider_row_never_receives_the_key(client):
+    with session_scope() as session:
+        session.query(ProviderConfig).filter_by(type="openrouter").update({"base_url": GATEWAY})
+    with respx.mock(assert_all_called=False) as router:
+        gateway = router.route(host="gateway.example.net").mock(return_value=httpx.Response(200, json={"data": []}))
+        _remote(router, SLUG, None)
+        write = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        router.get(f"{BASE}/presets").mock(return_value=httpx.Response(200, json={"data": [], "total_count": 0}))
+        plan = _plan(client)
+        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+        assert client.post("/api/presets/list").status_code == 200
+        assert gateway.call_count == 0
+        assert {call.request.url.host for call in router.calls} == {"openrouter.ai"}
+        assert write.call_count == 1 and write.calls[0].request.headers["authorization"] == f"Bearer {KEY}"
+    assert plan["request"]["url"].startswith(BASE)
+    assert any("Base URL" in w and "gateway.example.net" in w for w in plan["warnings"])

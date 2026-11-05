@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from . import events
 from .db import session_scope
-from .http import FetchError, get_json, request, scrub_secrets
+from .http import FetchError, get_json, public_url, request, scrub_secrets
 from .jobs import failure_text
 from .orm import Model, ProviderConfig, Setting, utcnow
 from .pricing import Task, task_cost, value_of
@@ -149,6 +149,7 @@ class Inputs:
     api_key: str | None
     state: dict[str, Any]
     draft: bool = False  # the settings are unsaved ones, offered for a preview
+    ignored_base: str | None = None  # a Base URL override on the provider row, which the preset calls do not use
 
 
 # ---- ranking -------------------------------------------------------------------------------------------------
@@ -563,10 +564,16 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
 # ---- planning ------------------------------------------------------------------------------------------------
 
 
-def _access(resolved: list[Any]) -> tuple[str, str | None]:
+def _access(resolved: list[Any]) -> tuple[str, str | None, str | None]:
+    """OpenRouter's own host, the first key, and the row's Base URL override if it has one.
+
+    The override is never used: it is the operator's gateway for chat traffic, and the account key would go to
+    whatever host it names. Every call here is OpenRouter's, so it goes to OpenRouter.
+    """
     keyed = next((r for r in resolved if r.api_key), None)
-    base = (keyed.base_url if keyed and keyed.base_url else OpenRouterAdapter.spec.default_base_url).rstrip("/")
-    return base, keyed.api_key if keyed else None
+    base = OpenRouterAdapter.spec.default_base_url.rstrip("/")
+    ignored = keyed.base_url if keyed and keyed.base_url and keyed.base_url.rstrip("/") != base else None
+    return base, keyed.api_key if keyed else None, ignored
 
 
 def _openrouter_providers(s: Session) -> list[ProviderConfig]:
@@ -582,7 +589,7 @@ def _openrouter_providers(s: Session) -> list[ProviderConfig]:
 def load_access() -> tuple[str, str | None, dict[str, Any]]:
     """Where to reach OpenRouter, with which key, and what was written before. Ranks nothing."""
     with session_scope() as s:
-        base, key = _access([resolve(p) for p in _openrouter_providers(s)])
+        base, key, _ignored = _access([resolve(p) for p in _openrouter_providers(s)])
         return base, key, _load_state(s)
 
 
@@ -596,8 +603,10 @@ def load_inputs(draft: PresetSettings | None = None) -> Inputs:
         resolved = [resolve(p) for p in providers]
         candidates, task, profile_id = rank(s, settings, [p.id for p in providers])
         state = _load_state(s)
-    base, key = _access(resolved)
-    return Inputs(settings, candidates, task, profile_id, base, key, state, draft=draft is not None)
+    base, key, ignored = _access(resolved)
+    return Inputs(
+        settings, candidates, task, profile_id, base, key, state, draft=draft is not None, ignored_base=ignored
+    )
 
 
 async def list_presets(base: str, key: str, owned: list[str]) -> list[dict[str, Any]]:
@@ -670,6 +679,11 @@ async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None =
     if not inputs.api_key:
         return _blocked(plan, "Add an OpenRouter API key under Settings, Providers first.")
     plan.fingerprint = owner_fingerprint(inputs.base_url, inputs.api_key)
+    if inputs.ignored_base:
+        plan.warnings.append(
+            f"The OpenRouter provider has a Base URL override ({public_url(inputs.ignored_base)}). Presets are always "
+            f"read and written at {public_url(inputs.base_url)}, so the key is never sent to the override."
+        )
     try:
         remote = await fetch_remote(inputs.base_url, inputs.api_key, cfg.slug)
     except FetchError as exc:
