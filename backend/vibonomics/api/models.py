@@ -6,12 +6,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..catalog.modelsdev import load_catalog
+from ..catalog.modelsdev import ModelsDevCatalog, load_catalog
 from ..db import get_session, session_scope
+from ..http import FetchError
 from ..orm import EvalResult, Model, PriceHistory, ProviderConfig
 from ..provider_service import resolve
 from ..providers.registry import get_adapter_class
@@ -306,7 +308,15 @@ def model_snippets(
 
 @router.get("/{model_pk}", response_model=ModelDetail)
 async def model_detail(model_pk: int) -> ModelDetail:
-    catalog = await load_catalog()
+    try:
+        catalog = await load_catalog()
+    except FetchError:
+        catalog = None  # it only supplies a fallback description; the details are worth showing without one
+    # The rest is queries and scoring over every benchmark row: off the loop, as list_models is.
+    return await run_in_threadpool(_model_detail, model_pk, catalog)
+
+
+def _model_detail(model_pk: int, catalog: ModelsDevCatalog | None) -> ModelDetail:
     with session_scope() as session:
         m = session.get(Model, model_pk)
         if m is None:
@@ -359,7 +369,7 @@ async def model_detail(model_pk: int) -> ModelDetail:
         ]
         attributions = sorted({SOURCES[mv.source].spec.attribution for mv in metrics if mv.source in SOURCES})
         description = (m.extra or {}).get("description")
-        if not description and m.canonical_id:
+        if not description and m.canonical_id and catalog is not None:
             info = catalog.canonical_index().get(m.canonical_id)
             description = info.name if info else None
         return ModelDetail(
