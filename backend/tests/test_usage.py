@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from vibonomics import crypto, events, jobs, usage
 from vibonomics.app import create_app
@@ -270,11 +270,15 @@ async def test_a_failing_account_is_counted_and_named_and_the_key_is_not_in_the_
 async def test_run_job_records_a_usage_run():
     with session_scope() as session:
         _provider(session)
+        # The database is shared with every other test, so only a run made after this point is this test's.
+        before = session.scalar(select(func.max(RefreshRun.id))) or 0
     with respx.mock(assert_all_called=False) as router:
         _mock_openrouter(router)
         await jobs.run_job("usage", "manual")
     with session_scope() as session:
-        run = session.scalars(select(RefreshRun).where(RefreshRun.kind == "usage")).first()
+        run = session.scalars(
+            select(RefreshRun).where(RefreshRun.kind == "usage", RefreshRun.id > before).order_by(RefreshRun.id)
+        ).first()
         assert run is not None and run.status == "ok"
 
 
