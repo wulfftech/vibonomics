@@ -418,6 +418,7 @@ Environment variables for the app and the compose stack:
 | `VIBONOMICS_PASSWORD` | empty | password gate on the UI (signed cookie session). Changing it ends every session |
 | `VIBONOMICS_OPEN_READ` | off | with a password, let visitors read without logging in. Settings and every change still need the password; see [Open to read](#open-to-read) |
 | `VIBONOMICS_ALLOWED_HOSTS` | empty (any) | comma-separated host names the app answers to. Set it when there is no password: it stops DNS rebinding from a web page on your network |
+| `VIBONOMICS_FORWARDED_ALLOW_IPS` | `*` (anyone) | comma-separated addresses whose `X-Forwarded-For` and `X-Forwarded-Proto` the app believes. The default trusts every peer, so a client can put any address in the access log. Set it to your proxy's address (`127.0.0.1` for a proxy on the same host) to stop that. If the proxy is not on the list, the app logs the proxy's address instead of the client's |
 | `VIBONOMICS_SECRET_KEY` | generated file | encrypts stored provider keys and signs sessions |
 | `VIBONOMICS_SANDBOX_URL` | empty | sidecar address: `unix:///run/vibonomics-sandbox/sandbox.sock` (compose default) or `http://sandbox:2290` |
 | `VIBONOMICS_SANDBOX_SOCKET` | empty | on the sidecar: serve on this Unix socket instead of TCP port `VIBONOMICS_SANDBOX_PORT` (`2290`) |
@@ -437,6 +438,12 @@ usage profiles, judge defaults and benchmark sources live in Settings and are st
 Behind a reverse proxy, set `VIBONOMICS_URL_BASE` to the sub-path and forward `X-Forwarded-Proto` and
 `X-Forwarded-For`. The app reads both. Put your proxy's own authentication in front of it if you want
 more than `VIBONOMICS_PASSWORD`; Vibonomics has no user accounts.
+
+The app refuses any change that a web page on another site sent: a `POST`, `PUT` or `DELETE` whose browser says
+`Sec-Fetch-Site: cross-site`, or, from a browser that sends no such header (plain HTTP to a LAN address), whose
+`Origin` is not the `Host`. A script such as `curl` sends neither header and is not affected. If your proxy
+rewrites `Host` and the app then refuses the UI's own changes over plain HTTP, have the proxy pass `X-Forwarded-Host`
+or list the public name in `VIBONOMICS_ALLOWED_HOSTS`.
 
 Proxy authentication and the status line do not mix. The ingest endpoint is exempt from Vibonomics' own
 login guard because its caller has no browser session, but a proxy authenticator in front of it will still

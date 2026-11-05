@@ -192,3 +192,115 @@ def test_without_open_read_a_visitor_gets_nothing(monkeypatch):
         assert client.post("/api/models/value", json={"models": []}).status_code == 401
     finally:
         get_config.cache_clear()
+
+
+# A POST with no body is a "simple request": a page on another site can send it with a form or a no-cors fetch, and
+# the browser attaches whatever cookie it holds (or the instance has no password at all). These are the ones that did
+# something when sent that way.
+BODYLESS_POSTS = [
+    "/api/subscription/claude/rotate",
+    "/api/providers/1/refresh",
+    "/api/evals/runs/1/cancel",
+    "/api/presets/list",
+    "/api/presets/plan",
+    "/api/auth/logout",
+]
+REFUSED = {"detail": "Cross-site requests are refused"}
+
+
+@pytest.mark.parametrize("path", BODYLESS_POSTS)
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example", "Content-Type": "text/plain"},
+        # Over plain HTTP a browser sends no Fetch Metadata, but it still names the page's origin.
+        {"Origin": "http://evil.example", "Content-Type": "text/plain"},
+    ],
+    ids=["fetch-metadata", "both", "origin-only"],
+)
+def test_a_cross_site_post_is_refused_even_with_a_session(client, path, headers):
+    _logged_in(client)
+    token = client.get("/api/subscription/claude").json()["ingest_token"]
+
+    response = client.post(path, headers=headers)
+    assert response.status_code == 403
+    assert response.json() == REFUSED
+
+    assert client.get("/api/subscription/claude").json()["ingest_token"] == token  # not rotated
+    assert client.get("/api/auth/status").json()["authenticated"] is True  # not logged out
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},  # curl, which is how the status-line command runs
+        {"Sec-Fetch-Site": "same-origin", "Origin": "http://testserver"},
+        {"Sec-Fetch-Site": "none"},
+        {"Origin": "http://testserver"},  # a browser that sends no Fetch Metadata, such as one on plain HTTP
+        # A proxy that rewrites the Host header: the browser still says the page is the app's own.
+        {"Sec-Fetch-Site": "same-origin", "Origin": "https://vibonomics.example.net"},
+        # An old browser behind a proxy that rewrites Host but passes the original in X-Forwarded-Host.
+        {"Origin": "https://vibonomics.example.net", "X-Forwarded-Host": "vibonomics.example.net"},
+        {"Origin": "https://vibonomics.example.net", "X-Forwarded-Host": "other.example, vibonomics.example.net"},
+    ],
+    ids=["curl", "same-origin", "none", "origin-is-host", "proxy-rewrites-host", "forwarded-host", "forwarded-list"],
+)
+def test_a_post_from_the_app_itself_or_a_script_goes_through(client, headers):
+    _logged_in(client)
+    assert client.post("/api/subscription/claude/rotate", headers=headers).status_code == 200
+
+
+@pytest.mark.parametrize("origin", ["http://evil.example", "http://testserver:3000", "null"])
+def test_an_origin_that_is_not_this_app_is_refused_when_the_browser_sends_no_fetch_metadata(client, origin):
+    _logged_in(client)
+    response = client.post("/api/subscription/claude/rotate", headers={"Origin": origin})
+    assert response.status_code == 403
+    assert response.json() == REFUSED
+
+
+def test_a_listed_host_is_accepted_as_an_origin_and_another_is_not(monkeypatch):
+    monkeypatch.setenv("VIBONOMICS_PASSWORD", "hunter2")
+    monkeypatch.setenv("VIBONOMICS_ALLOWED_HOSTS", "testserver, vibonomics.example.net")
+    monkeypatch.delenv("VIBONOMICS_URL_BASE", raising=False)
+    get_config.cache_clear()
+    init_db()
+    try:
+        client = _logged_in(TestClient(create_app()))
+        rotate = "/api/subscription/claude/rotate"
+        assert client.post(rotate, headers={"Origin": "https://vibonomics.example.net"}).status_code == 200
+        assert client.post(rotate, headers={"Origin": "https://evil.example"}).status_code == 403
+    finally:
+        get_config.cache_clear()
+
+
+def test_every_route_that_changes_something_refuses_a_cross_site_request(client):
+    # The same walk as above, with a session: the check does not depend on a route remembering to ask for it.
+    # The ingest route is left out on purpose: it takes a secret token, which a page on another site cannot have.
+    _logged_in(client)
+    checked = 0
+    for path, operations in _api_app().openapi()["paths"].items():
+        if path.startswith("/api/subscription/ingest/"):
+            continue
+        for method in operations:
+            if method.upper() in READ_METHODS:
+                continue
+            url = re.sub(r"\{[^}]+\}", "1", path)
+            response = client.request(method.upper(), url, json={}, headers={"Sec-Fetch-Site": "cross-site"})
+            assert response.status_code == 403, (method, path)
+            checked += 1
+    assert checked >= len(CHANGES)
+
+
+def test_ingest_still_works_for_a_token_holder_and_is_not_blocked_by_the_cross_site_check(client):
+    _logged_in(client)
+    token = client.get("/api/subscription/claude").json()["ingest_token"]
+    client.post("/api/auth/logout")  # the status-line command has no session
+
+    snapshot = b'{"rate_limits": {"five_hour": {"used_percentage": 5}}}'
+    headers = {"X-Vibonomics-Token": token, "Content-Type": "application/json"}
+    assert client.post("/api/subscription/ingest/claude", content=snapshot, headers=headers).status_code == 202
+    # Not the cross-site refusal: the route checks its token, and a page on another site has none.
+    wrong = client.post("/api/subscription/ingest/claude?token=wrong", headers={"Sec-Fetch-Site": "cross-site"})
+    assert wrong.status_code == 401
+    assert wrong.json() == {"detail": "Bad subscription ingest token"}

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -51,6 +52,59 @@ def anonymous_allowed(method: str, path: str) -> bool:
     if method in READ_METHODS:
         return True
     return method == "POST" and path.rstrip("/") in READ_ONLY_POSTS
+
+
+def _host_key(netloc: str) -> str:
+    host = netloc.strip().lower()
+    for default_port in (":80", ":443"):
+        if host.endswith(default_port):
+            return host[: -len(default_port)]
+    return host
+
+
+def _origin_is_ours(origin: str, request: Request) -> bool:
+    """Whether an ``Origin`` header names this app: the Host header, a proxy's X-Forwarded-Host, or a listed host.
+
+    A page on another site cannot set X-Forwarded-Host on a request it sends without a CORS preflight, which the API
+    never answers, so trusting it here lets a proxy that rewrites Host through without opening a cross-site hole.
+    """
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return False
+    if not parts.netloc:  # "null": a sandboxed frame or a redirect that hid the page's origin
+        return False
+    ours = [request.headers.get("host", ""), *request.headers.getlist("x-forwarded-host")]
+    names = {_host_key(name) for value in ours for name in value.split(",") if name.strip()}
+    if _host_key(parts.netloc) in names:
+        return True
+    host = (parts.hostname or "").lower()
+    return any(
+        pattern == host or (pattern.startswith("*") and host.endswith(pattern[1:]))
+        for pattern in (h.lower() for h in get_config().allowed_hosts)
+    )
+
+
+def is_cross_site_write(request: Request) -> bool:
+    """Whether a request that changes something was sent by a page on another site.
+
+    The body-less POSTs are "simple requests", so a page anywhere can fire them with a form or a no-cors fetch, and
+    the browser adds the session cookie if its SameSite rules allow it (or there is no password at all). The browser
+    says where the page came from, and a page cannot forge either header:
+
+    - ``Sec-Fetch-Site`` decides when it is sent. Browsers send it only to HTTPS and localhost, so over plain HTTP
+      to a LAN address it is missing and ``Origin`` has to decide.
+    - A request with neither header is a script such as curl, which is how the status-line command posts.
+    """
+    if request.method in READ_METHODS:
+        return False
+    site = request.headers.get("sec-fetch-site", "").strip().lower()
+    if site == "cross-site":
+        return True
+    if site in {"same-origin", "none"}:
+        return False
+    origin = request.headers.get("origin")
+    return origin is not None and not _origin_is_ours(origin, request)
 
 
 def _session_value() -> str:

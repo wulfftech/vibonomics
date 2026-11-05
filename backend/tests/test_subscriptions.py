@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from vibonomics.api import subscriptions as api
-from vibonomics.db import init_db
-from vibonomics.subscriptions import normalize_statusline, normalize_usage
+from vibonomics.db import init_db, session_scope
+from vibonomics.orm import SubscriptionSnapshot, utcnow
+from vibonomics.subscriptions import latest_snapshot, normalize_statusline, normalize_usage
 
 STATUSLINE = {
     "session_id": "abc123",
@@ -252,3 +256,161 @@ def test_spend_limit_without_a_percentage():
     response = client.get("/api/subscription/claude")
     assert response.status_code == 200
     assert response.json()["snapshot"]["spend_limit"]["used_usd"] == 3
+
+
+@pytest.mark.parametrize("value", [0.5, 1, 1.5, 23.5, 100])
+def test_status_line_percentages_are_already_percent(value):
+    """Claude Code documents used_percentage as 0-100 everywhere, so 1 is one percent and never a whole window."""
+    data = normalize_statusline(
+        {
+            "rate_limits": {
+                "five_hour": {"used_percentage": value},
+                "seven_day": {"used_percentage": value},
+                "spend_limit": {"used_percentage": value},
+            },
+            "context_window": {"used_percentage": value},
+        }
+    )
+    assert [w["used_percentage"] for w in data["windows"]] == [float(value)] * 3
+    assert data["spend_limit"]["used_percentage"] == float(value)
+    assert data["session"]["context_used_percentage"] == float(value)
+
+
+def test_a_status_line_that_mixes_small_and_large_percentages_agrees_with_itself():
+    data = normalize_statusline(
+        {
+            "rate_limits": {
+                "five_hour": {"used_percentage": 1},
+                "seven_day": {"used_percentage": 0.5},
+                "spend_limit": {"used_percentage": 23.5},
+            },
+            "context_window": {"used_percentage": 1.5},
+        }
+    )
+    assert {w["key"]: w["used_percentage"] for w in data["windows"]} == {
+        "five_hour": 1.0,
+        "seven_day": 0.5,
+        "spend_limit": 23.5,
+    }
+    assert data["session"]["context_used_percentage"] == 1.5
+
+
+def _post(client: TestClient, body: bytes | dict) -> object:
+    token = client.get("/api/subscription/claude").json()["ingest_token"]
+    content = body if isinstance(body, bytes) else json.dumps(body).encode()
+    return client.post(
+        "/api/subscription/ingest/claude",
+        content=content,
+        headers={"X-Vibonomics-Token": token, "Content-Type": "application/json"},
+    )
+
+
+def test_ingest_keeps_model_session_and_version_as_short_strings():
+    client = _client()
+    body = {
+        "model": {"display_name": {"x": 1}, "id": "claude-opus-5-5"},
+        "version": 3,
+        "session_id": "s" * 400_000,
+        "rate_limits": {"five_hour": {"used_percentage": 5}},
+    }
+    assert _post(client, body).status_code == 202
+    snapshot = client.get("/api/subscription/claude").json()["snapshot"]
+    assert snapshot["model"] == "claude-opus-5-5"
+    assert snapshot["version"] == "3"
+    with session_scope() as session:
+        stored = latest_snapshot(session, "claude")[1]
+    assert len(stored["session_id"]) <= 64
+    assert len(json.dumps(stored)) < 2_000
+
+
+def test_ingest_drops_a_model_and_version_that_are_not_text():
+    client = _client()
+    body = {"model": {"display_name": {"x": 1}}, "version": ["2", 1], "session_id": {"a": 1}}
+    assert _post(client, body).status_code == 202
+    response = client.get("/api/subscription/claude")
+    assert response.status_code == 200
+    snapshot = response.json()["snapshot"]
+    assert (snapshot["model"], snapshot["version"]) == (None, None)
+
+
+HUGE = "9" * 400  # a valid JSON integer too large for a float
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"cost": {"total_duration_ms": 1e999, "total_cost_usd": 1e999, "total_lines_added": -1e999}}',
+        b'{"context_window": {"used_percentage": 1e999, "context_window_size": 1e999, "total_input_tokens": 1e999}}',
+        b'{"rate_limits": {"five_hour": {"used_percentage": -1e999}, "spend_limit": {"used_usd": 1e999}}}',
+        f'{{"cost": {{"total_lines_added": {HUGE}, "total_cost_usd": {HUGE}}}}}'.encode(),
+        f'{{"rate_limits": {{"five_hour": {{"used_percentage": 5, "resets_at": {HUGE}}}}}}}'.encode(),
+        '{"rate_limits": {"five_hour": {"used_percentage": 5, "resets_at": "²"}}}'.encode(),
+    ],
+    ids=["duration", "context", "windows", "big-ints", "big-reset", "odd-digit"],
+)
+def test_ingest_ignores_numbers_that_are_not_finite_or_too_big(body):
+    client = _client()
+    assert _post(client, body).status_code == 202
+    response = client.get("/api/subscription/claude")
+    assert response.status_code == 200
+    session = response.json()["snapshot"]["session"]
+    assert session is None or all(value in (None, 0.0) for value in session.values())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"[" * 100_000, b'{"a":' * 100_000, b'{"a": ' + b"9" * 5000 + b"}"],
+    ids=["deep-list", "deep-object", "5000-digit-int"],
+)
+def test_ingest_answers_400_for_json_it_cannot_parse(body):
+    client = _client()
+    assert _post(client, body).status_code == 400
+
+
+def test_the_read_survives_a_snapshot_stored_before_ingest_cleaned_it():
+    client = _client()
+    bad = {
+        "windows": [{"key": "five_hour", "label": "5-hour session", "used_percentage": 5.0, "resets_at": None}],
+        "model": {"display_name": {"x": 1}},
+        "version": 3,
+        "session": {"cost_usd": "lots"},
+        "source": "claude-code",
+    }
+    with session_scope() as session:
+        session.add(SubscriptionSnapshot(kind="claude", received_at=utcnow(), payload=bad))
+    try:
+        response = client.get("/api/subscription/claude")
+        assert response.status_code == 200
+        assert response.json()["ingest_token"]
+    finally:
+        with session_scope() as session:
+            for row in session.query(SubscriptionSnapshot).filter(SubscriptionSnapshot.payload == bad):
+                session.delete(row)
+
+
+def test_a_token_with_characters_outside_ascii_is_a_401_not_a_500():
+    client = _client()
+    client.get("/api/subscription/claude")  # make sure a token exists, so the comparison runs
+    for response in (
+        client.post("/api/subscription/ingest/claude?token=%C3%A9", json={}),
+        # Header values reach the app as latin-1 text, so a raw byte such as \xe9 is a non-ASCII str there.
+        client.post("/api/subscription/ingest/claude", json={}, headers={"X-Vibonomics-Token": b"\xe9"}),
+        client.post("/api/subscription/ingest/claude", json={}, headers={"X-Vibonomics-Token": "café".encode()}),
+    ):
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Bad subscription ingest token"}
+
+
+def test_nothing_the_app_shows_puts_the_token_in_a_url():
+    """A token in a query string ends up in access logs, so only the header form is advertised."""
+    client = _client()
+    config = client.get("/api/subscription/claude").json()
+    token = config["ingest_token"]
+    assert token
+    assert "token=" not in config["ingest_path"]
+    assert token not in config["ingest_path"]
+    assert "token=" not in config["statusline_command"]
+    assert f'-H "X-Vibonomics-Token: {token}"' in config["statusline_command"]
+    # The path it advertises is the one that works with that header.
+    assert _post(client, {"rate_limits": {"five_hour": {"used_percentage": 5}}}).status_code == 202
+    assert config["ingest_path"] == "/api/subscription/ingest/claude"
