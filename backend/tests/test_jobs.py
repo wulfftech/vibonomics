@@ -224,6 +224,9 @@ async def test_a_run_that_cannot_be_closed_still_ends_with_a_finished_event_and_
     assert [name for name, _ in published] == ["refresh.started", "refresh.finished"]
     assert published[1][1]["status"] == "ok"
     assert not jobs.is_running("usage")
+    # The row could not be closed, so it is still "running"; other tests read the first usage run.
+    with session_scope() as s:
+        s.delete(s.get(RefreshRun, published[0][1]["run_id"]))
 
 
 async def test_the_sequence_of_a_manual_refresh_goes_on_after_a_kind_raises(monkeypatch):
