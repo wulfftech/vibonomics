@@ -237,6 +237,36 @@ def test_matcher_keeps_dated_snapshots_apart(order):
     assert match("DeepSeek-V4.1-Flash-20260101") == flash[0]
 
 
+def _listing(provider: str, model_id: str, canonical: str) -> tuple[str, dict]:
+    return provider, {"id": provider, "models": {model_id: {"id": model_id, "canonical_model_id": canonical}}}
+
+
+@pytest.mark.parametrize("order", [1, -1], ids=["reseller first", "creator first"])
+def test_a_bare_provider_id_means_the_creators_listing_not_the_first_one_listed(order):
+    reseller = _listing("reseller", "deepseek-chat", "deepseek/deepseek-v3")
+    creator = _listing("deepseek", "deepseek-chat", "deepseek/deepseek-v3.1")
+    matcher = Matcher(ModelsDevCatalog(dict([reseller, creator][::order])))
+
+    assert matcher.match("livebench", "deepseek-chat", ["deepseek-chat"]) == ("deepseek/deepseek-v3.1", "id")
+
+
+@pytest.mark.parametrize("order", [1, -1], ids=["listed", "reversed"])
+def test_a_bare_provider_id_that_two_resellers_map_differently_matches_nothing(order):
+    one = _listing("reseller-a", "shared-model", "acme/shared-one")
+    two = _listing("reseller-b", "shared-model", "acme/shared-two")
+    matcher = Matcher(ModelsDevCatalog(dict([one, two][::order])))
+
+    assert matcher.match("livebench", "mystery", ["shared-model"])[0] is None
+    # Reached through its provider, the same id is still unambiguous.
+    assert matcher.match("livebench", "mystery", ["reseller-a/shared-model"]) == ("acme/shared-one", "id")
+
+
+def test_a_bare_provider_id_with_one_canonical_model_still_matches():
+    matcher = Matcher(ModelsDevCatalog(dict([_listing("reseller", "only-model", "acme/only-model")])))
+
+    assert matcher.match("livebench", "mystery", ["only-model"]) == ("acme/only-model", "id")
+
+
 def _aa_model(name: str, slug: str, creator: str) -> dict:
     return {
         "name": name,
@@ -298,6 +328,21 @@ def test_curated_arena_aliases_reach_their_catalogue_ids():
     for name, cid in CURATED_ARENA.items():
         assert matcher.match("arena", name) == (cid, "curated"), name
         assert matcher.match("arena", name.lower()) == (cid, "curated"), name
+
+
+def test_an_operator_alias_to_a_model_the_catalogue_lacks_does_not_count_as_a_match(caplog):
+    gone = {("livebench", "Mystery Model"): "acme/gone"}
+    matcher = Matcher(_catalog(("acme/m1", "M1")), gone)
+    with caplog.at_level("WARNING"):
+        # Stale, so it counts as unmatched and the name stays on the list the operator maps from.
+        assert matcher.match("livebench", "Mystery Model") == (None, "unmatched")
+        assert matcher.match("livebench", "Mystery Model", ["acme/m1"]) == ("acme/m1", "id")
+    assert "acme/gone" in caplog.text and "not in the catalogue" in caplog.text
+    # An alias to a model it does list applies, and so does "ignore this name".
+    listed = Matcher(_catalog(("acme/m1", "M1")), {("livebench", "Mystery Model"): "acme/m1"})
+    assert listed.match("livebench", "Mystery Model") == ("acme/m1", "operator")
+    ignored = Matcher(_catalog(("acme/m1", "M1")), {("livebench", "M1"): None})
+    assert ignored.match("livebench", "M1") == (None, "operator")
 
 
 def test_a_curated_alias_to_a_model_the_catalogue_lacks_does_not_count_as_a_match(caplog):
@@ -493,6 +538,257 @@ async def test_arena_reports_the_subsets_it_could_not_load(monkeypatch):
     assert complete.partial_errors == []
 
 
+# -- models.dev down, nothing cached ----------------------------------------------------------
+
+
+def _matched_source(source_id: str, fetched: list[str]) -> type[BenchmarkSource]:
+    class Matched(BenchmarkSource):
+        spec = SourceSpec(
+            id=source_id,
+            name=source_id.title(),
+            homepage="https://example.com",
+            description="",
+            license="test",
+            attribution="test",
+            metrics=(MetricSpec("score", "Score", "coding"),),
+        )
+
+        async def fetch(self) -> list[ScoreRecord]:
+            fetched.append(source_id)
+            return [ScoreRecord(metric="score", source_model="Some Model", value=7.0, model_ids=["acme/m1"])]
+
+    return Matched
+
+
+def _stored_matches(source_id: str) -> list[tuple[str, str | None, str, float]]:
+    with session_scope() as s:
+        rows = s.scalars(select(BenchmarkScore).where(BenchmarkScore.source == source_id))
+        return [(r.source_model, r.canonical_id, r.match_method, r.value) for r in rows]
+
+
+def _last_benchmark_run() -> RefreshRun:
+    with session_scope() as s:
+        run = s.scalars(
+            select(RefreshRun).where(RefreshRun.kind == "benchmarks").order_by(RefreshRun.id.desc())
+        ).first()
+        assert run is not None
+        return run
+
+
+async def test_a_refresh_with_models_dev_down_does_not_rematch_or_delete_the_stored_scores(database, monkeypatch):
+    fetched: list[str] = []
+    catalogues = {"now": _catalog(("acme/m1", "M1"))}
+
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return catalogues["now"]
+
+    monkeypatch.setattr(events, "_loop", None)
+    monkeypatch.setattr(jobs, "SOURCES", {"downtest": _matched_source("downtest", fetched)})
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+    await jobs.run_job("benchmarks")
+    matched = [("Some Model", "acme/m1", "id", 7.0)]
+    assert _stored_matches("downtest") == matched
+
+    catalogues["now"] = ModelsDevCatalog({}, degraded="GET https://models.dev/api.json: ConnectError: no route")
+    await jobs.run_job("benchmarks")
+
+    assert _stored_matches("downtest") == matched  # still matched, not rewritten as unmatched
+    assert fetched == ["downtest"]  # the second run did not even fetch
+    run = _last_benchmark_run()
+    assert run.status == "failed"
+    assert "models.dev is unavailable" in run.message and "no route" in run.message
+
+
+async def test_a_rematch_with_models_dev_down_leaves_the_stored_scores_alone(database, monkeypatch):
+    monkeypatch.setattr(jobs, "SOURCES", {"downtest": _matched_source("downtest", [])})
+    record = ScoreRecord(metric="score", source_model="Some Model", value=7.0, model_ids=["acme/m1"])
+    jobs.persist_scores("downtest", [record], Matcher(_catalog(("acme/m1", "M1"))))
+    assert _stored_matches("downtest") == [("Some Model", "acme/m1", "id", 7.0)]
+
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return ModelsDevCatalog({}, degraded="models.dev: no route")
+
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+    with pytest.raises(FetchError, match=r"models.dev is unavailable"):
+        await jobs.rematch_scores()
+
+    assert _stored_matches("downtest") == [("Some Model", "acme/m1", "id", 7.0)]
+
+
+# -- A response in a shape the source does not know ---------------------------------------------
+
+OR_MODELS = "https://openrouter.ai/api/v1/models"
+OR_KEY = "sk-or-test-1234567890"
+AA_MODEL = {
+    "id": "acme/m1",
+    "canonical_slug": "acme/m1-2026",
+    "benchmarks": {"artificial_analysis": {"coding_index": 40}},
+}
+DESIGN_MODEL = {
+    "id": "acme/m1",
+    "benchmarks": {"design_arena": [{"category": "website", "elo": 1200, "rank": 3, "win_rate": 0.6}]},
+}
+UNEXPECTED_MODEL_LISTS = {
+    "an error body": {"error": {"message": "rate limited"}},
+    "a list": [],
+    "data is not a list": {"data": "nope"},
+    "no models": {"data": []},
+    "models without the block": {"data": [{"id": "acme/m1", "pricing": {}}]},
+}
+
+
+def _bench_context(api_key: str | None = None):
+    from vibonomics.benchmarks.base import BenchContext
+    from vibonomics.settings_store import AppSettings
+
+    return BenchContext(catalog=_catalog(), settings=AppSettings(), api_key=api_key)
+
+
+@pytest.mark.parametrize("payload", UNEXPECTED_MODEL_LISTS.values(), ids=UNEXPECTED_MODEL_LISTS.keys())
+@pytest.mark.parametrize("source_id", ["openrouter-aa", "openrouter-designarena"])
+async def test_a_model_list_in_a_shape_the_openrouter_sources_do_not_know_is_an_error_not_an_empty_source(
+    source_id, payload
+):
+    import httpx
+    import respx
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get(OR_MODELS).mock(return_value=httpx.Response(200, json=payload))
+        with pytest.raises(FetchError, match=r"unexpected|no .* in"):
+            await SOURCES[source_id](_bench_context()).fetch()
+
+
+async def test_the_openrouter_sources_still_read_a_model_list_in_the_expected_shape():
+    import httpx
+    import respx
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get(OR_MODELS).mock(return_value=httpx.Response(200, json={"data": [AA_MODEL, DESIGN_MODEL]}))
+        aa = await SOURCES["openrouter-aa"](_bench_context()).fetch()
+        design = await SOURCES["openrouter-designarena"](_bench_context()).fetch()
+
+    assert [(r.metric, r.source_model, r.value) for r in aa] == [("coding_index", "acme/m1", 40.0)]
+    assert [(r.metric, r.source_model, r.value) for r in design] == [("website_elo", "acme/m1", 1200.0)]
+
+
+def _store_settings(*, aa_on: bool = False, key: str | None = None) -> None:
+    from vibonomics import crypto
+    from vibonomics.settings_store import AppSettings, BenchmarkSourceSettings, save_settings
+
+    settings = AppSettings()
+    settings.benchmarks.aa_terms_acknowledged = True
+    settings.benchmarks.sources["openrouter-aa"] = BenchmarkSourceSettings(enabled=aa_on)
+    settings.benchmarks.sources["openrouter-datasets"] = BenchmarkSourceSettings(
+        enabled=True, api_key_enc=crypto.encrypt(key) if key else None
+    )
+    with session_scope() as s:
+        save_settings(s, settings)
+
+
+@pytest.fixture
+def stored_settings(database):
+    yield _store_settings
+    _store_settings()
+
+
+async def _refresh_only(monkeypatch, source_id: str) -> None:
+    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+        return _catalog(("acme/m1", "M1"))
+
+    monkeypatch.setattr(events, "_loop", None)
+    monkeypatch.setattr(jobs, "SOURCES", {source_id: SOURCES[source_id]})
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
+    await jobs.run_job("benchmarks")
+
+
+async def test_a_response_in_an_unknown_shape_keeps_the_stored_scores_and_fails_the_run(stored_settings, monkeypatch):
+    import httpx
+    import respx
+
+    stored_settings(aa_on=True)
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get(OR_MODELS).mock(return_value=httpx.Response(200, json={"data": [AA_MODEL]}))
+        await _refresh_only(monkeypatch, "openrouter-aa")
+        assert _stored_matches("openrouter-aa") == [("acme/m1", "acme/m1", "id", 40.0)]
+
+        route.mock(return_value=httpx.Response(200, json={"error": {"message": "overloaded"}}))
+        await _refresh_only(monkeypatch, "openrouter-aa")
+
+    assert _stored_matches("openrouter-aa") == [("acme/m1", "acme/m1", "id", 40.0)]
+    run = _last_benchmark_run()
+    assert run.status == "failed" and "unexpected" in run.message
+
+
+SESSION_COST_URL = "https://openrouter.ai/api/v1/datasets/session-cost"
+BENCHMARKS_URL = "https://openrouter.ai/api/v1/benchmarks"
+GPQA = {
+    "source": "openrouter",
+    "benchmark_type": "gpqa_diamond",
+    "model_permaslug": "acme/m1",
+    "accuracy": 0.5,
+    "display_name": "M1",
+}
+SESSION_COST = {
+    "data": [{"model_permaslug": "acme/m1", "median_session_cost_usd": 1.5, "turn_range": "10-49-turns"}],
+    "meta": {},
+}
+
+
+def _datasets_mock(router, benchmarks: object, session_cost: object) -> None:
+    import httpx
+
+    router.get(OR_MODELS).mock(return_value=httpx.Response(200, json={"data": []}))
+    router.get(BENCHMARKS_URL).mock(return_value=httpx.Response(200, json=benchmarks))
+    router.get(SESSION_COST_URL).mock(return_value=httpx.Response(200, json=session_cost))
+
+
+async def test_session_costs_in_an_unknown_shape_are_a_partial_failure_that_keeps_their_stored_scores(
+    stored_settings, monkeypatch
+):
+    import respx
+
+    stored_settings(key=OR_KEY)
+    good = {"data": [GPQA], "meta": {}}
+    with respx.mock(assert_all_called=False) as router:
+        _datasets_mock(router, good, SESSION_COST)
+        await _refresh_only(monkeypatch, "openrouter-datasets")
+        assert _stored_metrics("openrouter-datasets") == {"gpqa_diamond": 50.0, "session_cost": 1.5}
+
+        _datasets_mock(router, good, {"error": "no such dataset"})
+        await _refresh_only(monkeypatch, "openrouter-datasets")
+
+    # The accuracy is refreshed; the session cost it could not read is not deleted.
+    assert _stored_metrics("openrouter-datasets") == {"gpqa_diamond": 50.0, "session_cost": 1.5}
+    run = _last_benchmark_run()
+    assert run.status == "partial" and "session-cost" in run.message
+
+
+@pytest.mark.parametrize("session_cost", [{"error": "nope"}, [], {"data": "nope"}, {"data": [{"cell": 1}]}])
+async def test_the_datasets_source_reports_session_costs_it_cannot_read(session_cost):
+    import respx
+
+    with respx.mock(assert_all_called=False) as router:
+        _datasets_mock(router, {"data": [GPQA], "meta": {}}, session_cost)
+        source = SOURCES["openrouter-datasets"](_bench_context(OR_KEY))
+        records = await source.fetch()
+
+    assert [r.metric for r in records] == ["gpqa_diamond"]
+    assert len(source.partial_errors) == 1
+
+
+async def test_the_datasets_source_reports_a_benchmark_list_with_nothing_it_can_use():
+    import respx
+
+    other = {"source": "artificial_analysis", "benchmark_type": "x", "model_permaslug": "a/b", "accuracy": 1}
+    with respx.mock(assert_all_called=False) as router:
+        _datasets_mock(router, {"data": [other], "meta": {}}, SESSION_COST)
+        source = SOURCES["openrouter-datasets"](_bench_context(OR_KEY))
+        records = await source.fetch()
+
+    assert [r.metric for r in records] == ["session_cost"]
+    assert len(source.partial_errors) == 1
+
+
 # -- Aliases edited while a refresh runs ------------------------------------------------------
 
 
@@ -530,22 +826,14 @@ async def test_a_rematch_cannot_hand_one_row_the_match_computed_for_another(data
     jobs.persist_scores("livebench", [mystery], refresh_matcher)
     _alias("livebench", "Mystery Model", "acme/m1")
 
-    async def load_catalog(force: bool = False) -> ModelsDevCatalog:
+    async def load_catalog_then_a_refresh_lands(force: bool = False) -> ModelsDevCatalog:
+        # The refresh replaces the source's rows after the rematch has started. Once the rematch is writing, a
+        # refresh waits for it (it holds the write lock from its first statement), so this is the latest it can land.
+        new = ScoreRecord(metric="coding", source_model="Brand New Model", value=2.0)
+        await asyncio.to_thread(jobs.persist_scores, "livebench", [new, mystery], refresh_matcher)
         return catalog
 
-    monkeypatch.setattr(jobs, "load_catalog", load_catalog)
-    real_match = Matcher.match
-    refreshed: list[int] = []
-
-    def match_then_a_refresh_lands(self, *args, **kwargs):
-        if not refreshed:
-            refreshed.append(1)
-            # The refresh replaces the source's rows after the rematch read them and before it writes.
-            new = ScoreRecord(metric="coding", source_model="Brand New Model", value=2.0)
-            jobs.persist_scores("livebench", [new, mystery], refresh_matcher)
-        return real_match(self, *args, **kwargs)
-
-    monkeypatch.setattr(Matcher, "match", match_then_a_refresh_lands)
+    monkeypatch.setattr(jobs, "load_catalog", load_catalog_then_a_refresh_lands)
     try:
         await jobs.rematch_scores()
         with session_scope() as s:

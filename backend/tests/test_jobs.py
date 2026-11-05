@@ -303,3 +303,169 @@ async def test_the_startup_refresh_goes_on_after_a_kind_raises(monkeypatch):
     await app_module._startup_work(AppSettings(), delay=0)
 
     assert ran == ["models", "balances", "benchmarks", "usage", "preset"]
+
+
+# ---- models.dev down, nothing cached --------------------------------------------------------------------------
+
+DOWN = "GET https://models.dev/api.json: ConnectError: no route"
+
+
+def _stored_enrichment(provider_id: int) -> dict[str, tuple]:
+    with session_scope() as s:
+        rows = s.scalars(select(Model).where(Model.provider_config_id == provider_id))
+        return {m.model_id: (m.canonical_id, m.creator, m.family, m.release_date, m.open_weights) for m in rows}
+
+
+class _CatalogueFreeAdapter:
+    """What an adapter that needs no catalogue (OpenRouter's) offers when the catalogue is empty: no enrichment."""
+
+    async def fetch_models(self) -> list[ModelOffer]:
+        return [ModelOffer(model_id="acme/m1", name="M1 renamed", price=Price(input=1.0, output=2.0))]
+
+
+def _seed_enriched_model(provider_id: int) -> None:
+    with session_scope() as s:
+        s.add(
+            Model(
+                provider_config_id=provider_id,
+                model_id="acme/m1",
+                name="M1",
+                canonical_id="acme/m1",
+                creator="acme",
+                family="m",
+                release_date="2026-01-01",
+                open_weights=True,
+                active=True,
+            )
+        )
+
+
+async def test_a_refresh_with_models_dev_down_keeps_the_enrichment_already_stored_and_says_so(monkeypatch):
+    provider_id = _provider("enriched, catalogue down")
+    _seed_enriched_model(provider_id)
+
+    async def down(force: bool = False) -> ModelsDevCatalog:
+        return ModelsDevCatalog({}, degraded=DOWN)
+
+    monkeypatch.setattr(jobs, "load_catalog", down)
+    monkeypatch.setattr(jobs, "build_adapter", lambda cfg, ctx: _CatalogueFreeAdapter())
+    monkeypatch.setattr(jobs, "_load_providers_and_settings", lambda: _enabled([provider_id]))
+
+    await jobs.run_job("models", "test", {provider_id})
+
+    assert _stored_enrichment(provider_id) == {"acme/m1": ("acme/m1", "acme", "m", "2026-01-01", True)}
+    with session_scope() as s:
+        # What the provider itself reports is still taken: only the catalogue's part is held.
+        assert s.scalars(select(Model).where(Model.provider_config_id == provider_id)).one().name == "M1 renamed"
+    run = _last_run("models")
+    assert run.status == "partial"
+    assert "models.dev is unavailable" in run.message and "no route" in run.message
+    assert run.stats["ok"] == 1 and run.stats["partial"] == 1
+
+
+async def test_a_refresh_with_a_working_catalogue_still_replaces_the_enrichment(monkeypatch):
+    provider_id = _provider("enriched, catalogue up")
+    _seed_enriched_model(provider_id)
+    monkeypatch.setattr(jobs, "build_adapter", lambda cfg, ctx: _CatalogueFreeAdapter())
+    monkeypatch.setattr(jobs, "_load_providers_and_settings", lambda: _enabled([provider_id]))
+
+    await jobs.run_job("models", "test", {provider_id})
+
+    assert _stored_enrichment(provider_id) == {"acme/m1": (None, None, None, None, None)}
+    assert _last_run("models").status == "ok"
+
+
+# ---- a provider saved while its kind is running --------------------------------------------------------------
+
+
+async def _start_held_run(monkeypatch, kind: str = "models") -> tuple[list, asyncio.Event, asyncio.Task]:
+    """A run of ``kind`` that holds its lock until the returned event is set; the list records each call."""
+    calls: list = []
+    release = asyncio.Event()
+
+    async def job(_run_id: int, provider_ids: set[int] | None = None) -> dict:
+        calls.append(provider_ids)
+        if len(calls) == 1:
+            await release.wait()
+        return {"ok": 1}
+
+    monkeypatch.setattr(jobs, f"_refresh_{kind}", job)
+    task = asyncio.create_task(jobs.run_job(kind, "schedule"))
+    await asyncio.sleep(0.05)
+    assert jobs.is_running(kind)
+    return calls, release, task
+
+
+async def test_a_provider_refresh_dropped_by_a_run_in_progress_runs_when_the_lock_frees(monkeypatch):
+    calls, release, held = await _start_held_run(monkeypatch)
+
+    await jobs.run_job("models", "provider", {1})
+    await jobs.run_job("models", "provider", {2, 3})
+    assert calls == [None]  # nothing runs beside the one in flight
+
+    release.set()
+    await held
+
+    # One follow-up for the union, not one per call, and it is recorded as a run of its own.
+    assert calls == [None, {1, 2, 3}]
+    assert not jobs.is_running("models")
+    assert _last_run("models").trigger == "provider"
+
+
+async def test_balances_keep_their_dropped_providers_too(monkeypatch):
+    calls, release, held = await _start_held_run(monkeypatch, "balances")
+
+    await jobs.run_job("balances", "provider", {7})
+    release.set()
+    await held
+
+    assert calls == [None, {7}]
+
+
+async def test_a_full_refresh_dropped_by_a_run_in_progress_is_still_not_queued(monkeypatch):
+    calls, release, held = await _start_held_run(monkeypatch)
+
+    await jobs.run_job("models", "manual")
+    await jobs.run_job("models", "schedule")
+    release.set()
+    await held
+
+    assert calls == [None]
+
+
+async def test_providers_dropped_during_the_follow_up_run_get_their_own(monkeypatch):
+    calls: list = []
+    release = asyncio.Event()
+
+    async def job(_run_id: int, provider_ids: set[int] | None = None) -> dict:
+        calls.append(provider_ids)
+        if provider_ids == {1}:
+            # A save lands while the follow-up for the first one is running.
+            await jobs.run_job("models", "provider", {2})
+        elif provider_ids is None:
+            await release.wait()
+        return {"ok": 1}
+
+    monkeypatch.setattr(jobs, "_refresh_models", job)
+    held = asyncio.create_task(jobs.run_job("models", "schedule"))
+    await asyncio.sleep(0.05)
+    await jobs.run_job("models", "provider", {1})
+    release.set()
+    await held
+
+    assert calls == [None, {1}, {2}]
+
+
+async def test_a_provider_refresh_with_nothing_running_is_not_held_back(monkeypatch):
+    calls: list = []
+
+    async def job(_run_id: int, provider_ids: set[int] | None = None) -> dict:
+        calls.append(provider_ids)
+        return {"ok": 1}
+
+    monkeypatch.setattr(jobs, "_refresh_models", job)
+
+    await jobs.run_job("models", "provider", {4})
+    await jobs.run_job("models", "provider", {5})
+
+    assert calls == [{4}, {5}]

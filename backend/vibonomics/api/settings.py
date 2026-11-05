@@ -11,6 +11,7 @@ from .. import crypto, events
 from ..benchmarks.registry import SOURCES
 from ..config import get_config
 from ..db import get_session
+from ..jobs import purge_unused_benchmark_rows
 from ..orm import BenchmarkScore
 from ..settings_store import AppSettings, BenchmarkSourceSettings, load_settings, save_settings
 from .auth import is_authenticated
@@ -168,6 +169,8 @@ def put_settings(body: SettingsIn, session: Session = Depends(get_session)) -> S
     # Committed here, not when the session closes: a listener that refetches on the event must read the new
     # settings, and the schedule must not change for a save that failed.
     session.commit()
+    # Before the event, so a listener's refetch no longer finds the rows of a source that was just turned off.
+    purge_unused_benchmark_rows(new)
     events.publish("settings.changed", {})
     from ..scheduler import reschedule
 

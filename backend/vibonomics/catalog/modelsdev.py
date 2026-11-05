@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import get_config
-from ..http import FetchError, cached_json
+from ..http import FetchError, cached_json, single_flight
 
 log = logging.getLogger(__name__)
 
@@ -156,10 +156,16 @@ async def load_catalog(force: bool = False) -> ModelsDevCatalog:
     asks for it only enriches (descriptions, canonical ids), and a provider test or a refresh of providers that
     don't depend on it should not fail because models.dev is down. It is retried after a minute, not on every call.
     """
+    if not force and _cache and time.monotonic() < _cache[0]:
+        return _cache[1]
+    # Callers that arrive while a load runs wait for it and share its catalogue, rather than each fetching and
+    # building its own index (the first details request after the copy expires used to wait out the whole fetch).
+    return await single_flight("models.dev", _load)
+
+
+async def _load() -> ModelsDevCatalog:
     global _cache
     now = time.monotonic()
-    if not force and _cache and now < _cache[0]:
-        return _cache[1]
     try:
         data = await cached_json(URL, get_config().cache_dir / "models.dev.json", timeout=120, validate=_is_catalog)
     except FetchError as exc:

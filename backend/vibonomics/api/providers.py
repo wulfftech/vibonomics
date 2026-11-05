@@ -16,7 +16,7 @@ from .. import crypto, events
 from ..catalog.modelsdev import load_catalog
 from ..db import get_session, session_scope
 from ..http import FetchError, public_url
-from ..jobs import run_job, spawn
+from ..jobs import is_running, run_job, spawn
 from ..orm import Balance, ProviderConfig
 from ..provider_service import env_locked, resolve, resolve_draft
 from ..providers.base import FetchContext, ResolvedProvider
@@ -252,7 +252,7 @@ def create_provider(body: ProviderIn, session: Session = Depends(get_session)) -
         extra_key_enc=_apply_secret(None, body.extra_key),
     )
     session.add(p)
-    session.flush()
+    session.commit()  # before the event: a client that refetches on it must find the provider
     events.publish("providers.changed", {"id": p.id})
     return _provider_out(p, session)
 
@@ -273,7 +273,7 @@ def update_provider(provider_id: int, body: ProviderUpdate, session: Session = D
     p.api_key_enc = _apply_secret(p.api_key_enc, body.api_key)
     p.mgmt_key_enc = _apply_secret(p.mgmt_key_enc, body.mgmt_key)
     p.extra_key_enc = _apply_secret(p.extra_key_enc, body.extra_key)
-    session.flush()
+    session.commit()
     events.publish("providers.changed", {"id": p.id})
     return _provider_out(p, session)
 
@@ -284,6 +284,7 @@ def delete_provider(provider_id: int, session: Session = Depends(get_session)) -
     if p is None:
         raise HTTPException(404, "Provider not found")
     session.delete(p)
+    session.commit()
     events.publish("providers.changed", {"id": provider_id})
 
 
@@ -388,16 +389,15 @@ async def _run_test(resolved: ResolvedProvider, settings: Any) -> TestResult:
 async def refresh_providers(body: ProviderRefreshIn, session: Session = Depends(get_session)) -> dict[str, str]:
     """Refresh the given providers' models and balances, leaving the others alone.
 
-    One request for the whole set: the refresh jobs are serialised per kind, so two concurrent
-    single-provider calls would silently drop the second.
+    One request for the whole set keeps it one run. A run already in progress does not drop the call: the
+    providers wait for it and are refreshed together afterwards, and the answer says ``queued``.
     """
     ids = set(body.provider_ids)
     known = set(session.scalars(select(ProviderConfig.id).where(ProviderConfig.id.in_(ids))).all())
     missing = sorted(ids - known)
     if missing:
         raise HTTPException(status_code=404, detail=f"Provider not found: {missing[0]}")
-    spawn(_refresh_providers(ids))
-    return {"status": "started"}
+    return _spawn_refresh(ids)
 
 
 @router.post("/{provider_id}/refresh", status_code=202)
@@ -405,8 +405,14 @@ async def refresh_provider(provider_id: int, session: Session = Depends(get_sess
     """Refresh one provider's models and balance, leaving the other providers alone."""
     if session.get(ProviderConfig, provider_id) is None:
         raise HTTPException(status_code=404, detail="Provider not found")
-    spawn(_refresh_providers({provider_id}))
-    return {"status": "started"}
+    return _spawn_refresh({provider_id})
+
+
+def _spawn_refresh(provider_ids: set[int]) -> dict[str, str]:
+    """Start the refresh and say whether it is running now or waits for the run already in progress."""
+    queued = is_running("models") or is_running("balances")
+    spawn(_refresh_providers(provider_ids))
+    return {"status": "queued" if queued else "started"}
 
 
 async def _refresh_providers(provider_ids: set[int]) -> None:

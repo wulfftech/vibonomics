@@ -128,6 +128,11 @@ def parse_benchmarks(data: Any, slugs: dict[str, str]) -> list[ScoreRecord]:
                 },
             )
         )
+    if not records and data["data"]:
+        # The endpoint also lists other sources' items, so rows with none of ours means the layout changed.
+        raise FetchError(
+            f"{BENCHMARKS_URL}: no OpenRouter-run benchmarks in {len(data['data'])} items (schema change?)"
+        )
     return records
 
 
@@ -135,12 +140,14 @@ def parse_session_costs(pages: list[Any], slugs: dict[str, str]) -> list[ScoreRe
     """Median session cost per model: the median across harnesses of each harness's median."""
     cells: dict[str, list[tuple[str, float]]] = {}
     as_of = None
+    rows = 0
     for data in pages:
-        if not isinstance(data, dict):
-            continue
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            raise FetchError(f"{SESSION_COST_URL}: unexpected response")
         meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
         as_of = as_of or meta.get("window_end_date") or str(meta.get("as_of") or "")[:10] or None
-        for cell in data.get("data") or []:
+        rows += len(data["data"])
+        for cell in data["data"]:
             if not isinstance(cell, dict) or cell.get("turn_range") not in (None, SESSION_TURNS):
                 continue
             slug = cell.get("model_permaslug")
@@ -166,6 +173,8 @@ def parse_session_costs(pages: list[Any], slugs: dict[str, str]) -> list[ScoreRe
                 },
             )
         )
+    if not records and rows:
+        raise FetchError(f"{SESSION_COST_URL}: no usable session costs in {rows} rows (schema change?)")
     return records
 
 

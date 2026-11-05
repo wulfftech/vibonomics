@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -83,6 +84,26 @@ async def test_a_bad_answer_with_no_copy_to_fall_back_on_is_not_cached(tmp_path)
 
     assert catalog.degraded is not None
     assert not _cache_file(tmp_path).exists()
+
+
+@respx.mock
+async def test_loads_that_overlap_share_one_fetch_and_one_catalogue():
+    release = asyncio.Event()
+
+    async def held(_request: httpx.Request) -> httpx.Response:
+        await release.wait()
+        return httpx.Response(200, json=GOOD)
+
+    route = respx.get(modelsdev.URL).mock(side_effect=held)
+    callers = [asyncio.create_task(modelsdev.load_catalog()) for _ in range(4)]
+    await asyncio.wait(callers, timeout=0.05)  # asyncio.sleep is stubbed out here, so it cannot yield
+
+    release.set()
+    catalogues = await asyncio.gather(*callers)
+
+    assert route.call_count == 1
+    assert all(c is catalogues[0] for c in catalogues)
+    assert catalogues[0].degraded is None
 
 
 @respx.mock

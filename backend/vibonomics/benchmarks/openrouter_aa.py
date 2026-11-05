@@ -8,8 +8,9 @@ connector.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
-from ..http import get_json
+from ..http import FetchError, get_json
 from .base import BenchmarkSource, MetricSpec, ScoreRecord, SourceSpec
 
 AA_TERMS = (
@@ -22,8 +23,26 @@ _URL = "https://openrouter.ai/api/v1/models"
 
 
 async def _models() -> list[dict]:
+    """OpenRouter's model list. Anything else (an error body) raises: an empty source would delete the stored rows."""
     data = await get_json(_URL, timeout=60)
-    return data.get("data", []) if isinstance(data, dict) else []
+    models = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(models, list) or not models:
+        raise FetchError(f"{_URL}: unexpected response")
+    return [m for m in models if isinstance(m, dict)]
+
+
+def _block(model: dict, name: str) -> Any:
+    benchmarks = model.get("benchmarks")
+    return benchmarks.get(name) if isinstance(benchmarks, dict) else None
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class OpenRouterAASource(BenchmarkSource):
@@ -47,24 +66,28 @@ class OpenRouterAASource(BenchmarkSource):
     async def fetch(self) -> list[ScoreRecord]:
         today = datetime.now(UTC).date().isoformat()
         records: list[ScoreRecord] = []
-        for m in await _models():
-            aa = (m.get("benchmarks") or {}).get("artificial_analysis") or {}
-            mid = m.get("id") or ""
+        models = await _models()
+        for m in models:
+            aa = _block(m, "artificial_analysis")
+            aa = aa if isinstance(aa, dict) else {}
+            mid = str(m.get("id") or "")
             base_id = mid.split(":")[0]
             for metric in ("intelligence_index", "coding_index", "agentic_index"):
-                value = aa.get(metric)
+                value = _number(aa.get(metric))
                 if value is None:
                     continue
                 records.append(
                     ScoreRecord(
                         metric=metric,
                         source_model=base_id,
-                        value=float(value),
+                        value=value,
                         model_ids=[base_id, m.get("canonical_slug") or ""],
                         as_of=today,
                         url="https://artificialanalysis.ai/models",
                     )
                 )
+        if not records:
+            raise FetchError(f"{_URL}: no Artificial Analysis indices in {len(models)} models (schema change?)")
         # :free and paid variants carry the same numbers; keep one row per model.
         unique = {(r.metric, r.source_model): r for r in records}
         return list(unique.values())
@@ -89,20 +112,27 @@ class OpenRouterDesignArenaSource(BenchmarkSource):
     async def fetch(self) -> list[ScoreRecord]:
         today = datetime.now(UTC).date().isoformat()
         records: dict[tuple[str, str], ScoreRecord] = {}
-        for m in await _models():
-            base_id = (m.get("id") or "").split(":")[0]
-            for entry in (m.get("benchmarks") or {}).get("design_arena") or []:
+        models = await _models()
+        for m in models:
+            base_id = str(m.get("id") or "").split(":")[0]
+            entries = _block(m, "design_arena")
+            for entry in entries if isinstance(entries, list) else []:
+                if not isinstance(entry, dict):
+                    continue
                 category = entry.get("category")
                 metric = {"website": "website_elo", "gamedev": "gamedev_elo"}.get(category or "")
-                if not metric or entry.get("elo") is None:
+                elo = _number(entry.get("elo"))
+                if not metric or elo is None:
                     continue
                 records[(metric, base_id)] = ScoreRecord(
                     metric=metric,
                     source_model=base_id,
-                    value=float(entry["elo"]),
+                    value=elo,
                     model_ids=[base_id],
                     as_of=today,
                     url="https://www.designarena.ai/leaderboard",
                     extra={"rank": entry.get("rank"), "win_rate": entry.get("win_rate")},
                 )
+        if not records:
+            raise FetchError(f"{_URL}: no Design Arena ratings in {len(models)} models (schema change?)")
         return list(records.values())

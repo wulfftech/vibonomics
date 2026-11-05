@@ -7,10 +7,11 @@ import logging
 import math
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, bindparam, delete, func, select, update
+from sqlalchemy import and_, bindparam, delete, false, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -18,8 +19,9 @@ from . import events, usage
 from .benchmarks.base import BenchContext, ScoreRecord
 from .benchmarks.matching import Matcher
 from .benchmarks.registry import SOURCES
-from .catalog.modelsdev import load_catalog
+from .catalog.modelsdev import ModelsDevCatalog, load_catalog
 from .db import session_scope
+from .http import FetchError
 from .orm import Balance, BenchmarkScore, Model, ModelAlias, PriceHistory, ProviderConfig, RefreshRun
 from .provider_service import build_adapter, resolve
 from .providers.base import BalanceInfo, FetchContext, ModelOffer
@@ -34,6 +36,8 @@ BALANCE_TIMEOUT = 60
 RUN_RETENTION_DAYS = 90
 _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 KINDS = ("models", "balances", "benchmarks", "usage")
+_PROVIDER_KINDS = ("models", "balances")
+_dropped: dict[str, set[int]] = defaultdict(set)
 
 
 def now() -> datetime:
@@ -72,7 +76,22 @@ def is_running(kind: str) -> bool:
 
 
 async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | None = None) -> None:
-    """Run one refresh kind. ``provider_ids`` narrows models/balances to those providers."""
+    """Run one refresh kind. ``provider_ids`` narrows models/balances to those providers.
+
+    A call that finds its kind already running is dropped, not queued, except a provider-scoped one: the run in
+    flight read the provider list before the save that asked for it, so those ids are kept and run once, together,
+    when the lock frees.
+    """
+    if _locks[kind].locked():
+        if provider_ids and kind in _PROVIDER_KINDS:
+            _dropped[kind] |= provider_ids
+        return
+    await _run_locked(kind, trigger, provider_ids)
+    while pending := _dropped.pop(kind, None):
+        await _run_locked(kind, "provider", pending)
+
+
+async def _run_locked(kind: str, trigger: str, provider_ids: set[int] | None) -> None:
     jobs: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
         "models": _refresh_models,
         "balances": _refresh_balances,
@@ -80,10 +99,7 @@ async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | N
         "usage": _refresh_usage,
     }
     job = jobs[kind]
-    lock = _locks[kind]
-    if lock.locked():
-        return
-    async with lock:
+    async with _locks[kind]:
         run_id: int | None = None
         status, message, stats = "ok", None, {}
         try:
@@ -187,6 +203,14 @@ async def _refresh_models(run_id: int, provider_ids: set[int] | None = None) -> 
     catalog = await load_catalog(force=True)
     ctx = FetchContext(catalog=catalog, settings=settings)
     stats: dict[str, Any] = {"ok": 0, "failed": 0, "errors": [], "models": 0}
+    degraded = bool(catalog.degraded)
+    if degraded:
+        # Providers that need no catalogue still refresh, but their offers carry none of its data.
+        stats["partial"] = 1
+        stats["errors"].append(
+            f"models.dev is unavailable ({str(catalog.degraded)[:200]}): the canonical ids, families and release "
+            "dates already stored were kept"
+        )
 
     async def one(cfg: ProviderConfig) -> None:
         adapter = build_adapter(cfg, ctx)
@@ -196,7 +220,7 @@ async def _refresh_models(run_id: int, provider_ids: set[int] | None = None) -> 
         try:
             offers = await asyncio.wait_for(adapter.fetch_models(), PROVIDER_TIMEOUT)
             # Inside the try: a provider deleted mid-refresh fails here, and must not take the others down.
-            count = await asyncio.to_thread(persist_offers, cfg.id, offers)
+            count = await asyncio.to_thread(persist_offers, cfg.id, offers, keep_catalogue_fields=degraded)
         except Exception as exc:
             text = failure_text(exc, PROVIDER_TIMEOUT)
             msg = text if text.startswith(("GET", "POST")) else f"{type(exc).__name__}: {text}"
@@ -250,8 +274,25 @@ def _extra_keeping_endpoints(stored: dict[str, Any] | None, offer: ModelOffer) -
     return {**offer.extra, "endpoints": known}
 
 
-def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
-    """Upsert offers for one provider and record price/discount changes."""
+_CATALOGUE_COLUMNS = ("canonical_id", "creator", "family", "release_date", "open_weights")
+
+
+def _with_stored_catalogue_fields(offer: ModelOffer, row: Model) -> ModelOffer:
+    """``offer`` with the columns models.dev supplies taken from ``row`` wherever it has a value.
+
+    Built while models.dev is down, an offer holds no canonical id, family or open-weights flag and only fallbacks
+    for the creator and the release date. Storing it would blank what the last good refresh found.
+    """
+    kept = {name: getattr(row, name) for name in _CATALOGUE_COLUMNS if getattr(row, name) is not None}
+    return replace(offer, **kept)
+
+
+def persist_offers(provider_id: int, offers: list[ModelOffer], *, keep_catalogue_fields: bool = False) -> int:
+    """Upsert offers for one provider and record price/discount changes.
+
+    ``keep_catalogue_fields`` is for a refresh made without the models.dev catalogue: the stored canonical id,
+    creator, family, release date and open-weights flag are kept instead of being replaced by the offer's empty ones.
+    """
     ts = now()
     with session_scope() as s:
         existing = {m.model_id: m for m in s.scalars(select(Model).where(Model.provider_config_id == provider_id))}
@@ -262,6 +303,8 @@ def persist_offers(provider_id: int, offers: list[ModelOffer]) -> int:
                 continue
             seen.add(offer.model_id)
             row = existing.get(offer.model_id)
+            if row is not None and keep_catalogue_fields:
+                offer = _with_stored_catalogue_fields(offer, row)
             if row is None:
                 row = Model(
                     provider_config_id=provider_id,
@@ -395,9 +438,33 @@ def _persist_balance(provider_id: int, info: BalanceInfo) -> None:
 # -- benchmarks ------------------------------------------------------------------------------
 
 
+def purge_unused_benchmark_rows(settings: AppSettings) -> int:
+    """Delete the stored scores of every source that is off, or that needs terms the operator has not acknowledged.
+
+    Nothing refreshes such a source again, so its rows would otherwise stay for good. A failure is logged, not raised:
+    the routes already hide those rows, and the next refresh tries again.
+    """
+    unused = [sid for sid, cls in SOURCES.items() if not source_in_use(settings, sid, cls.spec)]
+    if not unused:
+        return 0
+    try:
+        with session_scope() as s:
+            return s.execute(delete(BenchmarkScore).where(BenchmarkScore.source.in_(unused))).rowcount or 0
+    except SQLAlchemyError as exc:
+        log.warning("Could not delete the scores of sources that are off: %s", failure_text(exc))
+        return 0
+
+
 async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
     _providers, settings = await asyncio.to_thread(_load_providers_and_settings)
+    # A source turned off while a refresh was storing it leaves rows behind that nothing else would remove.
+    await asyncio.to_thread(purge_unused_benchmark_rows, settings)
     catalog = await load_catalog()
+    if catalog.degraded:
+        # Against an empty catalogue every score would match nothing, and storing them would replace the
+        # matched rows with unmatched ones.
+        message = f"{_no_catalogue(catalog)}, so the benchmark scores cannot be matched; the stored ones were kept"
+        return {"ok": 0, "failed": 1, "partial": 0, "errors": [message], "records": 0, "matched": 0}
     # The aliases are read again when each source is stored: a refresh can run for minutes, and an alias set
     # meanwhile must not be overwritten by a matcher built before it existed.
     matcher = Matcher(catalog, await asyncio.to_thread(_load_operator_aliases))
@@ -484,6 +551,10 @@ async def _refresh_usage(run_id: int) -> dict[str, Any]:
     results = await asyncio.gather(*(one(p) for p in targets), return_exceptions=True)
     _record_crashes(results, [p.name for p in targets], stats)
     return stats
+
+
+def _no_catalogue(catalog: ModelsDevCatalog) -> str:
+    return f"models.dev is unavailable and there is no earlier copy ({str(catalog.degraded)[:200]})"
 
 
 def _load_operator_aliases() -> dict[tuple[str, str], str | None]:
@@ -580,8 +651,9 @@ async def rematch_scores() -> int:
     between the read and the write, and SQLite reuses ids, so an update by id could land on another row.
     """
     catalog = await load_catalog()
-    operator_aliases = await asyncio.to_thread(_load_operator_aliases)
-    matcher = Matcher(catalog, operator_aliases)
+    if catalog.degraded:
+        raise FetchError(f"{_no_catalogue(catalog)}, so the stored scores cannot be rematched")
+    matcher = Matcher(catalog)
     table = BenchmarkScore.__table__
     statement = (
         update(table)
@@ -599,6 +671,13 @@ async def rematch_scores() -> int:
     def _apply() -> int:
         matched = 0
         with session_scope() as s:
+            # Takes the write lock before the aliases are read, as persist_scores does with its delete: an alias
+            # saved after this waits and is applied by its own rematch. Read earlier, two quick saves could commit
+            # out of order and the older rematch would revert the newer mapping.
+            s.execute(update(table).where(false()).values(canonical_id=table.c.canonical_id))
+            matcher.operator_aliases = {
+                (a.source, a.source_model): a.canonical_id for a in s.scalars(select(ModelAlias))
+            }
             stored = s.execute(
                 select(table.c.source, table.c.metric, table.c.source_model, table.c.effort, table.c.extra)
             ).all()

@@ -298,6 +298,7 @@ async def cancel_run(run_id: int, session: Session = Depends(get_session)) -> Ev
         runner.cancel(run_id)
         run.status = "cancelled"
         run.finished_at = datetime.now(UTC)
+        session.commit()
         events.publish("evals.finished", {"run_id": run_id, "status": "cancelled"})
     return _run_out(run)
 
@@ -310,4 +311,5 @@ def delete_run(run_id: int, session: Session = Depends(get_session)) -> None:
     if run.status in ("queued", "running"):
         raise HTTPException(409, "Cancel the run first")
     session.delete(run)
+    session.commit()
     events.publish("evals.finished", {"run_id": run_id, "status": "deleted"})

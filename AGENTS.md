@@ -75,7 +75,9 @@ docker compose logs -f vibonomics
   Artificial Analysis data stays opt-in (`terms_warning`), uses the operator's key, and must not be
   shipped or committed.
 - **Matching** (`benchmarks/matching.py`): canonical ids are models.dev `canonical_model_id`s. Add
-  curated aliases in `benchmarks/aliases.yaml`; operators can override them in the UI.
+  curated aliases in `benchmarks/aliases.yaml`; operators can override them in the UI. An alias to an id the
+  catalogue does not list is refused when saved and ignored (logged once) if the catalogue loses the id later.
+  With no catalogue (`degraded`), the benchmark refresh and a rematch change nothing.
 - **Evals** (`backend/vibonomics/evals/`): tasks are declarative `TaskDef`s. Every agentic task needs a
   reference solution that passes its visible and hidden tests (`tests/evals/test_suites.py` proves it)
   and a judge rubric. Model-written code only runs through `sandbox_client`, never `subprocess` in the
@@ -101,14 +103,17 @@ docker compose logs -f vibonomics
   and the one read-only POST, so a new route that changes something is refused until someone lists it in
   `api/auth.py`; a GET that returns a secret must withhold it from a visitor (`is_authenticated`). Keep
   `tests/test_open_read.py` passing: it walks every route. `POST /api/models/value` is for programs, not the UI;
-  keep its contract stable too.
+  keep its contract stable too. A route that publishes an SSE event calls `session.commit()` first
+  (`get_session` commits only after the handler returns), or a client that refetches on the event reads the old state.
 - **Price maths** lives twice: `frontend/src/lib/pricing.ts` for the Models page and
   `backend/vibonomics/pricing.py` for `POST /api/models/value`. Change a formula in both, and keep
   `tests/test_value.py` checking the cases `pricing.test.ts` checks.
 - **Refresh** (`jobs.py`, `api/refresh.py`, `api/providers.py`): `run_job(kind, trigger, provider_ids)`
-  serialises each kind behind a lock and **returns immediately if the lock is held** — it does not queue.
-  So never fire one request per provider for a set: send them together (`POST /api/providers/refresh`
-  with `provider_ids`), or the second call is silently dropped. A single-provider run tags its
+  serialises each kind behind a lock and **returns immediately if the lock is held** — a whole-kind refresh
+  does not queue. A provider-scoped call is the exception: its ids are kept and run together, once, when the
+  lock frees (the run in flight read the provider list before the save). Still send a set together
+  (`POST /api/providers/refresh` with `provider_ids`), which answers `queued` rather than `started` when it
+  has to wait. A single-provider run tags its
   `refresh.finished` event with `provider` so the UI can stay quiet; a whole-kind run does not.
 - **Database**: SQLAlchemy models in `orm.py`. After a change, run
   `python -m vibonomics.migrations revision "..."` from `backend/`. Migrations run at startup.

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Hashable
 from pathlib import Path
 from typing import Any
 
@@ -186,6 +186,32 @@ def _read_cache(cache_file: Path, validate: Callable[[Any], bool] | None) -> Any
     return data if validate is None or validate(data) else None
 
 
+_flights: dict[Hashable, asyncio.Future[Any]] = {}
+
+
+async def single_flight[T](key: Hashable, start: Callable[[], Awaitable[T]]) -> T:
+    """The result of one ``start()`` shared by every caller that arrives with the same ``key`` while it runs.
+
+    A caller gets the result, or the error, of the shared run; the next one after it has finished starts a new
+    run. The work is a task of its own, so a caller that is cancelled (a client that hung up) does not cancel it
+    for the others.
+    """
+    loop = asyncio.get_running_loop()
+    flight = _flights.get(key)
+    if flight is None or flight.done() or flight.get_loop() is not loop:
+        flight = asyncio.ensure_future(start())
+        _flights[key] = flight
+
+        def finished(done: asyncio.Future[Any], key: Hashable = key) -> None:
+            if _flights.get(key) is done:
+                del _flights[key]
+            if not done.cancelled():
+                done.exception()  # marks it read, so a run that nobody was left waiting for does not log
+
+        flight.add_done_callback(finished)
+    return await asyncio.shield(flight)
+
+
 async def cached_json(
     url: str,
     cache_file: Path,
@@ -198,7 +224,21 @@ async def cached_json(
 
     ``validate`` says whether an answer has the shape the caller expects. A 200 that fails it counts as a failed
     fetch: it is neither returned nor written over the good copy, which would then hold an error body.
+
+    Callers that arrive while a fetch of the same entry is running share it instead of each making the request.
     """
+    return await single_flight(
+        ("cached_json", url, str(cache_file)), lambda: _fetch_cached_json(url, cache_file, headers, timeout, validate)
+    )
+
+
+async def _fetch_cached_json(
+    url: str,
+    cache_file: Path,
+    headers: dict[str, str] | None,
+    timeout: float,
+    validate: Callable[[Any], bool] | None,
+) -> Any:
     try:
         data = await get_json(url, headers=headers, timeout=timeout)
         if validate is not None and not validate(data):
