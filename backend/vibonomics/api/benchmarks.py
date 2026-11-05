@@ -8,10 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import events
+from ..benchmarks.registry import SOURCES
 from ..catalog.modelsdev import load_catalog
 from ..db import get_session, session_scope
 from ..jobs import rematch_scores
 from ..orm import BenchmarkScore, ModelAlias
+from ..scoring import source_in_use
+from ..settings_store import load_settings
 
 router = APIRouter(prefix="/api/benchmarks", tags=["benchmarks"])
 
@@ -39,7 +42,11 @@ class CanonicalOut(BaseModel):
 def score_rows(
     source: str | None = None, unmatched_only: bool = False, session: Session = Depends(get_session)
 ) -> list[ScoreRowOut]:
-    q = select(BenchmarkScore)
+    # Open to visitors, and the terms of some sources (Artificial Analysis) forbid serving their numbers to
+    # anyone who has not opted in, so a source that is off serves nothing.
+    settings = load_settings(session)
+    in_use = [sid for sid, cls in SOURCES.items() if source_in_use(settings, sid, cls.spec)]
+    q = select(BenchmarkScore).where(BenchmarkScore.source.in_(in_use))
     if source:
         q = q.where(BenchmarkScore.source == source)
     if unmatched_only:

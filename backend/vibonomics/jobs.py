@@ -425,8 +425,22 @@ def _persist_balance(provider_id: int, info: BalanceInfo) -> None:
 # -- benchmarks ------------------------------------------------------------------------------
 
 
+def purge_unused_benchmark_rows(settings: AppSettings) -> int:
+    """Delete the stored scores of every source that is off, or that needs terms the operator has not acknowledged.
+
+    Nothing refreshes such a source again, so its rows would otherwise stay for good.
+    """
+    unused = [sid for sid, cls in SOURCES.items() if not source_in_use(settings, sid, cls.spec)]
+    if not unused:
+        return 0
+    with session_scope() as s:
+        return s.execute(delete(BenchmarkScore).where(BenchmarkScore.source.in_(unused))).rowcount or 0
+
+
 async def _refresh_benchmarks(run_id: int) -> dict[str, Any]:
     _providers, settings = await asyncio.to_thread(_load_providers_and_settings)
+    # A source turned off while a refresh was storing it leaves rows behind that nothing else would remove.
+    await asyncio.to_thread(purge_unused_benchmark_rows, settings)
     catalog = await load_catalog()
     if catalog.degraded:
         # Against an empty catalogue every score would match nothing, and storing them would replace the
