@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from .benchmarks.base import SourceSpec
 from .benchmarks.registry import SOURCES
-from .orm import BenchmarkScore, EvalResult, EvalRun
+from .orm import BenchmarkScore, EvalResult, EvalRun, Model
 from .settings_store import AppSettings
 
 DIMENSIONS = ("intelligence", "coding", "agentic")
@@ -86,12 +86,17 @@ def _wmean(pairs: list[tuple[float, float]]) -> float | None:
 
 
 def own_test_scores(session: Session) -> dict[tuple[int, str], dict[str, Any]]:
-    """Average Vibonomics test score per (provider_config_id, model_id), from graded results of finished runs."""
+    """Average Vibonomics test score per (provider_config_id, model_id), from graded results of finished runs.
+
+    The canonical id is the model's current one, not the one saved with a result: that is whatever the model matched
+    when it was tested, and a model tested while unmatched and matched since would lose its own test from every score.
+    A model that is gone has none, and its results score under its own key.
+    """
     rows = session.execute(
         select(
             EvalResult.provider_config_id,
             EvalResult.model_id,
-            EvalResult.canonical_id,
+            Model.canonical_id,
             func.avg(EvalResult.score),
             func.count(EvalResult.id),
             func.max(EvalResult.created_at),
@@ -100,6 +105,9 @@ def own_test_scores(session: Session) -> dict[tuple[int, str], dict[str, Any]]:
             func.count(func.distinct(EvalResult.run_id)),
         )
         .join(EvalRun, EvalRun.id == EvalResult.run_id)
+        .outerjoin(
+            Model, (Model.provider_config_id == EvalResult.provider_config_id) & (Model.model_id == EvalResult.model_id)
+        )
         .where(EvalRun.status == "done", EvalResult.status.in_(GRADED_STATUSES))
         .group_by(EvalResult.provider_config_id, EvalResult.model_id)
     ).all()
