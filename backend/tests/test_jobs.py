@@ -172,3 +172,94 @@ def test_runs_left_running_by_a_restart_are_marked_failed():
         assert (stale_run.status, stale_run.message) == ("failed", "Interrupted by a Vibonomics restart.")
         assert stale_run.finished_at is not None
         assert done_run.status == "ok"
+
+
+# ---- the run's own bookkeeping must not be able to strand the job ---------------------------------------------
+
+
+def _locked(*_args, **_kwargs):
+    from sqlalchemy.exc import OperationalError
+
+    raise OperationalError("UPDATE refresh_runs", {}, Exception("database is locked"))
+
+
+@pytest.fixture
+def published(monkeypatch) -> list[tuple[str, dict]]:
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(events, "publish", lambda name, data=None: seen.append((name, data or {})))
+    return seen
+
+
+async def test_a_run_that_cannot_be_recorded_still_ends_with_a_finished_event_and_frees_the_lock(
+    monkeypatch, published
+):
+    ran: list[str] = []
+
+    async def usage(_run_id: int) -> dict:
+        ran.append("usage")
+        return {}
+
+    monkeypatch.setattr(jobs, "_refresh_usage", usage)
+    monkeypatch.setattr(jobs, "_start_run", _locked)
+
+    await jobs.run_job("usage", "test")  # must not raise
+
+    assert ran == []
+    assert [name for name, _ in published] == ["refresh.finished"]
+    data = published[0][1]
+    assert (data["kind"], data["status"]) == ("usage", "failed")
+    assert "database is locked" in data["message"]
+    assert not jobs.is_running("usage")
+
+
+async def test_a_run_that_cannot_be_closed_still_ends_with_a_finished_event_and_frees_the_lock(monkeypatch, published):
+    async def usage(_run_id: int) -> dict:
+        return {}
+
+    monkeypatch.setattr(jobs, "_refresh_usage", usage)
+    monkeypatch.setattr(jobs, "_finish_run", _locked)
+
+    await jobs.run_job("usage", "test")  # must not raise
+
+    assert [name for name, _ in published] == ["refresh.started", "refresh.finished"]
+    assert published[1][1]["status"] == "ok"
+    assert not jobs.is_running("usage")
+
+
+async def test_the_sequence_of_a_manual_refresh_goes_on_after_a_kind_raises(monkeypatch):
+    from vibonomics.api import refresh as refresh_api
+
+    ran: list[str] = []
+
+    async def run_job(kind: str, trigger: str = "manual", provider_ids=None) -> None:
+        ran.append(kind)
+        if kind == "models":
+            raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(refresh_api, "run_job", run_job)
+
+    await refresh_api._run_sequence(["models", "balances", "benchmarks", "usage"])
+
+    assert ran == ["models", "balances", "benchmarks", "usage"]
+
+
+async def test_the_startup_refresh_goes_on_after_a_kind_raises(monkeypatch):
+    from vibonomics import app as app_module
+    from vibonomics.settings_store import AppSettings
+
+    ran: list[str] = []
+
+    async def run_job(kind: str, trigger: str = "manual", provider_ids=None) -> None:
+        ran.append(kind)
+        if kind == "models":
+            raise RuntimeError("database is locked")
+
+    async def catch_up(_settings) -> None:
+        ran.append("preset")
+
+    monkeypatch.setattr(app_module, "run_job", run_job)
+    monkeypatch.setattr(app_module.scheduler, "catch_up_preset", catch_up)
+
+    await app_module._startup_work(AppSettings(), delay=0)
+
+    assert ran == ["models", "balances", "benchmarks", "usage", "preset"]

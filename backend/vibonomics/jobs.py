@@ -81,37 +81,47 @@ async def run_job(kind: str, trigger: str = "manual", provider_ids: set[int] | N
     if lock.locked():
         return
     async with lock:
-        run_id = await asyncio.to_thread(_start_run, kind, trigger)
-        events.publish("refresh.started", {"kind": kind, "run_id": run_id})
+        run_id: int | None = None
         status, message, stats = "ok", None, {}
         try:
-            if provider_ids is not None and kind in ("models", "balances"):
-                stats = await job(run_id, provider_ids)
-            else:
-                stats = await job(run_id)
-            failed = stats.get("failed", 0)
-            if failed:
-                status = "partial" if stats.get("ok", 0) else "failed"
-                message = "; ".join(stats.get("errors", []))[:2000]
-            elif stats.get("partial", 0):
-                # Every source answered, but at least one left part of its data out.
-                status = "partial"
-                message = "; ".join(stats.get("errors", []))[:2000]
-        except Exception as exc:  # the scheduler must survive any single failure
-            log.exception("Refresh %s failed", kind)
-            status, message = "failed", f"{type(exc).__name__}: {failure_text(exc)}"
-        await asyncio.to_thread(_finish_run, run_id, status, message, stats)
-        events.publish(
-            "refresh.finished",
-            {
-                "kind": kind,
-                "run_id": run_id,
-                "status": status,
-                "message": message,
-                # Present only for a single-provider refresh, so the UI can stay quiet about it.
-                **({"provider": next(iter(provider_ids))} if provider_ids and len(provider_ids) == 1 else {}),
-            },
-        )
+            try:
+                # Inside the try: a database error here used to escape and abort the caller's remaining kinds.
+                run_id = await asyncio.to_thread(_start_run, kind, trigger)
+                events.publish("refresh.started", {"kind": kind, "run_id": run_id})
+                if provider_ids is not None and kind in ("models", "balances"):
+                    stats = await job(run_id, provider_ids)
+                else:
+                    stats = await job(run_id)
+                failed = stats.get("failed", 0)
+                if failed:
+                    status = "partial" if stats.get("ok", 0) else "failed"
+                    message = "; ".join(stats.get("errors", []))[:2000]
+                elif stats.get("partial", 0):
+                    # Every source answered, but at least one left part of its data out.
+                    status = "partial"
+                    message = "; ".join(stats.get("errors", []))[:2000]
+            except Exception as exc:  # the scheduler must survive any single failure
+                log.exception("Refresh %s failed", kind)
+                status, message = "failed", f"{type(exc).__name__}: {failure_text(exc)}"
+            if run_id is not None:
+                try:
+                    await asyncio.to_thread(_finish_run, run_id, status, message, stats)
+                except Exception:
+                    # The row stays "running" until the next start marks it failed.
+                    log.exception("Could not record the end of refresh run %s (%s)", run_id, kind)
+        finally:
+            # The UI's spinner for this kind stops on this event, so it goes out whatever happened above.
+            events.publish(
+                "refresh.finished",
+                {
+                    "kind": kind,
+                    "run_id": run_id,
+                    "status": status,
+                    "message": message,
+                    # Present only for a single-provider refresh, so the UI can stay quiet about it.
+                    **({"provider": next(iter(provider_ids))} if provider_ids and len(provider_ids) == 1 else {}),
+                },
+            )
 
 
 def _start_run(kind: str, trigger: str) -> int:

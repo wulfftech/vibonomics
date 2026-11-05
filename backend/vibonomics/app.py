@@ -43,7 +43,10 @@ async def _startup_work(settings: AppSettings, delay: float = 2) -> None:
     await asyncio.sleep(delay)
     if settings.refresh.refresh_on_startup:
         for kind in KINDS:
-            await run_job(kind, "startup")
+            try:
+                await run_job(kind, "startup")
+            except Exception:  # one kind failing must not drop the rest
+                log.exception("Startup refresh of %s could not run", kind)
     # After the refresh, so a catch-up run ranks fresh prices.
     await scheduler.catch_up_preset(settings)
 
