@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import UTC, datetime
 
@@ -246,6 +247,88 @@ def test_bad_requests(client):
     assert client.post("/api/models/value", json={"models": one, "profile": "nope"}).status_code == 422
     empty = {"input_tokens": 0, "output_tokens": 0}
     assert client.post("/api/models/value", json={"models": one, "task": empty}).status_code == 422
+
+
+def test_a_body_over_the_cap_is_refused_and_not_parsed(client):
+    # The one POST an open-read visitor may call: nobody should be able to make it hold or echo megabytes.
+    body = {"models": [{"provider": PROVIDER, "model": "acme/cheap-60:batch"}], "task": TASK, "pad": "x" * 200_000}
+    response = client.post("/api/models/value", json=body)
+    assert response.status_code == 413
+    assert len(response.content) < 500
+    assert "x" * 100 not in response.text
+
+
+def test_a_body_just_under_the_cap_still_works(client):
+    body = {"models": [{"provider": PROVIDER, "model": "acme/cheap-60:batch"}], "task": TASK, "pad": "x" * 100_000}
+    assert client.post("/api/models/value", json=body).status_code == 200
+
+
+def test_a_streamed_body_is_cut_off_at_the_cap_not_read_to_the_end(client):
+    chunk = b"x" * 65_536
+    pulled = 0
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        nonlocal pulled
+        if pulled >= 20:  # 1.3 MB on offer
+            return {"type": "http.disconnect"}
+        pulled += 1
+        return {"type": "http.request", "body": chunk, "more_body": pulled < 20}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/api/models/value",
+        "raw_path": b"/api/models/value",
+        "query_string": b"",
+        "root_path": "",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("testclient", 50000),
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],  # no content-length
+    }
+    asyncio.run(create_app()(scope, receive, send))
+    assert sent[0]["status"] == 413
+    assert pulled <= 4, "the body was read well past the cap"
+
+
+def test_a_validation_error_does_not_echo_the_input(client):
+    echoed = "P" * 5_000
+    response = client.post("/api/models/value", json={"models": [{"provider": echoed, "model": "m"}]})
+    assert response.status_code == 422
+    assert echoed not in response.text
+    assert '"input"' not in response.text
+    assert len(response.content) < 1_000
+    detail = response.json()["detail"]
+    assert detail[0]["loc"] == ["body", "models", 0, "provider"]
+
+
+def test_malformed_json_gets_a_short_422(client):
+    response = client.post(
+        "/api/models/value", content=b'{"models": [' + b"zzzz" * 20_000, headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert "zzzz" not in response.text
+
+
+def test_a_body_with_hundreds_of_errors_gets_a_bounded_answer(client):
+    refs = [{"provider": "", "model": ""}] * 200
+    response = client.post("/api/models/value", json={"models": refs})
+    assert response.status_code == 422
+    assert len(response.json()["detail"]) <= 20
+    assert len(response.content) < 5_000
+
+
+def test_the_request_body_is_still_in_the_api_schema():
+    schema = create_app().openapi()
+    post = schema["paths"]["/api/models/value"]["post"]
+    assert post["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/ValueRequest"}
+    assert {"ValueRequest", "ValueModelRef", "ValueTaskIn"} <= set(schema["components"]["schemas"])
 
 
 def test_the_password_guard_covers_it(client, monkeypatch):

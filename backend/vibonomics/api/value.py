@@ -13,11 +13,14 @@ Read-only, and behind the password guard like the rest of ``/api``: a client of 
 from __future__ import annotations
 
 import math
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -29,9 +32,65 @@ from ..scoring import ModelScores, compute_scores, own_test_scores, score_key
 from ..settings_store import AppSettings, load_settings
 from .models import PriceOut, ScoresOut
 
-router = APIRouter(prefix="/api/models", tags=["models"])
+MAX_BODY_BYTES = 128 * 1024
+MAX_ERRORS = 20
 
 Dimension = Literal["composite", "intelligence", "coding", "agentic"]
+
+
+async def _read_capped(request: Request) -> bytes:
+    """The request body, refused with 413 as soon as it passes the cap instead of after it is all in memory."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Request too large")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _replay(raw: bytes) -> Callable[[], Awaitable[dict[str, Any]]]:
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    return receive
+
+
+class _CappedRoute(APIRoute):
+    """This is the one POST a visitor to an open-read instance may call, so it reads its body under a cap and does
+    not hand a bad one back: FastAPI's own 422 repeats every offending ``input`` in full.
+
+    A route class rather than a ``Request`` parameter keeps the typed body, and so the request schema in the API
+    document, as it was.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
+        handler = super().get_route_handler()
+
+        async def capped(request: Request) -> Response:
+            raw = await _read_capped(request)
+            try:
+                return await handler(Request(request.scope, _replay(raw)))
+            except RequestValidationError as exc:
+                detail = [
+                    {"type": e["type"], "loc": list(e["loc"]), "msg": e["msg"]} for e in exc.errors()[:MAX_ERRORS]
+                ]
+                raise HTTPException(status_code=422, detail=detail) from None
+
+        return capped
+
+
+router = APIRouter(prefix="/api/models", tags=["models"], route_class=_CappedRoute)
 
 
 class ValueModelRef(BaseModel):
