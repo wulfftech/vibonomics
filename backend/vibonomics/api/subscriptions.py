@@ -188,7 +188,7 @@ def claude_subscription(request: Request, session: Session = Depends(get_session
         kind="claude",
         title=KINDS["claude"],
         snapshot=snapshot,
-        ingest_path=f"/api/subscription/ingest/claude?token={token}" if reveal else "/api/subscription/ingest/claude",
+        ingest_path="/api/subscription/ingest/claude",
         ingest_token=token,
         statusline_command=command if reveal else "",
         docs_url=DOCS_URL,
@@ -221,7 +221,10 @@ def rotate_claude_token(request: Request, session: Session = Depends(get_session
 @router.post("/ingest/claude", status_code=202)
 async def ingest_claude(
     request: Request,
-    token: str | None = Query(default=None),
+    # Still accepted for scripts written before the header; nothing the app shows or generates uses it.
+    token: str | None = Query(
+        default=None, deprecated=True, description="Send the token in the X-Vibonomics-Token header instead."
+    ),
     x_vibonomics_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     # This route is outside the login guard, so the token comes first: nobody without it gets the app to

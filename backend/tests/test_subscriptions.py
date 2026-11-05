@@ -399,3 +399,18 @@ def test_a_token_with_characters_outside_ascii_is_a_401_not_a_500():
     ):
         assert response.status_code == 401
         assert response.json() == {"detail": "Bad subscription ingest token"}
+
+
+def test_nothing_the_app_shows_puts_the_token_in_a_url():
+    """A token in a query string ends up in access logs, so only the header form is advertised."""
+    client = _client()
+    config = client.get("/api/subscription/claude").json()
+    token = config["ingest_token"]
+    assert token
+    assert "token=" not in config["ingest_path"]
+    assert token not in config["ingest_path"]
+    assert "token=" not in config["statusline_command"]
+    assert f'-H "X-Vibonomics-Token: {token}"' in config["statusline_command"]
+    # The path it advertises is the one that works with that header.
+    assert _post(client, {"rate_limits": {"five_hour": {"used_percentage": 5}}}).status_code == 202
+    assert config["ingest_path"] == "/api/subscription/ingest/claude"
