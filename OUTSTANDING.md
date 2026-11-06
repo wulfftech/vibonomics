@@ -99,6 +99,28 @@ CI-1 was fixed in the review's own PR. B-3 was already fixed on `main`.
 - **A source switched off mid-refresh** can reappear in the database after the settings purge. The rows
   route hides it and the next refresh deletes it.
 
+## OpenRouter's preset API, measured on 2026-11-06
+
+`backend/scripts/preset_probe.py` was run against a throwaway workspace (two presets, six free-model calls).
+What it showed, so a settled question is not asked again:
+- A write stores `model`, `models`, `provider.only/order/sort/quantizations/ignore/require_parameters`,
+  `temperature`, `top_p`, `repetition_penalty`, `frequency_penalty`, `presence_penalty`, `route` and `max_tokens`.
+  `max_completion_tokens` is dropped, unknown keys (top level and inside `provider`) are accepted and dropped, and
+  `provider.sort` sent as a string comes back as a string (the `{by, partition}` form is what the web UI writes).
+- The system prompt is stored from a system-role message. **A write with no system message sets it to null**, so every
+  write resends the prompt in force. Every accepted write answers with the version it made.
+- `provider.quantizations: ["fp8"]` excludes endpoints whose quantization is `unknown` (HTTP 404). With
+  `require_parameters: true` an endpoint without a requested parameter is HTTP 404 "No endpoints found that can handle
+  the requested parameters"; there is no fallback to another provider of that model.
+- `stealth` is accepted as a `provider.only` entry (a real write, version 17 of the live preset).
+- **Not measured yet** (the free-model daily cap answered 429 before those calls): whether a client's own request
+  parameters override a preset's (documented as yes), and whether a client's `provider` block merges with or replaces
+  the preset's. Rerun the probe after the daily reset (00:00 UTC) to settle both. What `route: "sort"` actually does
+  at request time is also unmeasured; it is stored as sent.
+- Free models share an account-wide daily request cap (the response said 1000 a day with credits). The live preset's
+  models are all free, so spending the cap makes requests to it fail until the reset; plans now warn about this.
+  An option to keep one paid model as the last fallback was proposed and not built.
+
 ## Fixed on 2026-10-28, second pass (an independent review of the first)
 
 An Opus review re-read the earlier fixes and the code around them. These are what it found, with the commit
