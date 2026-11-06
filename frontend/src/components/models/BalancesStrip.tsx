@@ -61,6 +61,10 @@ export function BalancesStrip({ providers }: { providers: ProviderOut[] }) {
 
   const cards: ReactNode[] = [];
   const merged = new Set<string>();
+  // The first Console row and the first Go row make the one OpenCode card; any further row stands alone, like a
+  // second Anthropic row, so its balance and its refresh error still show.
+  const consoleProvider = enabled.find((entry) => entry.type === 'opencode') ?? null;
+  const goProvider = enabled.find((entry) => entry.type === 'opencode-go') ?? null;
   if (usage !== null && !enabled.some((provider) => provider.type === 'anthropic')) {
     cards.push(<AnthropicCard key="claude" provider={null} usage={usage} />);
   }
@@ -70,17 +74,11 @@ export function BalancesStrip({ providers }: { providers: ProviderOut[] }) {
       cards.push(<AnthropicCard key="anthropic" provider={provider} usage={usage} />);
       continue;
     }
-    if (provider.type === 'opencode' || provider.type === 'opencode-go') {
-      // Both OpenCode rows belong to the one card; the second must not fall through as its own.
+    if (provider === consoleProvider || provider === goProvider) {
+      // The two rows belong to the one card; the second must not fall through as its own.
       if (!merged.has('opencode')) {
         merged.add('opencode');
-        cards.push(
-          <OpenCodeCard
-            key="opencode"
-            consoleProvider={enabled.find((entry) => entry.type === 'opencode') ?? null}
-            goProvider={enabled.find((entry) => entry.type === 'opencode-go') ?? null}
-          />,
-        );
+        cards.push(<OpenCodeCard key="opencode" consoleProvider={consoleProvider} goProvider={goProvider} />);
       }
       continue;
     }
