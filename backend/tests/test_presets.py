@@ -3843,3 +3843,276 @@ def test_taking_an_adopted_preset_out_of_the_list_forgets_its_prompt_backup_too(
     kept = [i for i in _saved_items(client) if i["slug"] != HAND]
     assert client.put("/api/settings", json={"settings": _with_items(current, kept)}).status_code == 200
     assert set(_state()["system_backups"]) == {SLUG}
+
+
+# ---- capability-aware pinning, and the quantization and ignore guardrails -------------------------------------------
+
+
+def _endpoint(tag: str, price: float, params: list[str] | None, cap: int | None = None, quant="fp8") -> dict[str, Any]:
+    """An endpoint as the adapter stores it, with the parameters it supports and its output cap."""
+    return {
+        "provider": tag.split("/")[0].title(),
+        "tag": tag,
+        "quantization": quant,
+        "input": price,
+        "output": price * 4,
+        "params": params,
+        "max_completion_tokens": cap,
+        "uptime_1d": 99,
+    }
+
+
+def _stored(model_id: str, *rows: dict[str, Any]) -> None:
+    _set_extra(model_id, {"endpoints": list(rows)})
+
+
+def _tags_of(plan: dict[str, Any]) -> list[str]:
+    return [p["tag"] for p in plan["providers"]]
+
+
+def test_an_endpoint_whose_precision_is_not_listed_is_unknown_and_a_quantization_list_leaves_it_out():
+    rows = [
+        {"tag": "a/x", "input": 0.1, "output": 0.1, "quantization": None},
+        {"tag": "b/x", "input": 0.2, "output": 0.2, "quantization": "unknown"},
+        {"tag": "c/x", "input": 0.3, "output": 0.3, "quantization": "fp8"},
+        {"tag": "d/x", "input": 0.4, "output": 0.4},
+    ]
+    assert _tags(choose_endpoints(rows, TASK, {"quantizations": ["fp8"]}, 5)) == ["c/x"]
+    assert _tags(choose_endpoints(rows, TASK, {"quantizations": ["fp8", "unknown"]}, 5)) == [
+        "a/x",
+        "b/x",
+        "c/x",
+        "d/x",
+    ]
+    assert _tags(choose_endpoints(rows, TASK, {"quantizations": ["unknown"]}, 5)) == ["a/x", "b/x", "d/x"]
+    assert len(choose_endpoints(rows, TASK, {}, 5)) == 4
+
+
+def test_the_pins_are_the_endpoints_that_take_every_parameter_the_owner_sets(client):
+    _stored(
+        "acme/best",
+        _endpoint("plain/x", 0.01, ["temperature"]),
+        _endpoint("both/x", 0.02, ["temperature", "top_p"]),
+        _endpoint("also/x", 0.03, ["temperature", "top_p", "tools"]),
+    )
+    _settings(guardrails={"temperature": 0.7, "top_p": 0.9})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["both/x", "also/x"]
+    assert plan["warnings"] == [] and plan["action"] == "create"
+
+
+def test_an_endpoint_that_does_not_report_its_parameters_is_still_pinned(client):
+    _stored("acme/best", _endpoint("silent/x", 0.01, None), _endpoint("no/x", 0.02, ["tools"]))
+    _settings(guardrails={"top_p": 0.9})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["silent/x"] and plan["warnings"] == []
+
+
+def test_a_parameter_no_live_endpoint_takes_is_warned_about_and_the_preset_is_pinned_without_it(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]), _endpoint("b/x", 0.02, ["tools", "seed"]))
+    _settings(guardrails={"repetition_penalty": 1.1})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "create" and _tags_of(plan) == ["a/x", "b/x"]
+    assert "repetition_penalty will be ignored for acme/best: no live endpoint supports it." in plan["warnings"]
+    assert plan["config"]["repetition_penalty"] == 1.1  # still written: it is what the owner asked for
+
+
+def test_each_parameter_nobody_takes_gets_its_own_warning_and_the_ones_somebody_takes_do_not(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["temperature"]), _endpoint("b/x", 0.02, ["temperature"]))
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9, "presence_penalty": 0.1})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    said = [w for w in plan["warnings"] if "will be ignored" in w]
+    assert said == [
+        "presence_penalty will be ignored for acme/best: no live endpoint supports it.",
+        "top_p will be ignored for acme/best: no live endpoint supports it.",
+    ]
+
+
+def test_parameters_that_are_each_taken_but_never_together_are_warned_about_as_a_set(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["temperature"]), _endpoint("b/x", 0.02, ["top_p"]))
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["a/x", "b/x"]
+    assert any("temperature and top_p will be ignored for acme/best" in w and "at once" in w for w in plan["warnings"])
+
+
+def test_with_require_parameters_a_model_no_endpoint_can_serve_blocks_the_plan_and_names_the_parameter(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]), _endpoint("b/x", 0.02, ["seed"]))
+    _settings(guardrails={"top_p": 0.9, "require_parameters": True})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert _apply(client, "anything").status_code == 409
+        assert post.call_count == 0
+    assert plan["action"] == "blocked" and plan["request"] is None and plan["digest"] is None
+    assert "acme/best" in plan["reason"] and "top_p" in plan["reason"] and "require_parameters" in plan["reason"]
+
+
+def test_a_require_parameters_the_live_preset_already_has_counts_as_much_as_one_the_owner_set(client):
+    _own_as(KEY)
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]))
+    _settings(guardrails={"top_p": 0.9})  # require_parameters is not managed: it is the live preset's own
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "provider": {"require_parameters": True}}, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "top_p" in plan["reason"]
+
+
+def test_require_parameters_with_every_parameter_taken_is_not_a_problem(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["temperature", "top_p"]), _endpoint("b/x", 0.02, ["tools"]))
+    _settings(guardrails={"top_p": 0.9, "require_parameters": True})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "create" and _tags_of(plan) == ["a/x"]
+    assert plan["config"]["provider"]["require_parameters"] is True
+
+
+def test_an_endpoint_whose_output_cap_is_below_max_tokens_is_not_pinned_and_a_model_with_none_is_warned_about(client):
+    _stored(
+        "acme/best",
+        _endpoint("small/x", 0.01, ["max_tokens"], cap=4_096),
+        _endpoint("big/x", 0.02, ["max_tokens"], cap=65_536),
+    )
+    _settings(guardrails={"max_tokens": 8_192})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["big/x"] and plan["config"]["max_tokens"] == 8_192
+    _settings(guardrails={"max_tokens": 100_000})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["small/x", "big/x"]
+    assert any("max_tokens will be ignored for acme/best" in w and "100,000" in w for w in plan["warnings"])
+    _settings(guardrails={"max_tokens": 100_000, "require_parameters": True})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        blocked = _plan(client)
+    assert blocked["action"] == "blocked" and "max_tokens" in blocked["reason"] and "100,000" in blocked["reason"]
+
+
+def test_capability_is_judged_per_model_so_one_model_can_be_pinned_and_another_warned_about(client):
+    _settings(max_models=2, guardrails={"top_p": 0.9})
+    _stored("acme/best", _endpoint("good/x", 0.01, ["top_p"]))
+    _stored("acme/steady", _endpoint("limited/x", 0.02, ["tools"]))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["good/x", "limited/x"]
+    assert plan["warnings"] == ["top_p will be ignored for acme/steady: no live endpoint supports it."]
+
+
+def test_a_model_with_no_provider_data_is_left_unpinned_as_it_always_was_whatever_is_required(client):
+    _settings(guardrails={"top_p": 0.9, "require_parameters": True})  # acme/best has the stored ENDPOINTS: no params
+    _set_extra("acme/best", {})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "create" and plan["providers"] == []
+    assert any("No provider data" in w for w in plan["warnings"])
+
+
+def test_a_managed_quantization_list_filters_the_pins_and_is_written(client):
+    _settings(guardrails={"quantizations": ["bf16"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["wafer/bf16"]
+    assert plan["config"]["provider"]["quantizations"] == ["bf16"]
+
+
+def test_a_managed_value_is_what_filters_not_the_one_the_live_preset_has(client):
+    _own_as(KEY)
+    live = {"model": "acme/best", "provider": {"quantizations": ["fp8"], "ignore": ["novita"]}}
+    _settings(guardrails={"quantizations": ["fp4"], "clear": ["ignore"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["novita/fp4"]  # fp4 is the managed list, and novita is no longer ignored
+    assert plan["config"]["provider"]["quantizations"] == ["fp4"] and "ignore" not in plan["config"]["provider"]
+
+
+def test_a_quantization_list_the_owner_took_off_no_longer_filters_though_the_live_preset_has_it(client):
+    _own_as(KEY)
+    live = {"model": "acme/best", "provider": {"quantizations": ["fp8"]}}
+    _settings(guardrails={"clear": ["quantizations"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
+    assert "provider" in plan["config"] and "quantizations" not in plan["config"]["provider"]
+
+
+def test_a_quantization_list_the_owner_does_not_manage_still_filters_as_the_live_preset_has_it(client):
+    _own_as(KEY)
+    live = {"model": "acme/best", "provider": {"quantizations": ["fp8"]}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["deepinfra/fp8", "slow/fp8"]
+    assert plan["config"]["provider"]["quantizations"] == ["fp8"]
+
+
+def test_ignored_providers_are_never_pinned_and_are_written(client):
+    _settings(guardrails={"ignore": ["Novita", "wafer"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["deepinfra/fp8", "slow/fp8"]
+    assert plan["config"]["provider"]["ignore"] == ["Novita", "wafer"]
+
+
+def _ids(session, settings: AppSettings, item: PresetSettings) -> tuple[list[str], Excluded]:
+    ids = [p.id for p in session.query(ProviderConfig).filter_by(type="openrouter")]
+    excluded = Excluded()
+    return [c.model_id for c in rank(session, settings, ids, item, excluded)[0]], excluded
+
+
+def test_a_model_none_of_whose_endpoints_passes_the_managed_filters_is_left_out_of_the_ranking(client):
+    with session_scope() as session:
+        settings = load_settings(session).model_copy(deep=True)
+        item = settings.presets.items[0]
+        assert "acme/best" in _ids(session, settings, item)[0]
+        item.guardrails = PresetGuardrails(quantizations=["int4"])  # no endpoint of acme/best serves int4
+        names, excluded = _ids(session, settings, item)
+        assert "acme/best" not in names and excluded.unserved == ["acme/best"]
+        assert "acme/steady" in names  # no endpoint data: nothing says it cannot be served
+        item.guardrails = PresetGuardrails(ignore=["deepinfra", "wafer", "novita", "slow", "broken"])
+        names, excluded = _ids(session, settings, item)
+        assert "acme/best" not in names and excluded.unserved == ["acme/best"]
+        item.guardrails = PresetGuardrails(quantizations=["fp8"], ignore=["deepinfra"])  # slow/fp8 still passes
+        names, excluded = _ids(session, settings, item)
+        assert "acme/best" in names and excluded.unserved == []
+        item.guardrails = PresetGuardrails(clear=["quantizations"])  # taken off: nothing narrows the ranking
+        assert _ids(session, settings, item)[1].unserved == []
+
+
+def test_a_model_left_out_for_its_endpoints_is_named_in_a_warning_and_the_next_one_leads(client):
+    _settings(guardrails={"quantizations": ["int4"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/steady"
+    assert any("acme/best" in w and "quantization and ignore" in w for w in plan["warnings"])
+
+
+def test_when_the_guardrails_leave_no_model_the_plan_says_so(client):
+    _settings(guardrails={"quantizations": ["int4"]}, min_score=85)  # only acme/pricey (no endpoint data) is above it
+    _give_endpoints("acme/pricey", [("p/fp8", 1.0, 4.0)])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "No OpenRouter model passes" in plan["reason"]
+    assert "quantization and ignore guardrails" in plan["reason"]

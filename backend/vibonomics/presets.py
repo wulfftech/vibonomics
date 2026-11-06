@@ -122,6 +122,7 @@ class Candidate:
     cache_read: float | None
     endpoints: list[dict[str, Any]]
     expires: str | None = None  # the date OpenRouter said, at the last refresh, that the model goes away
+    is_free: bool = False  # a free model shares the account's daily request cap, which a preset of them can spend
 
 
 @dataclass
@@ -154,6 +155,9 @@ class Excluded:
 
     models: int = 0
     providers: list[str] = field(default_factory=list)  # display names of the providers whose endpoints were skipped
+    # Models with endpoint data, none of which passes the managed quantization and ignore guardrails: a request to a
+    # preset that names those would be refused, so the model is left out rather than picked and left to fail.
+    unserved: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -253,6 +257,21 @@ def _provider_label(ep: dict[str, Any]) -> str:
     return str(ep.get("provider") or tag.split("/")[0])
 
 
+def _lowered(values: Any) -> set[str]:
+    return {v.lower() for v in values or [] if isinstance(v, str)}
+
+
+def _passes_provider_filters(ep: dict[str, Any], quantizations: set[str], ignored: set[str]) -> bool:
+    """Whether OpenRouter would still route to ``ep`` under a ``provider.quantizations`` and ``provider.ignore``.
+
+    An endpoint whose precision is not given is ``unknown`` to OpenRouter, and a list that does not name ``unknown``
+    leaves it out (measured: HTTP 404 "No endpoints found for the request with quantization: fp8").
+    """
+    if quantizations and str(ep.get("quantization") or "unknown").lower() not in quantizations:
+        return False
+    return not (ignored and {n.lower() for n in _endpoint_names(ep) if n} & ignored)
+
+
 # ---- ranking -------------------------------------------------------------------------------------------------
 
 
@@ -287,8 +306,12 @@ def rank(
     if not provider_ids:
         return [], task, profile_id
     blocked_models, blocked_providers = blocklists(settings, preset)
+    # Only a value the owner manages narrows the ranking here: the live preset is not read until the plan, which
+    # filters the endpoints by whatever it finds there.
+    quantizations, ignored = _lowered(preset.guardrails.quantizations), _lowered(preset.guardrails.ignore)
     dropped: set[str] = set()
     skipped: set[str] = set()
+    unserved: set[str] = set()
     scores = compute_scores(session, settings, own_test_scores(session), own_tests_preferred(settings, preset))
     free_cost = max(0.0, settings.scoring.free_model_cost)
     best: dict[str, Candidate] = {}
@@ -317,13 +340,21 @@ def rank(
         if blocked_models and _blocked_by((m.model_id, m.canonical_id), blocked_models):
             dropped.add(m.model_id)
             continue
+        tagged = [e for e in endpoints if e.get("tag")]  # the only ones a preset could pin
         if blocked_providers and endpoints:
-            tagged = [e for e in endpoints if e.get("tag")]  # the only ones a preset could pin
             hits = [e for e in tagged if _blocked_by(_endpoint_names(e), blocked_providers)]
             skipped.update(_provider_label(e) for e in hits)
             if hits and len(hits) == len(tagged):
                 dropped.add(m.model_id)
                 continue
+            tagged = [e for e in tagged if e not in hits]
+        if (
+            (quantizations or ignored)
+            and tagged
+            and not any(_passes_provider_filters(e, quantizations, ignored) for e in tagged)
+        ):
+            unserved.add(m.model_id)
+            continue
         found = Candidate(
             model_id=m.model_id,
             name=m.name,
@@ -334,11 +365,13 @@ def rank(
             cache_read=m.price_cache_read,
             endpoints=endpoints,
             expires=(m.extra or {}).get("expiration_date") or None,
+            is_free=bool(m.is_free),
         )
         if m.model_id not in best or found.value > best[m.model_id].value:
             best[m.model_id] = found
     if excluded is not None:
         excluded.models, excluded.providers = len(dropped), sorted(skipped)
+        excluded.unserved = sorted(unserved)
     return sorted(best.values(), key=lambda c: (-c.value, -c.score, c.task_cost, c.model_id)), task, profile_id
 
 
@@ -384,12 +417,11 @@ def choose_endpoints(
         tag, price_in, price_out = ep.get("tag"), ep.get("input"), ep.get("output")
         if not isinstance(tag, str) or not tag or tag in seen or price_in is None or price_out is None:
             continue
-        if quantizations and str(ep.get("quantization") or "").lower() not in quantizations:
+        if not _passes_provider_filters(ep, quantizations, ignored):
             continue
         names = {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider") or "").lower()}
         if (
-            names & ignored
-            or (allowed and not names & allowed)
+            (allowed and not names & allowed)
             or (blocked and _blocked_by(_endpoint_names(ep), blocked))
             or unsupported(ep.get("params"), require_params)
             or cap_below(ep.get("max_completion_tokens"), max_tokens)
@@ -1245,13 +1277,25 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             plan,
             "No OpenRouter model passes the filters. Loosen the minimum score, the value floor, the cost limit or the "
             "other filters."
-            + (" The blocklists took out models that would otherwise pass." if inputs.excluded.models else ""),
+            + (" The blocklists took out models that would otherwise pass." if inputs.excluded.models else "")
+            + (
+                " The quantization and ignore guardrails took out models none of whose endpoints pass them."
+                if inputs.excluded.unserved
+                else ""
+            ),
         )
 
     before = current_models(remote.config) if remote else []
     plan.picks, plan.kept_current = select_models(inputs.candidates, before, cfg.max_models, cfg.switch_margin_pct)
     pick = plan.pick = plan.picks[0]
     plan.runners_up = [c for c in inputs.candidates if c not in plan.picks][:RUNNERS_UP]
+    if inputs.excluded.unserved:
+        left = inputs.excluded.unserved
+        shown = ", ".join(left[:5]) + (f" and {len(left) - 5} more" if len(left) > 5 else "")
+        plan.warnings.append(
+            f"Left out of the ranking because none of their live endpoints passes the quantization and ignore "
+            f"guardrails, so this preset would never be served them: {shown}."
+        )
 
     base_config = remote.config if remote else None
     if remote is None and cfg.template_slug:
@@ -1295,21 +1339,26 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             f"The template's provider list (only: {', '.join(allow)}) is applied: only those providers are "
             "considered for this preset."
         )
-    per_pick = [
-        (
-            c.model_id,
-            choose_endpoints(
-                c.endpoints,
-                inputs.task,
-                provider_block,
-                cfg.max_providers,
-                current=live_tags,
-                allow=allow,
-                blocked=blocked_providers,
-            ),
+    values = cfg.guardrails.set_values()
+    need = [k for k in NEEDS_SUPPORT if k in values]
+    per_pick: list[tuple[str, list[dict[str, Any]]]] = []
+    for c in plan.picks:
+        pinned, notes, stop = _pin_for(
+            c,
+            inputs.task,
+            provider_block,
+            cfg.max_providers,
+            live_tags=live_tags,
+            allow=allow,
+            blocked=blocked_providers,
+            need=need,
+            cap=values.get("max_tokens"),
+            strict=provider_block.get("require_parameters") is True,
         )
-        for c in plan.picks
-    ]
+        if stop:
+            return _blocked(plan, stop)
+        plan.warnings.extend(notes)
+        per_pick.append((c.model_id, pinned))
     bare = [c.name for c, (_id, eps) in zip(plan.picks, per_pick, strict=True) if not eps]
     if len(bare) == len(plan.picks):
         plan.warnings.append(
@@ -1428,6 +1477,70 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
     # stored copy the ranking used. Read-only, so a draft is checked too.
     plan.validation = await validate_live(inputs.base_url, plan.config, plan.picks, plan.providers)
     return plan
+
+
+def _unmet(endpoints: list[dict[str, Any]], need: Sequence[str], cap: int | None) -> list[tuple[str, str]]:
+    """What the owner asks of an endpoint that none of ``endpoints`` meets, as (name, why).
+
+    Each parameter is looked at by itself first. When every one is supported by some endpoint and no endpoint takes
+    them all, the combination is what is unmet.
+    """
+    if not endpoints:
+        return []
+    out = [
+        (name, "no live endpoint supports it")
+        for name in need
+        if all(unsupported(ep.get("params"), [name]) for ep in endpoints)
+    ]
+    if cap is not None and all(cap_below(ep.get("max_completion_tokens"), cap) for ep in endpoints):
+        out = [item for item in out if item[0] != "max_tokens"]  # the cap is the more exact reason
+        out.append(("max_tokens", f"no live endpoint allows {cap:,} output tokens"))
+    if not out and need:
+        out = [(" and ".join(need), "no live endpoint supports them all at once")]
+    return out
+
+
+def _pin_for(
+    c: Candidate,
+    task: Task,
+    provider_block: dict[str, Any],
+    limit: int,
+    *,
+    live_tags: Sequence[str],
+    allow: Sequence[str],
+    blocked: Sequence[str],
+    need: Sequence[str],
+    cap: int | None,
+    strict: bool,
+) -> tuple[list[dict[str, Any]], list[str], str | None]:
+    """The endpoints to pin for one model, what could not be honoured, and a reason to block the plan, if any.
+
+    The parameters the owner sets (``need``) and the token cap (``cap``) are asked of the endpoints first. A model with
+    no endpoint that meets them is pinned to the others and warned about, since OpenRouter ignores a parameter an
+    endpoint does not take; unless ``strict`` (``provider.require_parameters``), where it refuses every request instead,
+    and the plan is blocked. A model with no endpoint data at all, or none that passes the other filters, is left
+    unpinned as it always was.
+    """
+    common = {"current": live_tags, "allow": allow, "blocked": blocked}
+    pinned = choose_endpoints(c.endpoints, task, provider_block, limit, require_params=need, max_tokens=cap, **common)
+    if pinned or not need:
+        return pinned, [], None
+    everyone = choose_endpoints(c.endpoints, task, provider_block, max(len(c.endpoints), 1), **common)
+    if not everyone:
+        return [], [], None
+    by_tag = {ep.get("tag"): ep for ep in c.endpoints if isinstance(ep, dict)}
+    unmet = _unmet([by_tag[e["tag"]] for e in everyone if e["tag"] in by_tag], need, cap)
+    if strict:
+        names = ", ".join(name for name, _why in unmet)
+        why = "; ".join(f"{name}: {reason}" for name, reason in unmet)
+        return (
+            [],
+            [],
+            f"{c.model_id} could not be served: require_parameters is on and {why}, so OpenRouter would refuse every "
+            f"request to it. Turn require_parameters off, or stop setting {names}.",
+        )
+    notes = [f"{name} will be ignored for {c.model_id}: {why}." for name, why in unmet]
+    return everyone[:limit], notes, None
 
 
 def _model_change(before: list[str], picks: list[Candidate], candidates: list[Candidate]) -> str:
