@@ -1,11 +1,12 @@
-import { Alert, Anchor, Badge, Button, Code, Collapse, Group, Stack, Table, Text, Title } from '@mantine/core';
+import { Alert, Badge, Button, Code, Collapse, Group, Stack, Table, Text, Title } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { Fragment } from 'react';
 import { CopyIconButton } from '../../components/CopyIconButton';
-import { DASH, dateTime, discountLabel, money, relativeTime } from '../../lib/format';
-import { openRouterModelUrl } from '../../lib/presets';
+import { DASH, discountLabel, money } from '../../lib/format';
+import { openRouterPresetUrl } from '../../lib/presets';
 import type { PresetPlan } from '../../api/types';
+import { ModelLink, ModelLinks, PassthroughBlock, PresetPageLink, PresetVersions } from './PresetParts';
 
 const ACTIONS: Record<PresetPlan['action'], { label: string; color: string }> = {
   create: { label: 'Create', color: 'teal' },
@@ -19,95 +20,19 @@ function shown(json: string | null | undefined): string {
   return json === null || json === undefined ? DASH : json;
 }
 
-/** A model's name, or its id where there is no name, linked to its page on OpenRouter in a new tab. */
-function ModelLink({ id, name }: { id: string; name?: string }) {
-  const label = name ?? id;
-  return (
-    <Anchor
-      href={openRouterModelUrl(id)}
-      target="_blank"
-      rel="noopener noreferrer"
-      inherit
-      aria-label={`Open ${label} on OpenRouter`}
-    >
-      {label}
-      <ExternalLink size={12} style={{ marginInlineStart: 3, verticalAlign: '-1px' }} />
-    </Anchor>
-  );
+function routingLine(plan: PresetPlan): string {
+  return plan.route === 'sort'
+    ? `Routing: sort, OpenRouter orders the models by ${plan.sort ?? 'price'}.`
+    : 'Routing: fallback, OpenRouter tries the models in the order listed.';
 }
 
-/** Model links in a sentence or a cell, with a comma between them. */
-function ModelLinks({ ids, names }: { ids: string[]; names: Map<string, string> }) {
-  return ids.map((id, i) => (
-    <Fragment key={id}>
-      {i > 0 && ', '}
-      <ModelLink id={id} name={names.get(id)} />
-    </Fragment>
-  ));
-}
-
-function Versions({ plan }: { plan: PresetPlan }) {
-  const [open, { toggle }] = useDisclosure(false);
-  if (plan.versions.length === 0) {
-    return null;
-  }
-  const live = plan.versions.find((v) => v.live)?.version ?? plan.current_version;
-  const summary =
-    live === null || live === undefined ? `${plan.versions.length}` : `${plan.versions.length}, live v${live}`;
-  return (
-    <Stack gap={4}>
-      <Group>
-        <Button
-          variant="subtle"
-          size="compact-sm"
-          leftSection={open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          aria-expanded={open}
-          onClick={toggle}
-        >
-          {`Versions on OpenRouter (${summary})`}
-        </Button>
-      </Group>
-      <Collapse expanded={open}>
-        <Table.ScrollContainer minWidth={420}>
-          <Table verticalSpacing={4} withRowBorders={false} aria-label="Preset versions">
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Version</Table.Th>
-                <Table.Th>Saved</Table.Th>
-                <Table.Th>Model</Table.Th>
-                <Table.Th>Providers</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {plan.versions.map((v) => (
-                <Table.Tr key={v.version ?? 'unknown'}>
-                  <Table.Td>
-                    <Group gap={6} wrap="nowrap">
-                      <Text size="sm">v{v.version ?? DASH}</Text>
-                      {v.live && (
-                        <Badge size="xs" variant="light" color="teal">
-                          live
-                        </Badge>
-                      )}
-                    </Group>
-                  </Table.Td>
-                  <Table.Td title={dateTime(v.created_at)}>
-                    <Text size="sm">{relativeTime(v.created_at)}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{v.model ? <ModelLink id={v.model} /> : DASH}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm">{v.providers.join(', ') || DASH}</Text>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        </Table.ScrollContainer>
-      </Collapse>
-    </Stack>
-  );
+/** What the blocklists took out of this run, or null when they took out nothing. */
+function leftOutLine(excluded: PresetPlan['excluded']): string | null {
+  const parts = [
+    excluded.models > 0 ? `${excluded.models} ${excluded.models === 1 ? 'model' : 'models'}` : null,
+    excluded.providers.length > 0 ? `providers: ${excluded.providers.join(', ')}` : null,
+  ].filter((part) => part !== null);
+  return parts.length === 0 ? null : `Left out by your blocklists: ${parts.join(', ')}`;
 }
 
 /** What the next update would do, and the exact request that would do it. */
@@ -116,6 +41,7 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
   const body = plan.request ? JSON.stringify(plan.request.body, null, 2) : '';
   const [open, { toggle }] = useDisclosure(false);
   const names = new Map(plan.picks.map((c) => [c.model_id, c.name]));
+  const leftOut = leftOutLine(plan.excluded);
   return (
     <Stack gap="md">
       <Group gap="sm" wrap="nowrap" align="flex-start">
@@ -141,7 +67,10 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
           <Text size="xs" c="dimmed">
             Preset
           </Text>
-          <Text fw={600}>@preset/{plan.slug}</Text>
+          <Group gap="xs" align="baseline">
+            <Text fw={600}>@preset/{plan.slug}</Text>
+            <PresetPageLink url={openRouterPresetUrl(plan.preset_id, plan.workspace)} />
+          </Group>
         </Stack>
         <Stack gap={0}>
           <Text size="xs" c="dimmed">
@@ -150,6 +79,14 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
           <Text fw={600}>{plan.considered}</Text>
         </Stack>
       </Group>
+
+      <Stack gap={2}>
+        <Text size="sm">{routingLine(plan)}</Text>
+        {leftOut !== null && <Text size="sm">{leftOut}</Text>}
+        {plan.own_tests_preferred && (
+          <Text size="sm">Scores used: your own tests where a model has enough of them.</Text>
+        )}
+      </Stack>
 
       {plan.warnings.map((warning) => (
         <Alert key={warning} color="yellow" variant="light" py="xs">
@@ -285,6 +222,8 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
         </Stack>
       )}
 
+      <PassthroughBlock passthrough={plan.passthrough} />
+
       {plan.request && (
         <Stack gap={4}>
           <Group gap="xs" justify="space-between">
@@ -316,7 +255,7 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
         </Stack>
       )}
 
-      <Versions plan={plan} />
+      <PresetVersions versions={plan.versions} current={plan.current_version} />
 
       {plan.runners_up.length > 0 && (
         <Stack gap={4}>
