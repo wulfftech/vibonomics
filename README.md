@@ -422,6 +422,14 @@ second row of tabs under Providers, where settings that belong to one provider l
   request it would send. **Apply** sends that plan, and only that plan: if anything moved since you looked,
   it refuses and asks you to preview again. After a write it reads the preset back and names any key
   OpenRouter did not keep.
+- **Live check before every write.** The ranking runs on model data from the last refresh, which can be hours
+  old. So the preview, and again the apply that writes, read OpenRouter's public listing for each model in the
+  preset (no key is sent) and check what is about to be written against it: every provider the preset names is
+  still listed for its model, and each model keeps at least one. A provider that is gone is an error: the write
+  is refused, nothing is sent, and the run is recorded as blocked with the reason. A provider reporting a bad
+  status or under 50% uptime, a price more than 20% off what the plan used, and a model that expires within a
+  week are warnings, shown and not blocking. So is a listing OpenRouter does not answer in time. The check runs
+  on a preset that is already up to date too, so the preview shows the health of what is written.
 - **On a schedule.** A separate switch updates a preset every N hours (as little as 0.5, which is every
   thirty minutes) with no one watching, each on its own timer. Off by default, and it needs the write switch
   too. After a restart, any preset that is overdue runs once.

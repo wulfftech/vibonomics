@@ -146,6 +146,58 @@ async def test_the_offer_says_nothing_about_endpoints_unless_the_lookup_answered
     assert answered.extra["endpoints"] == []
 
 
+@pytest.mark.asyncio
+async def test_each_endpoint_keeps_the_guardrail_parameters_it_supports_its_output_cap_and_its_status():
+    # The listing carries dozens of parameters per endpoint and the stored JSON is large already, so only the ones a
+    # guardrail can require are kept, in the order the endpoint lists them.
+    full = {
+        **endpoint("Full", 0.10, 0.40),
+        "supported_parameters": ["max_tokens", "temperature", "logit_bias", "tools", "web_search_options", "seed"],
+        "max_completion_tokens": 8192,
+        "status": 0,
+    }
+    degraded = {
+        **endpoint("Degraded", 0.10, 0.40),
+        "supported_parameters": ["logit_bias"],
+        "max_completion_tokens": None,
+        "status": -2,
+    }
+    silent = endpoint("Silent", 0.10, 0.40)  # reports none of the three
+    offer = await offer_for(listing("vendor/model", 0.10, 0.40), [full, degraded, silent])
+    by_provider = {e["provider"]: e for e in offer.extra["endpoints"]}
+    assert by_provider["Full"]["params"] == ["max_tokens", "temperature", "tools", "seed"]
+    assert (by_provider["Full"]["max_completion_tokens"], by_provider["Full"]["status"]) == (8192, 0)
+    # an endpoint that lists parameters and none of them a guardrail uses is known to support none of them
+    assert by_provider["Degraded"]["params"] == []
+    assert (by_provider["Degraded"]["max_completion_tokens"], by_provider["Degraded"]["status"]) == (None, -2)
+    # one that did not report them at all is unknown, which is not the same as supporting nothing
+    assert by_provider["Silent"]["params"] is None
+    assert by_provider["Silent"]["max_completion_tokens"] is None and by_provider["Silent"]["status"] is None
+
+
+def test_the_guardrail_parameters_are_a_fixed_small_list():
+    from vibonomics.providers.openrouter import GUARDRAIL_PARAMS
+
+    assert GUARDRAIL_PARAMS == (
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "max_tokens",
+        "frequency_penalty",
+        "presence_penalty",
+        "repetition_penalty",
+        "stop",
+        "tools",
+        "tool_choice",
+        "reasoning",
+        "include_reasoning",
+        "structured_outputs",
+        "response_format",
+        "seed",
+    )
+
+
 # ---- free and stealth models ------------------------------------------------------------------------------------
 # The public API lists endpoints for them too (2026-11-06): stealth/crouton-alpha has one, tag "stealth", provider
 # "Stealth", quantization "unknown"; dots-studio/dots-3-note-preview:free has one, tag "atlas-cloud/fp8", provider

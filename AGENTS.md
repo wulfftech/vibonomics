@@ -85,7 +85,12 @@ docker compose logs -f vibonomics
   the plan's digest and refuses a plan that has changed. `plan` may be given unsaved settings to preview
   (`draft`, which is also how a preset not saved yet is planned); apply never is, and only plans a saved item, so a
   draft's digest applies only if it equals the saved plan, and the UI does not offer it. The create call is never
-  retried: a retry would leave a second version.
+  retried: a retry would leave a second version. Every plan, `apply`'s own included, ends with
+  `preset_validation.validate_live`: the public `/models/<id>/endpoints` listing of each model in the config (no key,
+  four at a time) against the live pins, health, price drift and expiry (`plan.validation`, outside the digest);
+  an error makes a create or update `apply` record `blocked` and raise `PresetInvalid` (409; `sync` only logs it),
+  a warning or a listing that cannot be read never blocks, and the adapter stores `params`, `max_completion_tokens`
+  and `status` per endpoint for `choose_endpoints(require_params=, max_tokens=)`.
   **Adopting** a preset made by hand: `inspect` reads any preset on the account (config, passthrough, blockers,
   a digest of slug, version and config); `adopt` refuses a changed digest, an archived preset, a system prompt, a
   preset already managed or recorded under another key, and otherwise records `owners[slug].adopted`, puts the

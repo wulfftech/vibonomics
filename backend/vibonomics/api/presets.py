@@ -90,6 +90,16 @@ class PresetExcludedOut(BaseModel):
     providers: list[str] = Field(description="Providers whose endpoints a blocklist kept from being chosen")
 
 
+class PresetCheckOut(BaseModel):
+    level: Literal["ok", "warning", "error"] = Field(description="An error refuses the write; a warning does not")
+    check: str = Field(
+        description="What was checked: listing, provider, pins, health, price, expiry, params or max_tokens"
+    )
+    model: str | None = Field(description="The model the finding is about, by id; null when it is about none")
+    provider: str | None = Field(description="The provider tag the finding is about; null when it is about none")
+    message: str
+
+
 class PresetPlanOut(BaseModel):
     action: Literal["create", "update", "unchanged", "blocked"]
     reason: str
@@ -133,6 +143,15 @@ class PresetPlanOut(BaseModel):
         description="The keys Vibonomics does not manage and sends back as it found them, as raw JSON"
     )
     managed_keys: list[str] = Field(description="The keys Vibonomics decides: `provider.*` ones are inside `provider`")
+    validation: list[PresetCheckOut] = Field(
+        description="What the live OpenRouter listing says about what this plan would write; empty when nothing was "
+        "checked (a blocked plan)"
+    )
+    validated_at: datetime | None = Field(description="When the listing was read; null when nothing was checked")
+    valid: bool = Field(
+        description="False when the live check found an error, which refuses an apply; true when it found none, or "
+        "was not made (see `validated_at`)"
+    )
     state: PresetStateOut
 
 
@@ -277,6 +296,12 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         own_tests_preferred=plan.own_tests_preferred,
         passthrough=plan.passthrough,
         managed_keys=list(presets.MANAGED_KEYS),
+        validation=[
+            PresetCheckOut(level=c.level, check=c.check, model=c.model, provider=c.provider, message=c.message)
+            for c in (plan.validation.items if plan.validation else [])
+        ],
+        validated_at=plan.validation.checked_at if plan.validation else None,
+        valid=plan.validation.ok if plan.validation else True,
         state=_state_out(plan.state),
     )
 
@@ -383,7 +408,7 @@ async def preset_apply(body: PresetApplyIn) -> PresetApplyOut:
         raise HTTPException(404, str(exc)) from exc
     except presets.PresetDisabled as exc:
         raise HTTPException(409, str(exc)) from exc
-    except presets.PlanChanged as exc:
+    except (presets.PlanChanged, presets.PresetInvalid) as exc:
         raise HTTPException(409, str(exc)) from exc
     except presets.PresetWriteError as exc:
         raise HTTPException(502, str(exc)) from exc

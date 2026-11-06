@@ -17,6 +17,27 @@ log = logging.getLogger(__name__)
 
 API = "https://openrouter.ai/api/v1"
 
+# The request parameters a guardrail on a preset can require of an endpoint. An endpoint lists dozens, and the endpoint
+# data is stored with every model, so only these are kept.
+GUARDRAIL_PARAMS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "max_tokens",
+    "frequency_penalty",
+    "presence_penalty",
+    "repetition_penalty",
+    "stop",
+    "tools",
+    "tool_choice",
+    "reasoning",
+    "include_reasoning",
+    "structured_outputs",
+    "response_format",
+    "seed",
+)
+
 
 def _per_million(value: Any) -> float | None:
     v = _f(value)
@@ -148,6 +169,8 @@ class OpenRouterAdapter(ProviderAdapter):
             summary = []
             for ep in endpoints:
                 p = ep.get("pricing") or {}
+                listed_params = ep.get("supported_parameters")
+                cap = ep.get("max_completion_tokens")
                 summary.append(
                     {
                         "provider": ep.get("provider_name"),
@@ -161,6 +184,14 @@ class OpenRouterAdapter(ProviderAdapter):
                         "discount": _f(p.get("discount")) or 0.0,
                         "uptime_1d": ep.get("uptime_last_1d"),
                         "service_tier": ep.get("service_tier"),
+                        # None is "the listing did not say", which a guardrail must not read as "supports nothing".
+                        "params": (
+                            [x for x in listed_params if x in GUARDRAIL_PARAMS]
+                            if isinstance(listed_params, list)
+                            else None
+                        ),
+                        "max_completion_tokens": int(cap) if isinstance(cap, int | float) and cap > 0 else None,
+                        "status": ep.get("status"),
                     }
                 )
             offer.extra["endpoints"] = summary

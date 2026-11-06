@@ -258,6 +258,67 @@ def test_each_endpoint_is_costed_with_its_own_cache_price_and_none_means_uncache
     assert chosen[1]["task_cost"] == pytest.approx((600_000 * 0.08 + 20_000 * 0.35) / 1e6)  # 0.055, uncached
 
 
+def _able(tag: str, params: list[str] | None, cap: int | None = None, price: float = 0.1) -> dict[str, Any]:
+    """An endpoint as the adapter stores it now: with the guardrail parameters it supports and its output cap."""
+    return {"tag": tag, "input": price, "output": price, "params": params, "max_completion_tokens": cap}
+
+
+def test_an_endpoint_that_lacks_a_required_parameter_is_skipped():
+    endpoints = [
+        _able("plain/x", ["temperature"], price=0.01),
+        _able("tools/x", ["temperature", "tools", "seed"], price=0.02),
+        _able("everything/x", ["tools", "seed", "temperature"], price=0.03),
+    ]
+    assert _tags(choose_endpoints(endpoints, TASK, {}, 3)) == ["plain/x", "tools/x", "everything/x"]
+    assert _tags(choose_endpoints(endpoints, TASK, {}, 3, require_params=["tools"])) == ["tools/x", "everything/x"]
+    # every one of them is required, not any
+    assert _tags(choose_endpoints(endpoints, TASK, {}, 3, require_params=["tools", "seed"])) == [
+        "tools/x",
+        "everything/x",
+    ]
+    assert choose_endpoints(endpoints, TASK, {}, 3, require_params=["tools", "top_k"]) == []
+
+
+def test_an_endpoint_with_no_parameter_data_is_not_skipped_because_unknown_is_not_a_failure():
+    stored_before = {"tag": "old/x", "input": 0.1, "output": 0.1}  # no `params` key: written before they were kept
+    unreported = _able("silent/x", None)  # the listing did not say
+    refusing = _able("no/x", ["temperature"])
+    chosen = choose_endpoints([stored_before, unreported, refusing], TASK, {}, 3, require_params=["tools"])
+    assert _tags(chosen) == ["old/x", "silent/x"]
+    assert _tags(choose_endpoints(ENDPOINTS, TASK, {}, 5, require_params=["tools"])) == _tags(
+        choose_endpoints(ENDPOINTS, TASK, {}, 5)
+    )
+
+
+def test_an_endpoint_whose_output_cap_is_below_max_tokens_is_skipped_and_an_unknown_cap_is_not():
+    endpoints = [
+        _able("small/x", [], cap=4_096, price=0.01),
+        _able("exact/x", [], cap=8_192, price=0.02),
+        _able("large/x", [], cap=65_536, price=0.03),
+        _able("unknown/x", [], cap=None, price=0.04),
+        {"tag": "old/x", "input": 0.1, "output": 0.1},  # stored before the cap was kept
+    ]
+    assert _tags(choose_endpoints(endpoints, TASK, {}, 5)) == ["small/x", "exact/x", "large/x", "unknown/x", "old/x"]
+    assert _tags(choose_endpoints(endpoints, TASK, {}, 5, max_tokens=8_192)) == [
+        "exact/x",
+        "large/x",
+        "unknown/x",
+        "old/x",
+    ]
+
+
+def test_the_two_requirements_apply_together_with_the_other_filters():
+    endpoints = [
+        _able("a/x", ["tools"], cap=1_000, price=0.01),
+        _able("b/x", ["tools"], cap=9_000, price=0.02),
+        _able("c/x", [], cap=9_000, price=0.03),
+    ]
+    assert _tags(choose_endpoints(endpoints, TASK, {}, 3, require_params=["tools"], max_tokens=8_000)) == ["b/x"]
+    assert (
+        _tags(choose_endpoints(endpoints, TASK, {"ignore": ["b"]}, 3, require_params=["tools"], max_tokens=8_000)) == []
+    )
+
+
 def test_the_plan_pins_the_caching_endpoint_ahead_of_the_one_with_the_lower_sticker_price(client):
     rows = [
         {"provider": "Plain", "tag": "plain/x", "input": 0.08, "output": 0.35, "uptime_1d": 99},
@@ -2775,3 +2836,304 @@ def test_keeping_an_adopted_preset_in_the_list_keeps_the_adoption(client):
     current = client.get("/api/settings").json()["settings"]
     assert client.put("/api/settings", json={"settings": current}).status_code == 200
     assert _state()["owned"] == [HAND] and _state()["reviewed"][HAND]
+
+
+# ---- the live check before a write ---------------------------------------------------------------------------
+
+# What OpenRouter lists for acme/best right now: the three providers the plan pins, and slow/fp8, which it does not.
+LIVE_BEST = [
+    ("novita/fp4", 0.08, 0.35),
+    ("deepinfra/fp8", 0.10, 0.40),
+    ("wafer/bf16", 0.12, 0.45),
+    ("slow/fp8", 0.5, 2.0),
+]
+
+
+def _live_ep(tag: str, price_in: float, price_out: float, **fields: Any) -> dict[str, Any]:
+    return {
+        "provider_name": tag.split("/")[0].title(),
+        "tag": tag,
+        "status": 0,
+        "uptime_last_30m": 99.0,
+        "pricing": {"prompt": repr(price_in / 1e6), "completion": repr(price_out / 1e6)},
+        **fields,
+    }
+
+
+def _live_response(endpoints: list[dict[str, Any]] | None = None, **data: Any) -> httpx.Response:
+    rows = [_live_ep(*row) for row in LIVE_BEST] if endpoints is None else endpoints
+    return httpx.Response(200, json={"data": {"id": "acme/best", "endpoints": rows, **data}})
+
+
+def _live_listing(router: respx.Router, endpoints: list[dict[str, Any]] | None = None, **data: Any) -> respx.Route:
+    return router.get(f"{BASE}/models/acme/best/endpoints").mock(return_value=_live_response(endpoints, **data))
+
+
+def _without(tag: str) -> list[dict[str, Any]]:
+    return [_live_ep(*row) for row in LIVE_BEST if row[0] != tag]
+
+
+@pytest.fixture
+def no_waits(monkeypatch):
+    from vibonomics import http
+
+    real_sleep = asyncio.sleep
+
+    async def instant(_delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(http.asyncio, "sleep", instant)
+
+
+def _errors(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    return [c for c in plan["validation"] if c["level"] == "error"]
+
+
+def test_a_plan_carries_the_live_check_of_what_it_would_write(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        route = _live_listing(router)
+        plan = _plan(client)
+    assert plan["valid"] is True and plan["validated_at"]
+    assert plan["validation"] == [
+        {
+            "level": "ok",
+            "check": "listing",
+            "model": "acme/best",
+            "provider": None,
+            "message": "4 live endpoints, pins verified",
+        }
+    ]
+    assert route.call_count == 1 and "authorization" not in route.calls[0].request.headers  # the listing is public
+
+
+def test_a_pinned_provider_that_left_the_listing_blocks_the_write_and_nothing_is_sent(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router, _without("wafer/bf16"))
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["action"] == "create" and plan["valid"] is False
+        assert [c["provider"] for c in _errors(plan)] == ["wafer/bf16"]
+        response = _apply(client, plan)
+        assert post.call_count == 0
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail.startswith("Live check failed") and "wafer/bf16" in detail
+    state = _slug_state(client)
+    assert state["last_status"] == "blocked" and state["last_message"].startswith("Live check failed")
+    assert state["last_trigger"] == "manual" and state["version"] is None
+    assert client.get("/api/presets/state").json()["owned"] == []  # nothing was created, so nothing is ours
+
+
+def test_an_update_is_refused_the_same_way_and_the_live_preset_is_left_as_it_was(client):
+    _own()
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "tools": [{"type": "x"}]}, version=2)
+        _live_listing(router, _without("novita/fp4"))
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["action"] == "update" and plan["valid"] is False
+        assert _apply(client, plan).status_code == 409
+        assert post.call_count == 0
+    assert _slug_state(client)["last_status"] == "blocked"
+
+
+def test_a_model_with_no_live_listing_is_an_error_and_apply_refuses(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        router.get(f"{BASE}/models/acme/best/endpoints").mock(return_value=httpx.Response(404, json={"error": {}}))
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        response = _apply(client, plan)
+        assert post.call_count == 0
+    assert plan["valid"] is False and "no live endpoint" in _errors(plan)[0]["message"].lower()
+    assert response.status_code == 409 and "no live endpoint" in response.json()["detail"].lower()
+
+
+def test_unhealthy_providers_and_drifted_prices_warn_and_the_write_goes_ahead(client):
+    rows = [
+        _live_ep("novita/fp4", 0.08, 0.35, status=-2),
+        _live_ep("deepinfra/fp8", 0.10, 0.40, uptime_last_30m=20.0),
+        _live_ep("wafer/bf16", 0.12 * 1.5, 0.45),
+        _live_ep("slow/fp8", 0.5, 2.0),
+    ]
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router, rows)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        response = _apply(client, plan)
+        assert post.call_count == 1
+    assert plan["valid"] is True
+    assert sorted((c["level"], c["check"], c["provider"]) for c in plan["validation"] if c["level"] != "ok") == [
+        ("warning", "health", "deepinfra/fp8"),
+        ("warning", "health", "novita/fp4"),
+        ("warning", "price", "wafer/bf16"),
+    ]
+    assert response.status_code == 200 and response.json()["applied"] is True
+
+
+def test_a_model_that_is_about_to_expire_is_a_warning_and_does_not_block(client):
+    from datetime import UTC, datetime, timedelta
+
+    soon = (datetime.now(UTC) + timedelta(days=3)).date().isoformat()
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router, expiration_date=soon)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert _apply(client, plan).status_code == 200
+        assert post.call_count == 1
+    assert plan["valid"] is True
+    assert [(c["level"], c["check"]) for c in plan["validation"] if c["level"] != "ok"] == [("warning", "expiry")]
+
+
+def test_a_model_the_stored_copy_says_expires_soon_is_warned_about_though_its_listing_is_silent(client):
+    from datetime import UTC, datetime, timedelta
+
+    soon = (datetime.now(UTC) + timedelta(days=2)).date().isoformat()
+    _set_extra("acme/best", {"endpoints": ENDPOINTS, "expiration_date": soon})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router)
+        plan = _plan(client)
+    assert plan["valid"] is True
+    assert [c["check"] for c in plan["validation"] if c["level"] == "warning"] == ["expiry"]
+
+
+def test_a_listing_that_cannot_be_fetched_is_a_warning_and_does_not_block_the_write(client, no_waits):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        listing = router.get(f"{BASE}/models/acme/best/endpoints").mock(side_effect=httpx.ReadTimeout("slow"))
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        response = _apply(client, plan)
+        assert post.call_count == 1
+        assert listing.call_count == 4  # two tries for the preview and two for the check at the time of writing
+    assert plan["valid"] is True
+    assert [(c["level"], c["check"]) for c in plan["validation"]] == [("warning", "listing")]
+    assert "could not check live data for acme/best" in plan["validation"][0]["message"].lower()
+    assert response.status_code == 200 and response.json()["applied"] is True
+
+
+def test_the_check_is_made_again_when_the_write_is_asked_for_not_taken_from_the_preview(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        listing = _live_listing(router)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["valid"] is True
+        # the preview was clean; before the apply a provider leaves OpenRouter
+        listing.mock(return_value=_live_response(_without("deepinfra/fp8")))
+        response = _apply(client, plan)
+        assert post.call_count == 0
+    assert response.status_code == 409
+    assert "deepinfra/fp8" in response.json()["detail"]
+    assert _slug_state(client)["last_status"] == "blocked"
+
+
+def test_a_check_that_passed_at_preview_and_still_passes_lets_the_write_through(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        listing = _live_listing(router)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert _apply(client, plan).status_code == 200
+        assert post.call_count == 1
+        assert listing.call_count == 2  # once to preview, once at the time of writing
+    assert _slug_state(client)["last_status"] == "applied"
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_that_fails_the_live_check_records_blocked_and_writes_nothing(client, caplog):
+    from vibonomics import presets as engine
+
+    _settings(auto_apply=True)
+    with caplog.at_level("WARNING", logger="vibonomics.presets"), respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router, _without("novita/fp4"))
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        await engine.sync(SLUG, "schedule")
+        assert post.call_count == 0
+    last = _state()["last"][SLUG]
+    assert last["status"] == "blocked" and last["trigger"] == "schedule"
+    assert last["message"].startswith("Live check failed") and "novita/fp4" in last["message"]
+    assert not _state().get("owned")
+    assert any("novita/fp4" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    # and the run after it, once the provider is back, writes
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        await engine.sync(SLUG, "schedule")
+        assert post.call_count == 1
+    assert _state()["last"][SLUG]["status"] == "applied"
+
+
+def test_an_unchanged_plan_still_carries_the_live_health_of_what_is_already_written(client):
+    _own()
+    desired = build_config(None, ["acme/best"], ["novita/fp4", "deepinfra/fp8", "wafer/bf16"])
+    rows = [_live_ep("novita/fp4", 0.08, 0.35, status=-3), *[_live_ep(*r) for r in LIVE_BEST[1:]]]
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, desired, version=2)
+        _live_listing(router, rows)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert _apply(client, plan).json()["applied"] is False
+        assert post.call_count == 0
+    assert plan["action"] == "unchanged" and plan["valid"] is True and plan["validated_at"]
+    assert [(c["level"], c["check"], c["provider"]) for c in plan["validation"] if c["level"] != "ok"] == [
+        ("warning", "health", "novita/fp4")
+    ]
+
+
+def test_the_digest_does_not_depend_on_what_the_live_check_found(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        listing = _live_listing(router)
+        clean = _plan(client)
+        listing.mock(return_value=_live_response(_without("wafer/bf16")))
+        broken = _plan(client)
+    assert clean["valid"] is True and broken["valid"] is False
+    assert clean["digest"] == broken["digest"] and clean["config"] == broken["config"]
+
+
+def test_a_blocked_plan_makes_no_live_check(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "mine/by-hand"})
+        listing = _live_listing(router)
+        plan = _plan(client)
+        assert listing.call_count == 0
+    assert plan["action"] == "blocked"
+    assert plan["validation"] == [] and plan["validated_at"] is None and plan["valid"] is True
+
+
+def test_a_draft_is_checked_too_because_the_check_only_reads(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        listing = _live_listing(router, _without("wafer/bf16"))
+        response = client.post("/api/presets/plan", json={"settings": _saved_presets(client)})
+        assert listing.call_count == 1
+    plan = response.json()
+    assert plan["draft"] is True and plan["valid"] is False
+    assert [c["provider"] for c in _errors(plan)] == ["wafer/bf16"]
+
+
+def test_every_model_of_a_plan_with_several_models_is_checked_against_its_own_listing(client):
+    _settings(max_models=2)
+    _give_endpoints("acme/steady", [("steady-a/fp8", 0.105, 0.42)])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router)
+        router.get(f"{BASE}/models/acme/steady/endpoints").mock(
+            return_value=httpx.Response(200, json={"data": {"endpoints": [_live_ep("other/fp8", 0.105, 0.42)]}})
+        )
+        plan = _plan(client)
+    # steady has nothing else pinned, so the preset could not serve it at all
+    assert [(c["model"], c["check"], c["provider"]) for c in _errors(plan)] == [
+        ("acme/steady", "provider", "steady-a/fp8"),
+        ("acme/steady", "pins", None),
+    ]
+    assert plan["valid"] is False
+    assert {c["model"] for c in plan["validation"]} == {"acme/best", "acme/steady"}
