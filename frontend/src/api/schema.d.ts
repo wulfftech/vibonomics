@@ -910,7 +910,7 @@ export interface components {
             };
             /**
              * Has System Prompt
-             * @description A preset with a system prompt is never written
+             * @description The live version has a system prompt. A write sends it back unless the preset's owner manages it
              */
             has_system_prompt: boolean;
             /**
@@ -1338,6 +1338,23 @@ export interface components {
             /** Discount */
             discount: number | null;
         };
+        /** PresetCapabilityOut */
+        PresetCapabilityOut: {
+            /** Model Id */
+            model_id: string;
+            /**
+             * Provider
+             * @description The provider tag the model is pinned to; null for a model pinned to none, which OpenRouter routes
+             */
+            provider: string | null;
+            /**
+             * Supports
+             * @description For each numeric parameter the owner sets, whether that endpoint takes it. `unknown` when the listing did not say, and for an unpinned model when its endpoints disagree
+             */
+            supports: {
+                [key: string]: "yes" | "no" | "unknown";
+            };
+        };
         /** PresetCatalogOut */
         PresetCatalogOut: {
             /**
@@ -1383,7 +1400,7 @@ export interface components {
             level: "ok" | "warning" | "error";
             /**
              * Check
-             * @description What was checked: listing, provider, pins, health, price, expiry, params or max_tokens
+             * @description What was checked: listing, provider, pins, health, price, expiry, params, max_tokens, served (whether the preset's own quantization and ignore filters leave the model any endpoint) or free
              */
             check: string;
             /**
@@ -1411,6 +1428,71 @@ export interface components {
              * @description Providers whose endpoints a blocklist kept from being chosen
              */
             providers: string[];
+        };
+        /**
+         * PresetGuardrails
+         * @description What the owner wants held in a preset besides the models: each key is left alone, set, or removed.
+         *
+         *     A key that is ``None`` and not in ``clear`` is not managed: whatever is on the preset at OpenRouter stays, and is
+         *     sent back with every write. A value is managed: it is written. A key named in ``clear`` is managed too, and is
+         *     taken off the preset. One key cannot be both.
+         */
+        PresetGuardrails: {
+            /** Temperature */
+            temperature?: number | null;
+            /**
+             * Max Tokens
+             * @description Sent as `max_tokens`: OpenRouter drops `max_completion_tokens` from a preset.
+             */
+            max_tokens?: number | null;
+            /** Repetition Penalty */
+            repetition_penalty?: number | null;
+            /** Frequency Penalty */
+            frequency_penalty?: number | null;
+            /** Presence Penalty */
+            presence_penalty?: number | null;
+            /** Top P */
+            top_p?: number | null;
+            /**
+             * Quantizations
+             * @description Only endpoints serving at one of these precisions. An endpoint whose precision OpenRouter lists as `unknown` is left out unless `unknown` is named.
+             */
+            quantizations?: ("int4" | "int8" | "fp4" | "mxfp4" | "nvfp4" | "fp6" | "fp8" | "mxfp8" | "fp16" | "bf16" | "fp32" | "unknown")[] | null;
+            /**
+             * Ignore
+             * @description Providers the preset never routes to, by slug: `deepinfra`, or `google-vertex/europe`.
+             */
+            ignore?: string[] | null;
+            /**
+             * Require Parameters
+             * @description Route only to endpoints that support every parameter in the request. A preset with it on is refused by OpenRouter when no endpoint of the model qualifies.
+             */
+            require_parameters?: boolean | null;
+            /**
+             * System Prompt
+             * @description The system prompt the preset holds. Sent as a system message with every write.
+             */
+            system_prompt?: string | null;
+            /**
+             * Clear
+             * @description Keys to take off the preset. A key is not also set.
+             */
+            clear?: ("temperature" | "max_tokens" | "repetition_penalty" | "frequency_penalty" | "presence_penalty" | "top_p" | "quantizations" | "ignore" | "require_parameters" | "system_prompt")[];
+        };
+        /** PresetGuardrailsOut */
+        PresetGuardrailsOut: {
+            /**
+             * Set
+             * @description The guardrails this plan writes, by key, with their values: `temperature`, `max_tokens`, `repetition_penalty`, `frequency_penalty`, `presence_penalty`, `top_p`, `quantizations`, `ignore`, `require_parameters` and `system_prompt`. A key that is not here is not managed, and the live value stays.
+             */
+            set: {
+                [key: string]: unknown;
+            };
+            /**
+             * Cleared
+             * @description The guardrails this plan takes off the preset
+             */
+            cleared: ("temperature" | "max_tokens" | "repetition_penalty" | "frequency_penalty" | "presence_penalty" | "top_p" | "quantizations" | "ignore" | "require_parameters" | "system_prompt")[];
         };
         /** PresetInspectIn */
         PresetInspectIn: {
@@ -1455,6 +1537,11 @@ export interface components {
             };
             /** Has System Prompt */
             has_system_prompt: boolean;
+            /**
+             * System Prompt
+             * @description The live system prompt, in full up to 20,000 characters; null when the preset has none
+             */
+            system_prompt: string | null;
             /**
              * Models
              * @description The models the config names, the lead first
@@ -1628,9 +1715,23 @@ export interface components {
             };
             /**
              * Managed Keys
-             * @description The keys Vibonomics decides: `provider.*` ones are inside `provider`
+             * @description The keys Vibonomics decides: `provider.*` ones are inside `provider`. The guardrails the owner sets or removes for this preset follow the always-managed ones.
              */
             managed_keys: string[];
+            /** @description What this plan writes for the guardrail keys */
+            guardrails: components["schemas"]["PresetGuardrailsOut"];
+            /** @description The system prompt on the live preset and the one this plan sends. A write with no system message would null the prompt, so the live one is always sent back unless the owner manages it */
+            system_prompt: components["schemas"]["PresetSystemPromptOut"];
+            /**
+             * Capabilities
+             * @description Whether each pinned endpoint takes the numeric guardrails the owner sets; empty when none is set
+             */
+            capabilities: components["schemas"]["PresetCapabilityOut"][];
+            /**
+             * System Backup At
+             * @description When the system prompt this preset had was last saved before a write replaced or removed it; null when none was
+             */
+            system_backup_at: string | null;
             /**
              * Validation
              * @description What the live OpenRouter listing says about what this plan would write; empty when nothing was checked (a blocked plan)
@@ -1823,6 +1924,8 @@ export interface components {
              * @description For this preset, prefer the model's own test scores over the computed ones. None follows the global Scoring setting.
              */
             prefer_own_tests?: boolean | null;
+            /** @description Temperature, token cap, penalties, quantization, ignored providers and the system prompt: each left as it is on the preset, set, or removed. */
+            guardrails?: components["schemas"]["PresetGuardrails"];
         };
         /** PresetSlugStateOut */
         PresetSlugStateOut: {
@@ -1873,6 +1976,30 @@ export interface components {
             models: string[];
             /** Providers */
             providers: string[];
+        };
+        /** PresetSystemPromptOut */
+        PresetSystemPromptOut: {
+            /**
+             * Live
+             * @description The system prompt on the live preset, in full up to 20,000 characters; null when it has none
+             */
+            live: string | null;
+            /**
+             * Planned
+             * @description The system prompt the write carries, in full up to 20,000 characters; null sends none
+             */
+            planned: string | null;
+            /**
+             * Source
+             * @description `managed`: the text set under guardrails. `cleared`: the owner removes it. `kept`: the live prompt, sent back as it is. `none`: there is none and none is set.
+             * @enum {string}
+             */
+            source: "managed" | "cleared" | "kept" | "none";
+            /**
+             * Changed
+             * @description Whether the write changes the system prompt
+             */
+            changed: boolean;
         };
         /** PresetTaskOut */
         PresetTaskOut: {

@@ -2217,7 +2217,7 @@
           "has_system_prompt": {
             "type": "boolean",
             "title": "Has System Prompt",
-            "description": "A preset with a system prompt is never written"
+            "description": "The live version has a system prompt. A write sends it back unless the preset's owner manages it"
           },
           "passthrough_keys": {
             "items": {
@@ -3483,6 +3483,46 @@
         ],
         "title": "PresetCandidateOut"
       },
+      "PresetCapabilityOut": {
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider",
+            "description": "The provider tag the model is pinned to; null for a model pinned to none, which OpenRouter routes"
+          },
+          "supports": {
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "yes",
+                "no",
+                "unknown"
+              ]
+            },
+            "type": "object",
+            "title": "Supports",
+            "description": "For each numeric parameter the owner sets, whether that endpoint takes it. `unknown` when the listing did not say, and for an unpinned model when its endpoints disagree"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model_id",
+          "provider",
+          "supports"
+        ],
+        "title": "PresetCapabilityOut"
+      },
       "PresetCatalogOut": {
         "properties": {
           "synced_at": {
@@ -3586,7 +3626,7 @@
           "check": {
             "type": "string",
             "title": "Check",
-            "description": "What was checked: listing, provider, pins, health, price, expiry, params or max_tokens"
+            "description": "What was checked: listing, provider, pins, health, price, expiry, params, max_tokens, served (whether the preset's own quantization and ignore filters leave the model any endpoint) or free"
           },
           "model": {
             "anyOf": [
@@ -3649,6 +3689,218 @@
           "providers"
         ],
         "title": "PresetExcludedOut"
+      },
+      "PresetGuardrails": {
+        "properties": {
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 2000000.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens",
+            "description": "Sent as `max_tokens`: OpenRouter drops `max_completion_tokens` from a preset."
+          },
+          "repetition_penalty": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repetition Penalty"
+          },
+          "frequency_penalty": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": -2.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Penalty"
+          },
+          "presence_penalty": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": -2.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presence Penalty"
+          },
+          "top_p": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top P"
+          },
+          "quantizations": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "int4",
+                    "int8",
+                    "fp4",
+                    "mxfp4",
+                    "nvfp4",
+                    "fp6",
+                    "fp8",
+                    "mxfp8",
+                    "fp16",
+                    "bf16",
+                    "fp32",
+                    "unknown"
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantizations",
+            "description": "Only endpoints serving at one of these precisions. An endpoint whose precision OpenRouter lists as `unknown` is left out unless `unknown` is named."
+          },
+          "ignore": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ignore",
+            "description": "Providers the preset never routes to, by slug: `deepinfra`, or `google-vertex/europe`."
+          },
+          "require_parameters": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Require Parameters",
+            "description": "Route only to endpoints that support every parameter in the request. A preset with it on is refused by OpenRouter when no endpoint of the model qualifies."
+          },
+          "system_prompt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 20000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt",
+            "description": "The system prompt the preset holds. Sent as a system message with every write."
+          },
+          "clear": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "temperature",
+                "max_tokens",
+                "repetition_penalty",
+                "frequency_penalty",
+                "presence_penalty",
+                "top_p",
+                "quantizations",
+                "ignore",
+                "require_parameters",
+                "system_prompt"
+              ]
+            },
+            "type": "array",
+            "title": "Clear",
+            "description": "Keys to take off the preset. A key is not also set."
+          }
+        },
+        "type": "object",
+        "title": "PresetGuardrails",
+        "description": "What the owner wants held in a preset besides the models: each key is left alone, set, or removed.\n\nA key that is ``None`` and not in ``clear`` is not managed: whatever is on the preset at OpenRouter stays, and is\nsent back with every write. A value is managed: it is written. A key named in ``clear`` is managed too, and is\ntaken off the preset. One key cannot be both."
+      },
+      "PresetGuardrailsOut": {
+        "properties": {
+          "set": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Set",
+            "description": "The guardrails this plan writes, by key, with their values: `temperature`, `max_tokens`, `repetition_penalty`, `frequency_penalty`, `presence_penalty`, `top_p`, `quantizations`, `ignore`, `require_parameters` and `system_prompt`. A key that is not here is not managed, and the live value stays."
+          },
+          "cleared": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "temperature",
+                "max_tokens",
+                "repetition_penalty",
+                "frequency_penalty",
+                "presence_penalty",
+                "top_p",
+                "quantizations",
+                "ignore",
+                "require_parameters",
+                "system_prompt"
+              ]
+            },
+            "type": "array",
+            "title": "Cleared",
+            "description": "The guardrails this plan takes off the preset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "set",
+          "cleared"
+        ],
+        "title": "PresetGuardrailsOut"
       },
       "PresetInspectIn": {
         "properties": {
@@ -3733,6 +3985,18 @@
             "type": "boolean",
             "title": "Has System Prompt"
           },
+          "system_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt",
+            "description": "The live system prompt, in full up to 20,000 characters; null when the preset has none"
+          },
           "models": {
             "items": {
               "type": "string"
@@ -3803,6 +4067,7 @@
           "workspace",
           "config",
           "has_system_prompt",
+          "system_prompt",
           "models",
           "providers",
           "versions",
@@ -4125,7 +4390,36 @@
             },
             "type": "array",
             "title": "Managed Keys",
-            "description": "The keys Vibonomics decides: `provider.*` ones are inside `provider`"
+            "description": "The keys Vibonomics decides: `provider.*` ones are inside `provider`. The guardrails the owner sets or removes for this preset follow the always-managed ones."
+          },
+          "guardrails": {
+            "$ref": "#/components/schemas/PresetGuardrailsOut",
+            "description": "What this plan writes for the guardrail keys"
+          },
+          "system_prompt": {
+            "$ref": "#/components/schemas/PresetSystemPromptOut",
+            "description": "The system prompt on the live preset and the one this plan sends. A write with no system message would null the prompt, so the live one is always sent back unless the owner manages it"
+          },
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/PresetCapabilityOut"
+            },
+            "type": "array",
+            "title": "Capabilities",
+            "description": "Whether each pinned endpoint takes the numeric guardrails the owner sets; empty when none is set"
+          },
+          "system_backup_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Backup At",
+            "description": "When the system prompt this preset had was last saved before a write replaced or removed it; null when none was"
           },
           "validation": {
             "items": {
@@ -4188,6 +4482,10 @@
           "own_tests_preferred",
           "passthrough",
           "managed_keys",
+          "guardrails",
+          "system_prompt",
+          "capabilities",
+          "system_backup_at",
           "validation",
           "validated_at",
           "valid",
@@ -4504,6 +4802,10 @@
             ],
             "title": "Prefer Own Tests",
             "description": "For this preset, prefer the model's own test scores over the computed ones. None follows the global Scoring setting."
+          },
+          "guardrails": {
+            "$ref": "#/components/schemas/PresetGuardrails",
+            "description": "Temperature, token cap, penalties, quantization, ignored providers and the system prompt: each left as it is on the preset, set, or removed."
           }
         },
         "type": "object",
@@ -4679,6 +4981,58 @@
           "providers"
         ],
         "title": "PresetSummaryOut"
+      },
+      "PresetSystemPromptOut": {
+        "properties": {
+          "live": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live",
+            "description": "The system prompt on the live preset, in full up to 20,000 characters; null when it has none"
+          },
+          "planned": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned",
+            "description": "The system prompt the write carries, in full up to 20,000 characters; null sends none"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "managed",
+              "cleared",
+              "kept",
+              "none"
+            ],
+            "title": "Source",
+            "description": "`managed`: the text set under guardrails. `cleared`: the owner removes it. `kept`: the live prompt, sent back as it is. `none`: there is none and none is set."
+          },
+          "changed": {
+            "type": "boolean",
+            "title": "Changed",
+            "description": "Whether the write changes the system prompt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "live",
+          "planned",
+          "source",
+          "changed"
+        ],
+        "title": "PresetSystemPromptOut"
       },
       "PresetTaskOut": {
         "properties": {
