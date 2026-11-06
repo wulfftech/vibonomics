@@ -59,6 +59,11 @@ export const NUMBER_LIMITS: Record<NumberKey, { min: number; max: number; step: 
   top_p: { min: 0.01, max: 1, step: 0.01 },
 };
 
+/** What a value input that is not Set shows in place of a value. */
+export function idlePlaceholder(mode: GuardrailMode): string {
+  return mode === 'leave' ? 'Left as it is' : 'Will be removed';
+}
+
 // What a key holds the moment it is switched to Set with nothing to start from.
 const EMPTY: { [K in GuardrailKey]: Slot<K> } = {
   temperature: '',
@@ -161,6 +166,27 @@ function listProblem(key: 'quantizations' | 'ignore', value: readonly string[]):
   return null;
 }
 
+function promptProblem(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return 'Write the prompt, or choose Remove';
+  }
+  return value.length > PROMPT_LIMIT ? `At most ${PROMPT_LIMIT.toLocaleString('en')} characters` : null;
+}
+
+/** What is wrong with the value a Set key holds, or null when it can be sent. */
+function valueProblem(key: GuardrailKey, value: unknown): string | null {
+  if (key === 'quantizations' || key === 'ignore') {
+    return Array.isArray(value) ? listProblem(key, value as string[]) : 'Choose at least one';
+  }
+  if (key === 'require_parameters') {
+    return typeof value === 'boolean' ? null : 'Choose on or off';
+  }
+  if (key === 'system_prompt') {
+    return promptProblem(value);
+  }
+  return numberProblem(key, value as number | '');
+}
+
 /**
  * What stops these guardrails being saved or previewed, by key. Only a key that is Set can be wrong: Leave and Remove
  * hold no value. Empty, until the owner fixes every Set row.
@@ -171,27 +197,10 @@ export function guardrailProblems(
   const g = draftOf(guardrails);
   const problems: Partial<Record<GuardrailKey, string>> = {};
   for (const key of GUARDRAIL_KEYS) {
-    const value = g[key];
-    if (value === null) {
+    if (g[key] === null) {
       continue;
     }
-    let problem: string | null = null;
-    if (g.clear.includes(key)) {
-      problem = 'This is both set and removed: choose one';
-    } else if (key === 'quantizations' || key === 'ignore') {
-      problem = Array.isArray(value) ? listProblem(key, value) : 'Choose at least one';
-    } else if (key === 'require_parameters') {
-      problem = typeof value === 'boolean' ? null : 'Choose on or off';
-    } else if (key === 'system_prompt') {
-      problem =
-        typeof value !== 'string' || value.trim() === ''
-          ? 'Write the prompt, or choose Remove'
-          : value.length > PROMPT_LIMIT
-            ? `At most ${PROMPT_LIMIT.toLocaleString('en')} characters`
-            : null;
-    } else {
-      problem = numberProblem(key, value as number | '');
-    }
+    const problem = g.clear.includes(key) ? 'This is both set and removed: choose one' : valueProblem(key, g[key]);
     if (problem !== null) {
       problems[key] = problem;
     }
@@ -226,13 +235,16 @@ export function describeLive(value: unknown): string {
   if (value === undefined || value === null) {
     return 'not set';
   }
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
   if (Array.isArray(value)) {
-    return value.length === 0 ? 'an empty list' : value.map(String).join(', ');
+    return value.length === 0 ? 'an empty list' : value.map(describeLive).join(', ');
   }
-  if (typeof value === 'object') {
-    return JSON.stringify(value);
-  }
-  return String(value);
+  return JSON.stringify(value) ?? 'not set';
 }
 
 /** The live value as the right type to start a Set row from, or undefined when it cannot be one. */
@@ -247,7 +259,7 @@ export function seedFromLive(
     const names = Array.isArray(live) ? live.filter((entry): entry is string => typeof entry === 'string') : [];
     const kept =
       key === 'quantizations' ? names.filter((n) => (QUANTIZATIONS as readonly string[]).includes(n)) : names;
-    return kept.length === 0 ? undefined : (kept as Quantization[]);
+    return kept.length === 0 ? undefined : kept;
   }
   return typeof live === 'number' && Number.isFinite(live) ? live : undefined;
 }

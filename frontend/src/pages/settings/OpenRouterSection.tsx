@@ -7,7 +7,7 @@ import { useCanChange } from '../../api/system';
 import { fullSettings, PRESET_DEFAULTS, type FullSettings, type PresetSettings } from '../../api/types';
 import { ErrorState, LoadingState } from '../../components/DataState';
 import { usePersistentState } from '../../lib/usePersistentState';
-import { GLOBAL_KEY, itemSlug, presetEntries, presetSlug } from '../../lib/presets';
+import { GLOBAL_KEY, hasGuardrailProblems, itemSlug, presetEntries, presetSlug } from '../../lib/presets';
 import { AdoptPresetModal } from './AdoptPresetModal';
 import { GlobalPresetSettings } from './GlobalPresetSettings';
 import { NewPresetModal } from './NewPresetModal';
@@ -101,15 +101,24 @@ export function OpenRouterSection() {
 
   const item = entry?.item ?? null;
   const pushesSaved = entry !== null && item !== null && item.enabled && unsaved.has(entry.slug);
+  // Save writes every preset in the draft, so a guardrail left unfinished on any of them holds it back.
+  const unfinished = presets.items.filter((i) => hasGuardrailProblems(i.guardrails)).map(itemSlug);
   const saveBar = (
     <Stack gap="xs">
-      {pushesSaved && (
+      {pushesSaved && unfinished.length === 0 && (
         <Text size="xs" c="dimmed" ta="right">
           Saving also sends the update to OpenRouter.
         </Text>
       )}
+      {unfinished.length > 0 && (
+        <Text size="xs" c="dimmed" ta="right">
+          Save is off until the guardrails of {unfinished.join(', ')} have a usable value, or are set to Leave or
+          Remove.
+        </Text>
+      )}
       <SaveBar
         dirty={draft.dirty}
+        canSave={unfinished.length === 0}
         saving={draft.saving}
         onReset={draft.reset}
         onSave={() => draft.submit({ onSaved: pushesSaved ? () => update.pushSaved(entry.slug) : undefined })}

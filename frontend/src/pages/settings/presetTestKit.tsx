@@ -21,6 +21,14 @@ export const fetchMock: Mock = vi.fn();
 // jsdom has no scrollIntoView, which a Select calls to show the option that is chosen when it opens.
 Element.prototype.scrollIntoView = () => undefined;
 
+// jsdom has no document.fonts, which an autosizing Textarea listens to so that it can resize when a font arrives.
+if (!('fonts' in document)) {
+  Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => undefined, removeEventListener: () => undefined },
+    configurable: true,
+  });
+}
+
 export const SELECTED_KEY = 'vibonomics.presets.selected';
 
 const FLASH = { model_id: 'deepseek/flash', name: 'Flash', score: 71.4, task_cost: 0.055, value: 1298, discount: 0.3 };
