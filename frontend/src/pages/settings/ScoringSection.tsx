@@ -7,6 +7,7 @@ import {
   Select,
   SimpleGrid,
   Stack,
+  Switch,
   Table,
   Text,
   TextInput,
@@ -26,9 +27,19 @@ const WEIGHTS = [
   {
     key: 'own_tests_weight',
     label: 'Vibonomics tests',
-    description: "Weight of Vibonomics's own test results inside coding and agentic, next to third-party metrics",
+    description:
+      "Weight of Vibonomics's own test results inside coding and agentic, next to third-party metrics. It has no effect on a model whose own score is preferred (see below).",
   },
 ] as const;
+
+const MIN_TASKS = 1;
+const MAX_TASKS = 200;
+const DEFAULT_MIN_TASKS = 5;
+
+/** The server refuses anything outside 1..200, so a value typed or pasted outside it is pulled in here. */
+function clampTasks(value: number): number {
+  return Math.min(MAX_TASKS, Math.max(MIN_TASKS, Math.round(value)));
+}
 
 function slug(name: string, taken: Set<string>): string {
   const base =
@@ -149,6 +160,37 @@ export function ScoringSection() {
           <Text size="xs" c="dimmed">
             Weights are relative; they don&apos;t need to add up to 1.
           </Text>
+        </Stack>
+      </Card>
+
+      <Card withBorder padding="md">
+        <Stack gap="sm">
+          <Title order={4}>Your own tests</Title>
+          <Switch
+            label="Prefer my own test scores"
+            description="When a model has at least this many graded results from your own tests, its coding and agentic score IS its own test score instead of a blend with third-party benchmarks. Intelligence stays as computed."
+            checked={scoring.prefer_own_tests}
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              update((old) => ({ ...old, scoring: { ...old.scoring, prefer_own_tests: checked } }));
+            }}
+          />
+          <NumberInput
+            label="Fewest graded tasks"
+            description="Graded task results, added up over providers. A model tested on only a few tasks is too noisy to override the benchmarks."
+            min={MIN_TASKS}
+            max={MAX_TASKS}
+            allowDecimal={false}
+            w={260}
+            disabled={!scoring.prefer_own_tests}
+            value={scoring.prefer_own_tests_min_tasks}
+            onChange={(next) =>
+              update((old) => ({
+                ...old,
+                scoring: { ...old.scoring, prefer_own_tests_min_tasks: clampTasks(toNumber(next, DEFAULT_MIN_TASKS)) },
+              }))
+            }
+          />
         </Stack>
       </Card>
 
