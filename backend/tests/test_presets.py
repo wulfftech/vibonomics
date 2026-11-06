@@ -17,6 +17,7 @@ from vibonomics.app import create_app
 from vibonomics.config import get_config
 from vibonomics.db import init_db, session_scope
 from vibonomics.orm import BenchmarkScore, EvalResult, EvalRun, Model, ProviderConfig, Setting
+from vibonomics.preset_validation import FREE_TIER_WARNING
 from vibonomics.presets import (
     PLACEHOLDER_MESSAGES,
     STATE_KEY,
@@ -39,6 +40,7 @@ from vibonomics.presets import (
 from vibonomics.pricing import Task
 from vibonomics.settings_store import (
     AppSettings,
+    PresetGuardrails,
     PresetSettings,
     PresetsSettings,
     load_settings,
@@ -512,7 +514,9 @@ def test_a_preset_vibonomics_did_not_create_is_never_touched(client):
     assert plan["current_version"] == 1
 
 
-def test_a_system_prompt_blocks_the_update_because_the_api_cannot_carry_it(client):
+def test_a_preset_with_a_system_prompt_is_planned_and_the_prompt_goes_back_with_the_write(client):
+    # OpenRouter takes the prompt from the system message of each write and nulls it when there is none, so the
+    # live one is resent: the preset is no longer one the app has to refuse.
     with session_scope() as session:
         row = session.get(Setting, STATE_KEY) or Setting(key=STATE_KEY, value={})
         row.value = {"owned": [SLUG]}
@@ -520,8 +524,9 @@ def test_a_system_prompt_blocks_the_update_because_the_api_cannot_carry_it(clien
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, {"model": "acme/best"}, system_prompt="Be brief.")
         plan = _plan(client)
-    assert plan["action"] == "blocked"
-    assert "system prompt" in plan["reason"]
+    assert plan["action"] == "update"
+    assert plan["request"]["body"]["messages"] == [{"role": "system", "content": "Be brief."}, *PLACEHOLDER_MESSAGES]
+    assert not any(c["path"] == "system_prompt" for c in plan["changes"])  # sent back as it is: nothing changes
 
 
 def _own(slug: str = SLUG) -> None:
@@ -2325,6 +2330,7 @@ def test_a_new_preset_shows_the_passthrough_it_takes_from_its_template(client):
 
 def test_a_plan_that_is_blocked_still_shows_what_the_live_preset_holds(client):
     _own_as(KEY)
+    _settings(min_score=99)  # no model passes, so nothing is planned, and the live preset is what there is to show
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, {"model": "acme/best", "tools": [1]}, version=3, system_prompt="Be brief.")
         plan = _plan(client)
@@ -2468,13 +2474,24 @@ def test_the_inspect_digest_names_the_slug_the_version_and_the_config(client):
 
 
 def test_inspect_says_why_a_preset_cannot_be_adopted(client):
-    for word, extra in (("system prompt", {"system_prompt": "Be brief."}), ("archived", {"status": "archived"})):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, status="archived")
+        body = _inspect(client).json()
+    assert body["adoptable"] is False
+    assert any("archived" in blocker for blocker in body["blockers"]), body["blockers"]
+
+
+def test_a_system_prompt_is_not_a_reason_to_refuse_a_preset_and_it_is_part_of_what_the_digest_names(client):
+    digests = []
+    for prompt in (None, "Be brief.", "Be terse."):
         with respx.mock(assert_all_called=False) as router:
-            _remote(router, HAND, HAND_CONFIG, version=3, **extra)
+            _remote(router, HAND, HAND_CONFIG, version=3, system_prompt=prompt)
             body = _inspect(client).json()
-        assert body["adoptable"] is False, word
-        assert any(word in blocker for blocker in body["blockers"]), (word, body["blockers"])
-        assert body["has_system_prompt"] is (word == "system prompt")
+        assert (body["adoptable"], body["blockers"]) == (True, [])
+        assert body["has_system_prompt"] is (prompt is not None)
+        digests.append(body["digest"])
+    assert len(set(digests)) == 3
+    assert digests[0] == digest_of(HAND, HAND_CONFIG, None, 3)  # no prompt: the digest is what it was before prompts
 
 
 def test_inspect_reads_a_preset_the_app_manages_too_and_says_it_is_managed(client):
@@ -2547,14 +2564,36 @@ def _saved_items(client: TestClient) -> list[dict[str, Any]]:
     return client.get("/api/settings").json()["settings"]["presets"]["items"]
 
 
-def test_adopting_is_refused_for_an_archived_preset_and_for_one_with_a_system_prompt(client):
-    for extra, word in (({"status": "archived"}, "archived"), ({"system_prompt": "Be brief."}, "system prompt")):
-        with respx.mock(assert_all_called=False) as router:
-            _remote(router, HAND, HAND_CONFIG, version=3, **extra)
-            digest = _inspect(client).json()["digest"]
-            response = _adopt(client, digest)
-        assert response.status_code == 409 and word in response.json()["detail"], word
+def test_adopting_is_refused_for_an_archived_preset(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, status="archived")
+        digest = _inspect(client).json()["digest"]
+        response = _adopt(client, digest)
+    assert response.status_code == 409 and "archived" in response.json()["detail"]
     assert _state() == {} and [i["slug"] for i in _saved_items(client)] == [SLUG]
+
+
+def test_a_preset_with_a_system_prompt_is_adopted_and_the_reviewed_digest_covers_the_prompt(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be brief.")
+        seen = _inspect(client).json()
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        response = _adopt(client, seen["digest"])
+        assert post.call_count == 0
+    assert response.status_code == 200 and response.json()["adopted"] is True
+    assert _state()["reviewed"] == {HAND: passthrough_digest(HAND_CONFIG, None, "Be brief.")}
+    assert _state()["reviewed"][HAND] != passthrough_digest(HAND_CONFIG)
+
+
+def test_adopting_is_refused_when_only_the_system_prompt_changed_since_it_was_shown(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be brief.")
+        stale = _inspect(client).json()["digest"]
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be terse.")
+        response = _adopt(client, stale)
+    assert response.status_code == 409 and "changed" in response.json()["detail"]
+    assert _state() == {}
 
 
 def test_adopting_is_refused_for_a_preset_that_is_already_managed_or_was_made_by_the_app(client):
@@ -3137,3 +3176,1232 @@ def test_every_model_of_a_plan_with_several_models_is_checked_against_its_own_li
     ]
     assert plan["valid"] is False
     assert {c["model"] for c in plan["validation"]} == {"acme/best", "acme/steady"}
+
+
+# ---- guardrails: the keys the owner decides besides the models -----------------------------------------------------
+
+
+def _g(**fields: Any) -> PresetGuardrails:
+    return PresetGuardrails(**fields)
+
+
+# (value to set, the value the live preset has) for each guardrail that is a config key
+SAMPLES: dict[str, tuple[Any, Any]] = {
+    "temperature": (0.7, 0.3),
+    "max_tokens": (4_096, 1_024),
+    "repetition_penalty": (1.1, 1.3),
+    "frequency_penalty": (0.5, -0.5),
+    "presence_penalty": (0.2, 0.9),
+    "top_p": (0.8, 0.95),
+    "quantizations": (["fp8"], ["bf16"]),
+    "ignore": (["slow"], ["nobody"]),
+    "require_parameters": (True, False),
+}
+PROVIDER_KEYS = ("quantizations", "ignore", "require_parameters")
+
+
+def _at(config: dict[str, Any], key: str) -> Any:
+    return (config.get("provider") or {}).get(key) if key in PROVIDER_KEYS else config.get(key)
+
+
+def _holding(config: dict[str, Any], key: str, value: Any) -> dict[str, Any]:
+    """``config`` with ``key`` at ``value``, inside the provider block where OpenRouter keeps it."""
+    if key in PROVIDER_KEYS:
+        return {**config, "provider": {**config.get("provider", {}), key: value}}
+    return {**config, key: value}
+
+
+def test_every_set_guardrail_is_written_where_openrouter_keeps_it_and_the_token_cap_is_max_tokens():
+    guard = _g(**{key: new for key, (new, _old) in SAMPLES.items()})
+    config = build_config({"model": "old", "tools": [1]}, ["a/m"], ["x/fp8"], guardrails=guard)
+    assert config == {
+        "model": "a/m",
+        "tools": [1],
+        "temperature": 0.7,
+        "max_tokens": 4_096,
+        "repetition_penalty": 1.1,
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.2,
+        "top_p": 0.8,
+        "provider": {
+            "only": ["x/fp8"],
+            "order": ["x/fp8"],
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "require_parameters": True,
+        },
+    }
+    assert "max_completion_tokens" not in config  # OpenRouter drops that one from a preset
+
+
+def test_a_guardrail_left_unset_keeps_what_the_live_preset_has_and_a_set_one_replaces_it():
+    live = {
+        "model": "old",
+        "temperature": 0.3,
+        "top_p": 0.5,
+        "provider": {"quantizations": ["fp8"], "ignore": ["slow"], "require_parameters": True, "only": ["x"]},
+    }
+    config = build_config(live, ["a/m"], ["y/fp8"], guardrails=_g(temperature=0.8))
+    assert (config["temperature"], config["top_p"]) == (0.8, 0.5)
+    assert config["provider"] == {
+        "quantizations": ["fp8"],
+        "ignore": ["slow"],
+        "require_parameters": True,
+        "only": ["y/fp8"],
+        "order": ["y/fp8"],
+    }
+    assert build_config(live, ["a/m"], ["y/fp8"], guardrails=_g()) == build_config(live, ["a/m"], ["y/fp8"])
+    assert live["temperature"] == 0.3  # the base is not edited in place
+
+
+def test_a_cleared_guardrail_is_taken_off_and_a_provider_block_it_emptied_goes_too():
+    live = {"model": "old", "temperature": 0.3, "top_p": 0.5, "provider": {"quantizations": ["fp8"], "ignore": ["x"]}}
+    config = build_config(live, ["a/m"], [], guardrails=_g(clear=["temperature", "quantizations"]))
+    assert config == {"model": "a/m", "top_p": 0.5, "provider": {"ignore": ["x"]}}
+    only = {"model": "old", "provider": {"quantizations": ["fp8"]}}
+    assert build_config(only, ["a/m"], [], guardrails=_g(clear=["quantizations"])) == {"model": "a/m"}
+    # clearing what is not there changes nothing, and a block that was already empty stays as it was
+    assert build_config({"model": "a/m", "provider": {}}, ["a/m"], [], guardrails=_g(clear=["ignore"])) == {
+        "model": "a/m",
+        "provider": {},
+    }
+
+
+def test_a_guardrail_set_with_nowhere_to_go_makes_the_provider_block():
+    assert build_config(None, ["m"], [], guardrails=_g(ignore=["slow"])) == {
+        "model": "m",
+        "provider": {"ignore": ["slow"]},
+    }
+
+
+def test_the_owned_view_has_a_guardrail_key_only_when_the_owner_sets_or_clears_it():
+    live = {"model": "a", "temperature": 0.3, "top_p": 0.5, "provider": {"quantizations": ["fp8"], "ignore": ["x"]}}
+    plain = owned_view(live)
+    assert set(plain) == {"model", "models", "route", "only", "order", "sort"}
+    view = owned_view(live, _g(temperature=0.7, clear=["quantizations"]), "a prompt")
+    assert (view["temperature"], view["quantizations"]) == (0.3, ["fp8"])  # the live values, to be compared
+    assert not {"top_p", "ignore", "system_prompt"} & set(view)
+    assert owned_view(live, _g(system_prompt="mine"), "live one")["system_prompt"] == "live one"
+    assert owned_view(live, _g(clear=["system_prompt"]), "")["system_prompt"] is None
+    assert owned_view({"model": "a"}, _g(top_p=0.5))["top_p"] is None
+
+
+def test_the_passthrough_leaves_out_what_the_app_manages_and_keeps_what_it_does_not():
+    config = {
+        "model": "a",
+        "temperature": 0.3,
+        "top_p": 0.5,
+        "tools": [1],
+        "provider": {
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "require_parameters": True,
+            "data_collection": "deny",
+        },
+    }
+    assert passthrough_view(config) == {
+        "temperature": 0.3,
+        "top_p": 0.5,
+        "tools": [1],
+        "provider": {
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "require_parameters": True,
+            "data_collection": "deny",
+        },
+    }
+    assert passthrough_view(config, _g(temperature=0.7, clear=["ignore"])) == {
+        "top_p": 0.5,
+        "tools": [1],
+        "provider": {"quantizations": ["fp8"], "require_parameters": True, "data_collection": "deny"},
+    }
+    everything = _g(quantizations=["fp8"], ignore=["x"], require_parameters=True, clear=["top_p"])
+    assert passthrough_view(config, everything) == {
+        "temperature": 0.3,
+        "tools": [1],
+        "provider": {"data_collection": "deny"},
+    }
+    assert passthrough_view({"model": "a", "provider": {"ignore": ["x"]}}, _g(ignore=["y"])) == {}
+
+
+def test_the_passthrough_digest_follows_an_unmanaged_system_prompt_and_ignores_a_managed_one():
+    config = {"model": "a", "tools": [1], "temperature": 0.3}
+    plain = passthrough_digest(config)
+    assert passthrough_digest(config, None, None) == passthrough_digest(config, None, "") == plain
+    assert passthrough_digest(config, None, "Be brief.") != plain
+    assert passthrough_digest(config, None, "Be brief.") != passthrough_digest(config, None, "Be terse.")
+    for owned in (_g(system_prompt="Mine"), _g(clear=["system_prompt"])):
+        assert passthrough_digest(config, owned, "Be brief.") == passthrough_digest(config, owned, "Be terse.") == plain
+    # a guardrail the owner manages is theirs, so the live value of it is not part of what they reviewed
+    managed = _g(temperature=0.9)
+    assert passthrough_digest(config, managed) == passthrough_digest({**config, "temperature": 1.5}, managed)
+    assert passthrough_digest(config) != passthrough_digest({**config, "temperature": 1.5})
+
+
+def test_the_diff_names_a_system_prompt_that_changes_with_its_text_and_not_as_json():
+    config = {"model": "a"}
+    assert [(c.path, c.before, c.after) for c in diff_config(config, config, "Be brief.", "Be terse.")] == [
+        ("system_prompt", "Be brief.", "Be terse.")
+    ]
+    assert [(c.before, c.after) for c in diff_config(config, config, "Be brief.", None)] == [("Be brief.", None)]
+    assert [(c.before, c.after) for c in diff_config(config, config, None, "New.")] == [(None, "New.")]
+    assert diff_config(config, config, "same", "same") == [] and diff_config(config, config, None, "") == []
+
+
+def test_a_cleared_guardrail_shows_in_the_diff_as_a_key_that_goes():
+    before = {"model": "a", "temperature": 0.3, "provider": {"ignore": ["x"], "only": ["y"]}}
+    after = build_config(before, ["a"], ["y"], guardrails=_g(clear=["temperature", "ignore"]))
+    assert {c.path: (c.before, c.after) for c in diff_config(before, after)} == {
+        "temperature": ("0.3", None),
+        "provider.ignore": ('["x"]', None),
+        "provider.order": (None, '["y"]'),
+    }
+
+
+def test_a_key_the_write_took_off_that_is_still_on_the_preset_is_named_among_those_not_kept():
+    sent = {"model": "m", "provider": {"only": ["x"]}}
+    stored = {"model": "m", "temperature": 0.3, "provider": {"only": ["x"], "ignore": ["slow"]}}
+    assert unsaved_keys(sent, stored, ["temperature", "provider.ignore", "top_p"]) == ["temperature", "provider.ignore"]
+    assert unsaved_keys(sent, sent, ["temperature", "provider.ignore"]) == []
+    assert unsaved_keys(sent, stored) == []  # nothing was cleared, so what is extra there is not this write's
+
+
+def _write(router: respx.Router) -> respx.Route:
+    return router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+
+
+def _wrote(post: respx.Route) -> dict[str, Any]:
+    return json.loads(post.calls[0].request.content)
+
+
+def _listed(managed: list[str], key: str) -> bool:
+    return (f"provider.{key}" if key in PROVIDER_KEYS else key) in managed
+
+
+@pytest.mark.parametrize("key", list(SAMPLES))
+def test_a_guardrail_that_is_set_is_written_in_the_request_and_read_back(client, key):
+    new, old = SAMPLES[key]
+    _own_as(KEY)
+    _settings(guardrails={key: new})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, _holding({"model": "acme/best"}, key, old), version=2)
+        post = _write(router)
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        assert _at(plan["request"]["body"], key) == new
+        assert key in {c["path"].removeprefix("provider.") for c in plan["changes"]}
+        applied = _apply(client, plan).json()
+        assert applied["applied"] is True and applied["unsaved"] == []
+    assert _at(_wrote(post), key) == new
+
+
+@pytest.mark.parametrize("key", list(SAMPLES))
+def test_a_guardrail_that_is_cleared_is_left_out_of_the_request_and_read_back_as_gone(client, key):
+    _new, old = SAMPLES[key]
+    _own_as(KEY)
+    _settings(guardrails={"clear": [key]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, _holding({"model": "acme/best"}, key, old), version=2)
+        post = _write(router)
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        assert _at(plan["request"]["body"], key) is None
+        assert key in {c["path"].removeprefix("provider.") for c in plan["changes"]}
+        applied = _apply(client, plan).json()
+        assert applied["applied"] is True and applied["unsaved"] == []
+    assert _at(_wrote(post), key) is None
+
+
+@pytest.mark.parametrize("key", list(SAMPLES))
+def test_a_guardrail_nobody_manages_is_sent_back_untouched_and_shown_as_passthrough(client, key):
+    _new, old = SAMPLES[key]
+    _own_as(KEY)
+    desired = build_config(None, ["acme/best"], TAGS)
+    if key == "quantizations":  # that one narrows which endpoints a plan may pin, which is not what this is about
+        old = ["fp4", "fp8", "bf16"]
+    live = _holding(desired, key, old)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and plan["changes"] == []  # nothing here is the app's to change
+    assert _at(plan["config"], key) == old
+    assert _at(plan["passthrough"], key) == old
+    assert _listed(plan["managed_keys"], key) is False
+
+
+def test_a_plan_says_which_guardrails_it_manages_beside_the_keys_it_always_decides(client):
+    _own_as(KEY)
+    _settings(guardrails={"temperature": 0.7, "ignore": ["slow"], "clear": ["top_p"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "temperature": 0.3, "top_p": 0.9, "tools": [1]}, version=2)
+        plan = _plan(client)
+    assert plan["managed_keys"] == [
+        "model",
+        "models",
+        "route",
+        "provider.only",
+        "provider.order",
+        "provider.sort",
+        "temperature",
+        "top_p",
+        "provider.ignore",
+    ]
+    assert plan["passthrough"] == {"tools": [1]}  # what the app sends back as it found it: not what it sets or removes
+    assert {c["path"] for c in plan["changes"]} == {
+        "temperature",
+        "top_p",
+        "provider.ignore",
+        "provider.only",
+        "provider.order",
+    }
+
+
+def test_a_managed_guardrail_that_the_live_preset_already_holds_is_not_an_update(client):
+    _own_as(KEY)
+    _settings(guardrails={"temperature": 0.7, "clear": ["top_p"]})
+    desired = build_config({"temperature": 0.7}, ["acme/best"], TAGS)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, desired, version=2)
+        assert _plan(client)["action"] == "unchanged"
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {**desired, "temperature": 0.2}, version=2)
+        assert _plan(client)["action"] == "update"
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {**desired, "top_p": 0.4}, version=2)
+        assert _plan(client)["action"] == "update"
+
+
+def test_a_guardrail_openrouter_keeps_after_it_was_taken_off_is_reported_not_hidden(client):
+    _own_as(KEY)
+    _settings(guardrails={"clear": ["top_p"]})
+
+    def keeps_top_p(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(SLUG, {**sent, "top_p": 0.9}, version=3))
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "top_p": 0.9}, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=keeps_top_p)
+        body = _apply(client, _plan(client)).json()
+    assert body["unsaved"] == ["top_p"] and "did not keep: top_p" in body["message"]
+
+
+def test_a_guardrail_set_to_a_value_openrouter_stored_differently_is_reported(client):
+    _own_as(KEY)
+    _settings(guardrails={"temperature": 0.7})
+
+    def stores_one(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(SLUG, {**sent, "temperature": 1.0}, version=3))
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=stores_one)
+        assert _apply(client, _plan(client)).json()["unsaved"] == ["temperature"]
+
+
+def test_the_guardrails_of_a_draft_are_what_the_preview_shows(client):
+    draft = PresetSettings(slug="fresh", enabled=True, min_context=100_000, guardrails=_g(top_p=0.4))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "vibonomics-fresh", None)
+        plan = client.post("/api/presets/plan", json={"settings": draft.model_dump(mode="json")}).json()
+    assert plan["draft"] is True and plan["config"]["top_p"] == 0.4
+
+
+# ---- the system prompt: always resent, or the write would null it ---------------------------------------------------
+
+
+class _PromptAccount:
+    """A preset on the account that keeps what a write sends, system message included, as OpenRouter does.
+
+    ``stores`` is what the version holds after a write: the prompt as sent by default; ``dropping`` makes the account
+    lose it, to test a read-back that disagrees.
+    """
+
+    def __init__(
+        self,
+        router: respx.Router,
+        config: dict[str, Any],
+        prompt: str | None,
+        version: int = 2,
+        dropping: bool = False,
+        answer_prompt: bool = True,
+    ) -> None:
+        self.config, self.prompt, self.version = config, prompt, version
+        self.dropping, self.answer_prompt = dropping, answer_prompt
+        self.bodies: list[dict[str, Any]] = []
+        router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=self._get)
+        router.get(f"{BASE}/presets/{SLUG}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+        self.post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=self._write)
+
+    def _get(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_preset(SLUG, self.config, version=self.version, system_prompt=self.prompt))
+
+    def _write(self, request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        self.bodies.append(json.loads(request.content))
+        messages = sent.pop("messages", [])
+        said = next((m["content"] for m in messages if m.get("role") == "system"), None)
+        self.config, self.version = sent, self.version + 1
+        self.prompt = None if self.dropping else said
+        answer = _preset(SLUG, self.config, version=self.version, system_prompt=self.prompt)
+        if not self.answer_prompt:
+            del answer["data"]["designated_version"]["system_prompt"]
+        return httpx.Response(200, json=answer)
+
+    def system_messages(self, body: dict[str, Any]) -> list[str]:
+        return [m["content"] for m in body["messages"] if m.get("role") == "system"]
+
+
+LIVE_DESIRED = build_config(None, ["acme/best"], TAGS)  # what a plan for SLUG writes when nothing else is set
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"guardrails": {"temperature": 0.7}},
+        {"guardrails": {"clear": ["top_p"]}},
+        {"max_models": 2},
+        {"route": "sort", "sort": "latency"},
+        {"guardrails": {"ignore": ["wafer"], "require_parameters": True}},
+    ],
+)
+def test_a_write_to_a_preset_that_has_a_system_prompt_always_carries_it_unless_the_owner_changed_it(client, settings):
+    _own_as(KEY)
+    _settings(**settings)
+    live = {"model": "acme/best", "top_p": 0.9}
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, live, "Be brief.")
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        body = _apply(client, plan).json()
+    assert body["applied"] is True and body["unsaved"] == []
+    assert len(account.bodies) == 1
+    assert account.system_messages(account.bodies[0]) == ["Be brief."]
+    assert account.bodies[0]["messages"][-1] == PLACEHOLDER_MESSAGES[0]  # the user message the create call insists on
+    assert account.prompt == "Be brief."
+    assert "system_backups" not in _state()  # sent back as it was: nothing was lost, so nothing is kept
+
+
+def test_a_managed_system_prompt_replaces_the_live_one_as_a_system_message_and_the_old_text_is_kept(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.", version=2)
+        plan = _plan(client)
+        assert plan["action"] == "update" and "system prompt" in plan["reason"]
+        assert {c["path"]: (c["before"], c["after"]) for c in plan["changes"]} == {
+            "system_prompt": ("Be brief.", "Answer in one line.")
+        }
+        assert plan["request"]["body"]["messages"] == [
+            {"role": "system", "content": "Answer in one line."},
+            *PLACEHOLDER_MESSAGES,
+        ]
+        body = _apply(client, plan).json()
+    assert body["applied"] is True and body["unsaved"] == []
+    assert account.system_messages(account.bodies[0]) == ["Answer in one line."]
+    backup = _state()["system_backups"][SLUG]
+    assert (backup["text"], backup["version"]) == ("Be brief.", 2) and backup["at"]
+
+
+def test_a_cleared_system_prompt_sends_no_system_message_and_the_old_text_is_kept(client):
+    _own_as(KEY)
+    _settings(guardrails={"clear": ["system_prompt"]})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.", version=4)
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        assert plan["request"]["body"]["messages"] == PLACEHOLDER_MESSAGES
+        assert [(c["path"], c["before"], c["after"]) for c in plan["changes"]] == [("system_prompt", "Be brief.", None)]
+        body = _apply(client, plan).json()
+    assert body["applied"] is True and body["unsaved"] == []
+    assert account.system_messages(account.bodies[0]) == [] and account.prompt is None
+    assert _state()["system_backups"][SLUG]["text"] == "Be brief." and _state()["system_backups"][SLUG]["version"] == 4
+
+
+def test_a_managed_system_prompt_on_a_new_preset_is_created_with_it(client):
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_creates_with_prompt)
+        plan = _plan(client)
+        assert plan["action"] == "create"
+        body = _apply(client, plan).json()
+        sent = json.loads(post.calls[0].request.content)
+    assert body["applied"] is True and body["unsaved"] == []
+    assert sent["messages"][0] == {"role": "system", "content": "Answer in one line."}
+    assert "system_backups" not in _state()  # there was nothing before it to lose
+
+
+def _creates_with_prompt(request: httpx.Request) -> httpx.Response:
+    sent = json.loads(request.content)
+    messages = sent.pop("messages", [])
+    said = next((m["content"] for m in messages if m.get("role") == "system"), None)
+    return httpx.Response(200, json=_preset(SLUG, sent, version=1, system_prompt=said))
+
+
+def test_a_backup_is_made_only_when_a_write_takes_text_away_and_is_capped(client):
+    _own_as(KEY)
+    long = "x" * 25_000  # a prompt made in the OpenRouter UI can be longer than the one the app lets the owner set
+    _settings(guardrails={"system_prompt": "New."})
+    with respx.mock(assert_all_called=False) as router:
+        _PromptAccount(router, LIVE_DESIRED, long, version=2)
+        assert _apply(client, _plan(client)).json()["applied"] is True
+    assert len(_state()["system_backups"][SLUG]["text"]) == 20_000
+    # the same text again is no change: nothing is written and the backup stays what it was
+    before = _state()["system_backups"][SLUG]
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "New.", version=3)
+        plan = _plan(client)
+        assert plan["action"] == "unchanged" and _apply(client, plan).json()["applied"] is False
+        assert account.bodies == []
+    assert _state()["system_backups"][SLUG] == before
+
+
+def test_a_dry_run_and_a_blocked_write_leave_no_backup(client):
+    _own_as(KEY)
+    _settings(guardrails={"clear": ["system_prompt"]})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.")
+        _plan(client)
+        assert account.bodies == []
+    assert "system_backups" not in _state()
+    with respx.mock(assert_all_called=False) as router:  # a live check that fails stops the write before the backup
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.")
+        _live_listing(router, _without("wafer/bf16"))
+        assert _apply(client, _plan(client)).status_code == 409
+        assert account.bodies == []
+    assert "system_backups" not in _state()
+
+
+def test_a_system_prompt_openrouter_did_not_keep_is_reported_and_not_sent_again_each_run(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.", dropping=True)
+        body = _apply(client, _plan(client)).json()
+        assert body["applied"] is True and body["unsaved"] == ["system_prompt"]
+        assert "did not keep: system_prompt" in body["message"]
+        again = _plan(client)
+        assert again["action"] == "unchanged" and any("did not keep" in w for w in again["warnings"])
+        assert len(account.bodies) == 1
+
+
+def test_a_write_whose_answer_leaves_the_prompt_out_is_checked_with_a_read(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        _PromptAccount(router, LIVE_DESIRED, "Be brief.", answer_prompt=False)
+        assert _apply(client, _plan(client)).json()["unsaved"] == []
+    with respx.mock(assert_all_called=False) as router:
+        _PromptAccount(router, LIVE_DESIRED, "Be brief.", answer_prompt=False, dropping=True)
+        assert _apply(client, _plan(client)).json()["unsaved"] == ["system_prompt"]
+
+
+def test_a_write_whose_prompt_cannot_be_checked_says_so_instead_of_claiming_it_was_kept(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.", answer_prompt=False)
+        plan = _plan(client)
+        gets = {"n": 0}
+
+        def read(request: httpx.Request) -> httpx.Response:
+            gets["n"] += 1
+            if account.bodies:  # after the write, the account cannot be read
+                return httpx.Response(500, json={"error": "down"})
+            return account._get(request)
+
+        router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=read)
+        body = _apply(client, plan).json()
+    assert body["applied"] is True and body["unsaved"] == []
+    assert "could not be checked" in body["message"]
+
+
+def test_the_plan_digest_names_the_system_prompt_that_would_be_sent(client):
+    _own_as(KEY)
+    digests = []
+    for prompt, settings in (
+        ("One.", {}),
+        ("Two.", {}),
+        ("One.", {"guardrails": {"system_prompt": "Mine."}}),
+        ("One.", {"guardrails": {"system_prompt": "Mine too."}}),
+    ):
+        _settings(**settings)
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, LIVE_DESIRED, version=2, system_prompt=prompt)
+            digests.append(_plan(client)["digest"])
+    assert len(set(digests)) == 4  # the same version number, the same config, and a different prompt in each
+
+
+def test_a_write_whose_answer_was_lost_is_claimed_only_if_the_preset_holds_the_prompt_that_was_sent(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    for holds, claimed in (("Answer in one line.", True), ("Be brief.", False), (None, False)):
+        with respx.mock(assert_all_called=False) as router:
+            account = _PromptAccount(router, LIVE_DESIRED, "Be brief.")
+            plan = _plan(client)
+
+            def lost(request: httpx.Request, account=account, holds=holds) -> httpx.Response:
+                sent = json.loads(request.content)
+                account.config, account.prompt = {k: v for k, v in sent.items() if k != "messages"}, holds
+                raise httpx.ReadTimeout("read timed out", request=request)
+
+            account.post.mock(side_effect=lost)
+            response = _apply(client, plan)
+        assert (response.status_code == 200) is claimed, (holds, response.text)
+        if claimed:
+            assert "read back" in response.json()["message"]
+
+
+def test_a_template_system_prompt_is_not_copied_and_the_plan_says_how_to_give_one(client):
+    _settings(template_slug="my-tools")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", {"model": "other/model"}, version=3, system_prompt="Template prompt.")
+        plan = _plan(client)
+    assert plan["request"]["body"]["messages"] == PLACEHOLDER_MESSAGES
+    assert any("system prompt" in w and "guardrails" in w for w in plan["warnings"])
+    _settings(template_slug="my-tools", guardrails={"system_prompt": "Mine."})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", {"model": "other/model"}, version=3, system_prompt="Template prompt.")
+        plan = _plan(client)
+    assert plan["request"]["body"]["messages"][0] == {"role": "system", "content": "Mine."}
+    assert not any("template has a system prompt" in w for w in plan["warnings"])
+
+
+def _hand_keeps_prompts(router: respx.Router) -> respx.Route:
+    """A write to HAND that the account takes with the system message it carries."""
+
+    def write(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        messages = sent.pop("messages", [])
+        said = next((m["content"] for m in messages if m.get("role") == "system"), None)
+        return httpx.Response(200, json=_preset(HAND, sent, version=9, system_prompt=said))
+
+    return router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=write)
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_resends_the_prompt_of_an_adopted_preset_and_stops_when_the_prompt_was_edited(client):
+    from vibonomics import presets as engine
+
+    _adopt_hand_made(client, system_prompt="Be brief.")
+    _items(_item(), _adopted_item(enabled=True, auto_apply=True))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be brief.")
+        post = _hand_keeps_prompts(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 1  # nothing changed since the owner looked
+        assert json.loads(post.calls[0].request.content)["messages"][0] == {"role": "system", "content": "Be brief."}
+    # someone rewrites the prompt in the OpenRouter UI: it is part of what the owner agreed to hand over
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=5, system_prompt="Be rude.")
+        post = _hand_keeps_prompts(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 0
+    assert _state()["last"][HAND]["status"] == "blocked"
+    # and a manual apply, after the plan showed it, accepts the new text and the timer goes on
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=5, system_prompt="Be rude.")
+        post = _hand_keeps_prompts(router)
+        assert _apply(client, _plan(client, HAND), HAND).status_code == 200
+        assert json.loads(post.calls[0].request.content)["messages"][0]["content"] == "Be rude."
+    assert _state()["reviewed"][HAND] == passthrough_digest(HAND_CONFIG, None, "Be rude.")
+
+
+@pytest.mark.asyncio
+async def test_a_managed_system_prompt_on_an_adopted_preset_does_not_wait_for_a_review_of_the_live_one(client):
+    from vibonomics import presets as engine
+
+    _adopt_hand_made(client, system_prompt="Be brief.")
+    _items(_item(), _adopted_item(enabled=True, auto_apply=True, guardrails={"system_prompt": "Mine."}))
+    state = _state()
+    state["reviewed"][HAND] = passthrough_digest(HAND_CONFIG, PresetGuardrails(system_prompt="Mine."), "Be brief.")
+    _set_state(state)
+    with respx.mock(assert_all_called=False) as router:  # the live prompt is changed, which the owner replaces anyway
+        _remote(router, HAND, HAND_CONFIG, version=5, system_prompt="Be rude.")
+        post = _hand_keeps_prompts(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 1
+        assert json.loads(post.calls[0].request.content)["messages"][0]["content"] == "Mine."
+
+
+def test_taking_an_adopted_preset_out_of_the_list_forgets_its_prompt_backup_too(client):
+    _own_both()
+    state = _state()
+    state["system_backups"] = {
+        HAND: {"text": "old", "version": 1, "at": "2026-11-01T00:00:00+00:00"},
+        SLUG: {"text": "o"},
+    }
+    _set_state(state)
+    _items(_item(), _adopted_item())
+    current = client.get("/api/settings").json()["settings"]
+    kept = [i for i in _saved_items(client) if i["slug"] != HAND]
+    assert client.put("/api/settings", json={"settings": _with_items(current, kept)}).status_code == 200
+    assert set(_state()["system_backups"]) == {SLUG}
+
+
+# ---- capability-aware pinning, and the quantization and ignore guardrails -------------------------------------------
+
+
+def _endpoint(tag: str, price: float, params: list[str] | None, cap: int | None = None, quant="fp8") -> dict[str, Any]:
+    """An endpoint as the adapter stores it, with the parameters it supports and its output cap."""
+    return {
+        "provider": tag.split("/")[0].title(),
+        "tag": tag,
+        "quantization": quant,
+        "input": price,
+        "output": price * 4,
+        "params": params,
+        "max_completion_tokens": cap,
+        "uptime_1d": 99,
+    }
+
+
+def _stored(model_id: str, *rows: dict[str, Any]) -> None:
+    _set_extra(model_id, {"endpoints": list(rows)})
+
+
+def _tags_of(plan: dict[str, Any]) -> list[str]:
+    return [p["tag"] for p in plan["providers"]]
+
+
+def test_an_endpoint_whose_precision_is_not_listed_is_unknown_and_a_quantization_list_leaves_it_out():
+    rows = [
+        {"tag": "a/x", "input": 0.1, "output": 0.1, "quantization": None},
+        {"tag": "b/x", "input": 0.2, "output": 0.2, "quantization": "unknown"},
+        {"tag": "c/x", "input": 0.3, "output": 0.3, "quantization": "fp8"},
+        {"tag": "d/x", "input": 0.4, "output": 0.4},
+    ]
+    assert _tags(choose_endpoints(rows, TASK, {"quantizations": ["fp8"]}, 5)) == ["c/x"]
+    assert _tags(choose_endpoints(rows, TASK, {"quantizations": ["fp8", "unknown"]}, 5)) == [
+        "a/x",
+        "b/x",
+        "c/x",
+        "d/x",
+    ]
+    assert _tags(choose_endpoints(rows, TASK, {"quantizations": ["unknown"]}, 5)) == ["a/x", "b/x", "d/x"]
+    assert len(choose_endpoints(rows, TASK, {}, 5)) == 4
+
+
+def test_the_pins_are_the_endpoints_that_take_every_parameter_the_owner_sets(client):
+    _stored(
+        "acme/best",
+        _endpoint("plain/x", 0.01, ["temperature"]),
+        _endpoint("both/x", 0.02, ["temperature", "top_p"]),
+        _endpoint("also/x", 0.03, ["temperature", "top_p", "tools"]),
+    )
+    _settings(guardrails={"temperature": 0.7, "top_p": 0.9})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["both/x", "also/x"]
+    assert plan["warnings"] == [] and plan["action"] == "create"
+
+
+def test_an_endpoint_that_does_not_report_its_parameters_is_still_pinned(client):
+    _stored("acme/best", _endpoint("silent/x", 0.01, None), _endpoint("no/x", 0.02, ["tools"]))
+    _settings(guardrails={"top_p": 0.9})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["silent/x"] and plan["warnings"] == []
+
+
+def test_a_parameter_no_live_endpoint_takes_is_warned_about_and_the_preset_is_pinned_without_it(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]), _endpoint("b/x", 0.02, ["tools", "seed"]))
+    _settings(guardrails={"repetition_penalty": 1.1})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "create" and _tags_of(plan) == ["a/x", "b/x"]
+    assert "repetition_penalty will be ignored for acme/best: no live endpoint supports it." in plan["warnings"]
+    assert plan["config"]["repetition_penalty"] == 1.1  # still written: it is what the owner asked for
+
+
+def test_each_parameter_nobody_takes_gets_its_own_warning_and_the_ones_somebody_takes_do_not(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["temperature"]), _endpoint("b/x", 0.02, ["temperature"]))
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9, "presence_penalty": 0.1})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    said = [w for w in plan["warnings"] if "will be ignored" in w]
+    assert said == [
+        "presence_penalty will be ignored for acme/best: no live endpoint supports it.",
+        "top_p will be ignored for acme/best: no live endpoint supports it.",
+    ]
+
+
+def test_parameters_that_are_each_taken_but_never_together_are_warned_about_as_a_set(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["temperature"]), _endpoint("b/x", 0.02, ["top_p"]))
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["a/x", "b/x"]
+    assert any("temperature and top_p will be ignored for acme/best" in w and "at once" in w for w in plan["warnings"])
+
+
+def test_with_require_parameters_a_model_no_endpoint_can_serve_blocks_the_plan_and_names_the_parameter(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]), _endpoint("b/x", 0.02, ["seed"]))
+    _settings(guardrails={"top_p": 0.9, "require_parameters": True})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert _apply(client, "anything").status_code == 409
+        assert post.call_count == 0
+    assert plan["action"] == "blocked" and plan["request"] is None and plan["digest"] is None
+    assert "acme/best" in plan["reason"] and "top_p" in plan["reason"] and "require_parameters" in plan["reason"]
+
+
+def test_a_require_parameters_the_live_preset_already_has_counts_as_much_as_one_the_owner_set(client):
+    _own_as(KEY)
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]))
+    _settings(guardrails={"top_p": 0.9})  # require_parameters is not managed: it is the live preset's own
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "provider": {"require_parameters": True}}, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "top_p" in plan["reason"]
+
+
+def test_require_parameters_with_every_parameter_taken_is_not_a_problem(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["temperature", "top_p"]), _endpoint("b/x", 0.02, ["tools"]))
+    _settings(guardrails={"top_p": 0.9, "require_parameters": True})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "create" and _tags_of(plan) == ["a/x"]
+    assert plan["config"]["provider"]["require_parameters"] is True
+
+
+def test_an_endpoint_whose_output_cap_is_below_max_tokens_is_not_pinned_and_a_model_with_none_is_warned_about(client):
+    _stored(
+        "acme/best",
+        _endpoint("small/x", 0.01, ["max_tokens"], cap=4_096),
+        _endpoint("big/x", 0.02, ["max_tokens"], cap=65_536),
+    )
+    _settings(guardrails={"max_tokens": 8_192})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["big/x"] and plan["config"]["max_tokens"] == 8_192
+    _settings(guardrails={"max_tokens": 100_000})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["small/x", "big/x"]
+    assert any("max_tokens will be ignored for acme/best" in w and "100,000" in w for w in plan["warnings"])
+    _settings(guardrails={"max_tokens": 100_000, "require_parameters": True})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        blocked = _plan(client)
+    assert blocked["action"] == "blocked" and "max_tokens" in blocked["reason"] and "100,000" in blocked["reason"]
+
+
+def test_capability_is_judged_per_model_so_one_model_can_be_pinned_and_another_warned_about(client):
+    _settings(max_models=2, guardrails={"top_p": 0.9})
+    _stored("acme/best", _endpoint("good/x", 0.01, ["top_p"]))
+    _stored("acme/steady", _endpoint("limited/x", 0.02, ["tools"]))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["good/x", "limited/x"]
+    assert plan["warnings"] == ["top_p will be ignored for acme/steady: no live endpoint supports it."]
+
+
+def test_a_model_with_no_provider_data_is_left_unpinned_as_it_always_was_whatever_is_required(client):
+    _settings(guardrails={"top_p": 0.9, "require_parameters": True})  # acme/best has the stored ENDPOINTS: no params
+    _set_extra("acme/best", {})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "create" and plan["providers"] == []
+    assert any("No provider data" in w for w in plan["warnings"])
+
+
+def test_a_managed_quantization_list_filters_the_pins_and_is_written(client):
+    _settings(guardrails={"quantizations": ["bf16"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["wafer/bf16"]
+    assert plan["config"]["provider"]["quantizations"] == ["bf16"]
+
+
+def test_a_managed_value_is_what_filters_not_the_one_the_live_preset_has(client):
+    _own_as(KEY)
+    live = {"model": "acme/best", "provider": {"quantizations": ["fp8"], "ignore": ["novita"]}}
+    _settings(guardrails={"quantizations": ["fp4"], "clear": ["ignore"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["novita/fp4"]  # fp4 is the managed list, and novita is no longer ignored
+    assert plan["config"]["provider"]["quantizations"] == ["fp4"] and "ignore" not in plan["config"]["provider"]
+
+
+def test_a_quantization_list_the_owner_took_off_no_longer_filters_though_the_live_preset_has_it(client):
+    _own_as(KEY)
+    live = {"model": "acme/best", "provider": {"quantizations": ["fp8"]}}
+    _settings(guardrails={"clear": ["quantizations"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
+    assert "provider" in plan["config"] and "quantizations" not in plan["config"]["provider"]
+
+
+def test_a_quantization_list_the_owner_does_not_manage_still_filters_as_the_live_preset_has_it(client):
+    _own_as(KEY)
+    live = {"model": "acme/best", "provider": {"quantizations": ["fp8"]}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["deepinfra/fp8", "slow/fp8"]
+    assert plan["config"]["provider"]["quantizations"] == ["fp8"]
+
+
+def test_ignored_providers_are_never_pinned_and_are_written(client):
+    _settings(guardrails={"ignore": ["Novita", "wafer"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["deepinfra/fp8", "slow/fp8"]
+    assert plan["config"]["provider"]["ignore"] == ["Novita", "wafer"]
+
+
+def _ids(session, settings: AppSettings, item: PresetSettings) -> tuple[list[str], Excluded]:
+    ids = [p.id for p in session.query(ProviderConfig).filter_by(type="openrouter")]
+    excluded = Excluded()
+    return [c.model_id for c in rank(session, settings, ids, item, excluded)[0]], excluded
+
+
+def test_a_model_none_of_whose_endpoints_passes_the_managed_filters_is_left_out_of_the_ranking(client):
+    with session_scope() as session:
+        settings = load_settings(session).model_copy(deep=True)
+        item = settings.presets.items[0]
+        assert "acme/best" in _ids(session, settings, item)[0]
+        item.guardrails = PresetGuardrails(quantizations=["int4"])  # no endpoint of acme/best serves int4
+        names, excluded = _ids(session, settings, item)
+        assert "acme/best" not in names and excluded.unserved == ["acme/best"]
+        assert "acme/steady" in names  # no endpoint data: nothing says it cannot be served
+        item.guardrails = PresetGuardrails(ignore=["deepinfra", "wafer", "novita", "slow", "broken"])
+        names, excluded = _ids(session, settings, item)
+        assert "acme/best" not in names and excluded.unserved == ["acme/best"]
+        item.guardrails = PresetGuardrails(quantizations=["fp8"], ignore=["deepinfra"])  # slow/fp8 still passes
+        names, excluded = _ids(session, settings, item)
+        assert "acme/best" in names and excluded.unserved == []
+        item.guardrails = PresetGuardrails(clear=["quantizations"])  # taken off: nothing narrows the ranking
+        assert _ids(session, settings, item)[1].unserved == []
+
+
+def test_a_model_left_out_for_its_endpoints_is_named_in_a_warning_and_the_next_one_leads(client):
+    _settings(guardrails={"quantizations": ["int4"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/steady"
+    assert any("acme/best" in w and "quantization and ignore" in w for w in plan["warnings"])
+
+
+def test_when_the_guardrails_leave_no_model_the_plan_says_so(client):
+    _settings(guardrails={"quantizations": ["int4"]}, min_score=85)  # only acme/pricey (no endpoint data) is above it
+    _give_endpoints("acme/pricey", [("p/fp8", 1.0, 4.0)])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and "No OpenRouter model passes" in plan["reason"]
+    assert "quantization and ignore guardrails" in plan["reason"]
+
+
+# ---- the live check with the guardrails, and the free tier -----------------------------------------------------------
+
+
+def _live_with(rows: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [_live_ep(tag, 0.1, 0.4, **fields) for tag, fields in rows]
+
+
+def test_a_plan_whose_live_endpoints_no_longer_pass_the_managed_quantization_is_refused_as_unservable(client):
+    _settings(guardrails={"quantizations": ["bf16"]})  # the stored copy has wafer/bf16, which is what gets pinned
+    live = _live_with([("wafer/bf16", {"quantization": "fp8"}), ("novita/fp4", {"quantization": "fp4"})])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router, live)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["valid"] is False
+        assert [(c["check"], c["level"]) for c in plan["validation"]] == [("served", "error")]
+        assert "will never be served acme/best" in _errors(plan)[0]["message"]
+        assert _apply(client, plan).status_code == 409
+        assert post.call_count == 0
+
+
+def test_the_live_check_uses_the_filters_the_plan_will_write_even_when_the_owner_does_not_manage_them(client):
+    _own_as(KEY)
+    live_preset = {"model": "acme/best", "provider": {"ignore": ["wafer", "novita", "deepinfra", "slow"]}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live_preset, version=2)
+        _live_listing(router)
+        plan = _plan(client)
+    assert plan["valid"] is False and [c["check"] for c in _errors(plan)] == ["served"]
+
+
+def test_a_pinned_endpoint_that_lacks_a_managed_parameter_is_an_error_only_with_require_parameters(client):
+    _stored(
+        "acme/best",
+        _endpoint("novita/fp4", 0.08, ["temperature"]),
+        _endpoint("deepinfra/fp8", 0.1, ["temperature"]),
+    )
+    live = _live_with(
+        [
+            ("novita/fp4", {"supported_parameters": ["temperature"]}),
+            ("deepinfra/fp8", {"supported_parameters": ["tools"]}),  # the listing has moved on from the stored copy
+        ]
+    )
+    for strict, valid in ((True, False), (False, True)):
+        _settings(guardrails={"temperature": 0.5, "require_parameters": strict})
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, None)
+            _live_listing(router, live)
+            plan = _plan(client)
+        problems = [c for c in plan["validation"] if c["check"] == "params"]
+        assert plan["valid"] is valid, strict
+        assert [(c["level"], c["provider"]) for c in problems] == [("error" if strict else "warning", "deepinfra/fp8")]
+
+
+def test_a_managed_token_cap_above_what_a_live_endpoint_allows_is_an_error(client):
+    _stored("acme/best", _endpoint("novita/fp4", 0.08, ["max_tokens"], cap=65_536))
+    live = _live_with([("novita/fp4", {"max_completion_tokens": 4_096})])
+    _settings(guardrails={"max_tokens": 8_192})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router, live)
+        plan = _plan(client)
+    assert plan["valid"] is False and [c["check"] for c in _errors(plan)] == ["max_tokens"]
+
+
+def test_a_preset_of_free_models_only_warns_in_the_plan_and_in_the_live_check(client):
+    _settings(include_free=True)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/free:free"
+    assert FREE_TIER_WARNING in plan["warnings"]
+    assert "Every model here is free" in FREE_TIER_WARNING and "00:00 UTC" in FREE_TIER_WARNING
+    assert plan["valid"] is True  # a warning, never a refusal
+    free = [c for c in plan["validation"] if c["check"] == "free"]
+    assert [(c["level"], c["message"]) for c in free] == [("warning", FREE_TIER_WARNING)]
+
+
+def test_a_lineup_with_one_paid_model_does_not_warn_about_the_free_cap(client):
+    _settings(include_free=True, max_models=2)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/free:free" and len(plan["picks"]) == 2
+    assert not any("free" in w and "daily" in w for w in plan["warnings"])
+    assert not [c for c in plan["validation"] if c["check"] == "free"]
+
+
+def test_a_preset_with_no_free_model_has_no_free_warning(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert not any("daily" in w for w in plan["warnings"])
+
+
+# ---- what the plan says about the guardrails ------------------------------------------------------------------------
+
+
+def test_a_plan_says_which_guardrails_it_writes_and_which_it_takes_off(client):
+    _own_as(KEY)
+    _settings(guardrails={"temperature": 0.7, "quantizations": ["bf16", "fp8"], "clear": ["top_p", "system_prompt"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "top_p": 0.9}, version=2)
+        plan = _plan(client)
+    assert plan["guardrails"] == {
+        "set": {"temperature": 0.7, "quantizations": ["bf16", "fp8"]},
+        "cleared": ["top_p", "system_prompt"],
+    }
+
+
+def test_a_plan_for_a_preset_with_no_guardrails_has_none_to_show(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["guardrails"] == {"set": {}, "cleared": []}
+    assert plan["capabilities"] == [] and plan["system_backup_at"] is None
+    assert plan["system_prompt"] == {"live": None, "planned": None, "source": "none", "changed": False}
+
+
+@pytest.mark.parametrize(
+    ("guardrails", "live", "planned", "source", "changed"),
+    [
+        ({}, "Be brief.", "Be brief.", "kept", False),
+        ({"system_prompt": "Be terse."}, "Be brief.", "Be terse.", "managed", True),
+        ({"system_prompt": "Be brief."}, "Be brief.", "Be brief.", "managed", False),
+        ({"system_prompt": "New."}, None, "New.", "managed", True),
+        ({"clear": ["system_prompt"]}, "Be brief.", None, "cleared", True),
+        ({"clear": ["system_prompt"]}, None, None, "cleared", False),
+        ({}, None, None, "none", False),
+    ],
+)
+def test_the_plan_shows_the_live_prompt_the_planned_one_where_it_comes_from_and_whether_it_changes(
+    client, guardrails, live, planned, source, changed
+):
+    _own_as(KEY)
+    _settings(guardrails=guardrails)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, LIVE_DESIRED, version=2, system_prompt=live)
+        plan = _plan(client)
+    assert plan["system_prompt"] == {"live": live, "planned": planned, "source": source, "changed": changed}
+    assert (plan["action"] == "update") is changed  # the prompt is the only thing that could differ here
+    assert any(c["path"] == "system_prompt" for c in plan["changes"]) is changed
+    sent = [
+        m["content"] for m in (plan["request"]["body"]["messages"] if plan["request"] else []) if m["role"] == "system"
+    ]
+    assert sent == ([planned] if planned else [])
+
+
+def test_a_plan_for_a_preset_that_does_not_exist_yet_shows_the_managed_prompt_it_will_create_it_with(client):
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["system_prompt"] == {
+        "live": None,
+        "planned": "Answer in one line.",
+        "source": "managed",
+        "changed": True,
+    }
+
+
+def test_a_long_live_prompt_is_shown_up_to_twenty_thousand_characters_and_still_sent_whole(client):
+    _own_as(KEY)
+    long = "y" * 25_000
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2, system_prompt=long)
+        plan = _plan(client)
+    assert plan["system_prompt"]["live"] == long[:20_000] and plan["system_prompt"]["planned"] == long[:20_000]
+    assert plan["request"]["body"]["messages"][0]["content"] == long  # nothing is lost from what is sent back
+
+
+def test_a_blocked_plan_still_shows_the_prompt_the_preset_holds_and_the_one_that_is_set(client):
+    _own_as(KEY)
+    _settings(min_score=99, guardrails={"system_prompt": "Mine."})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2, system_prompt="Theirs.")
+        plan = _plan(client)
+    assert plan["action"] == "blocked"
+    assert (plan["system_prompt"]["live"], plan["system_prompt"]["planned"]) == ("Theirs.", "Mine.")
+    _settings(min_score=99, guardrails={"system_prompt": "Mine."})
+    with respx.mock(assert_all_called=False) as router:  # and one that is blocked before the preset is even read
+        router.get(f"{BASE}/presets/{SLUG}").mock(return_value=httpx.Response(401, json={"error": "bad key"}))
+        early = _plan(client)
+    assert early["action"] == "blocked"
+    assert (early["system_prompt"]["live"], early["system_prompt"]["planned"]) == (None, "Mine.")
+
+
+def test_the_plan_names_when_a_system_prompt_was_last_saved_before_a_write_took_it_away(client):
+    _own_as(KEY)
+    _settings(guardrails={"clear": ["system_prompt"]})
+    with respx.mock(assert_all_called=False) as router:
+        _PromptAccount(router, LIVE_DESIRED, "Be brief.", version=2)
+        assert _plan(client)["system_backup_at"] is None
+        assert _apply(client, _plan(client)).json()["applied"] is True
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, LIVE_DESIRED, version=3)
+        plan = _plan(client)
+    from datetime import datetime
+
+    shown = datetime.fromisoformat(plan["system_backup_at"].replace("Z", "+00:00"))
+    assert shown == datetime.fromisoformat(_state()["system_backups"][SLUG]["at"])
+
+
+def test_capabilities_say_whether_each_pinned_endpoint_takes_each_parameter_the_owner_sets(client):
+    _stored(
+        "acme/best",
+        _endpoint("full/x", 0.01, ["temperature", "top_p"]),
+        _endpoint("part/x", 0.02, ["temperature"]),
+        _endpoint("silent/x", 0.03, None),
+    )
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["full/x", "silent/x"]
+    assert plan["capabilities"] == [
+        {"model_id": "acme/best", "provider": "full/x", "supports": {"temperature": "yes", "top_p": "yes"}},
+        {"model_id": "acme/best", "provider": "silent/x", "supports": {"temperature": "unknown", "top_p": "unknown"}},
+    ]
+
+
+def test_capabilities_after_a_fallback_show_the_pinned_endpoints_that_lack_the_parameter(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]))
+    _settings(guardrails={"top_p": 0.9, "max_tokens": 1_000})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["capabilities"] == [
+        {"model_id": "acme/best", "provider": "a/x", "supports": {"max_tokens": "no", "top_p": "no"}}
+    ]
+
+
+def test_a_model_pinned_to_nothing_has_a_row_with_no_provider_and_a_verdict_only_where_its_endpoints_agree(client):
+    _stored(
+        "acme/best",
+        _endpoint("a/x", 0.01, ["temperature"], cap=100),
+        _endpoint("b/x", 0.02, ["temperature", "top_p"], cap=100),
+    )
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9, "ignore": ["a", "b"]})  # every endpoint is ignored
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    # acme/best is left out of the ranking, so the lead is a model with no provider data at all
+    assert plan["pick"]["model_id"] == "acme/steady" and plan["providers"] == []
+    assert plan["capabilities"] == [
+        {"model_id": "acme/steady", "provider": None, "supports": {"temperature": "unknown", "top_p": "unknown"}}
+    ]
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9, "require_parameters": False})
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]), _endpoint("b/x", 0.02, ["tools"]))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert [row["provider"] for row in plan["capabilities"]] == ["a/x", "b/x"]
+
+
+def test_the_endpoints_of_an_unpinned_model_that_agree_give_a_yes_or_a_no():
+    from vibonomics.presets import Plan, capability_rows
+
+    def rows(*endpoints: dict[str, Any]) -> dict[str, str]:
+        pick = Candidate("m", "m", 1, 1, 1, None, None, list(endpoints))
+        plan = Plan("s", "update", "", PresetSettings(guardrails={"temperature": 0.5, "top_p": 0.5}), picks=[pick])
+        (row,) = capability_rows(plan)
+        assert row["provider"] is None
+        return row["supports"]
+
+    assert rows(_endpoint("a/x", 1, ["temperature"]), _endpoint("b/x", 1, ["temperature", "top_p"])) == {
+        "temperature": "yes",
+        "top_p": "unknown",  # one takes it and one does not
+    }
+    assert rows(_endpoint("a/x", 1, ["tools"]), _endpoint("b/x", 1, ["seed"])) == {"temperature": "no", "top_p": "no"}
+    assert rows() == {"temperature": "unknown", "top_p": "unknown"}
+
+
+def test_inspect_gives_the_live_system_prompt_in_full_and_nothing_when_there_is_none(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        assert _inspect(client).json()["system_prompt"] is None
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be brief.\nAnswer in one line.")
+        body = _inspect(client).json()
+    assert body["system_prompt"] == "Be brief.\nAnswer in one line." and body["has_system_prompt"] is True
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="z" * 25_000)
+        assert len(_inspect(client).json()["system_prompt"]) == 20_000

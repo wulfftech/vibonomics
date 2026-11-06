@@ -11,7 +11,7 @@ import pytest
 import respx
 
 from vibonomics import http
-from vibonomics.preset_validation import Check, Validation, validate_live
+from vibonomics.preset_validation import FREE_TIER_WARNING, Check, Validation, validate_live
 from vibonomics.presets import Candidate
 
 BASE = "https://openrouter.ai/api/v1"
@@ -435,3 +435,147 @@ async def test_at_most_four_listings_are_fetched_at_a_time():
         result = await check(config, picks, providers)
     assert result.ok is True and len(result.items) == 7
     assert 1 < peak <= 4
+
+
+# ---- the preset's own provider filters, require_parameters and the free tier ----------------------------------------
+
+
+def served(result: Validation) -> list[Check]:
+    return [i for i in result.items if i.check == "served"]
+
+
+async def test_a_model_none_of_whose_live_endpoints_passes_the_quantization_list_is_warned_about():
+    config, picks, providers = plan_of({MODEL: STORED, OTHER: [("novita/fp4", 0.08, 0.35)]})
+    with respx.mock(assert_all_called=False) as router:
+        listed(
+            router,
+            MODEL,
+            [live("novita/fp4", 0.08, 0.35, quantization="fp8"), live("deepinfra/fp8", quantization="fp8")],
+        )
+        listed(router, OTHER, [live("novita/fp4", 0.08, 0.35, quantization="bf16")])
+        result = await check(config, picks, providers, quantizations=["bf16"])
+    assert result.ok is True  # the other model can still be served
+    (warning,) = served(result)
+    assert (warning.level, warning.model) == ("warning", MODEL)
+    assert "will never be served" in warning.message and MODEL in warning.message
+    assert [(i.level, i.check, i.model) for i in result.items if i.model == OTHER] == [("ok", "listing", OTHER)]
+
+
+async def test_a_preset_none_of_whose_models_can_be_served_is_an_error():
+    config, picks, providers = plan_of({MODEL: STORED, OTHER: [("novita/fp4", 0.08, 0.35)]})
+    with respx.mock(assert_all_called=False) as router:
+        listed(
+            router,
+            MODEL,
+            [live("novita/fp4", 0.08, 0.35, quantization="fp8"), live("deepinfra/fp8", quantization="fp8")],
+        )
+        listed(router, OTHER, [live("novita/fp4", 0.08, 0.35, quantization="fp8")])
+        result = await check(config, picks, providers, quantizations=["bf16"])
+    assert result.ok is False
+    assert [(i.level, i.model) for i in served(result)] == [("error", MODEL), ("error", OTHER)]
+
+
+async def test_an_endpoint_with_no_listed_precision_is_unknown_and_only_a_list_that_names_unknown_keeps_it():
+    config, picks, providers = plan_of()
+    rows = [live("novita/fp4", 0.08, 0.35, quantization="unknown"), live("deepinfra/fp8", quantization=None)]
+    with respx.mock(assert_all_called=False) as router:
+        listed(router, MODEL, rows)
+        fp8 = await check(config, picks, providers, quantizations=["fp8"])
+        both = await check(config, picks, providers, quantizations=["fp8", "unknown"])
+        none = await check(config, picks, providers)
+    assert [i.level for i in served(fp8)] == ["error"] and fp8.ok is False
+    assert served(both) == [] and both.ok is True
+    assert served(none) == [] and none.ok is True
+
+
+async def test_a_model_whose_every_live_endpoint_is_ignored_is_never_served_whatever_the_case_or_the_name_used():
+    config, picks, providers = plan_of()
+    rows = [live("novita/fp4", 0.08, 0.35), live("deepinfra/fp8")]  # provider names Novita and Deepinfra
+    with respx.mock(assert_all_called=False) as router:
+        listed(router, MODEL, rows)
+        by_slug = await check(config, picks, providers, ignore=["NOVITA", "deepinfra"])
+        by_tag = await check(config, picks, providers, ignore=["novita/fp4", "Deepinfra/fp8"])
+        by_name = await check(config, picks, providers, ignore=["novita", "deepinfra"])
+        one_left = await check(config, picks, providers, ignore=["novita"])
+    assert all(served(r) and r.ok is False for r in (by_slug, by_tag, by_name))
+    assert served(one_left) == [] and one_left.ok is True
+
+
+async def test_the_two_filters_apply_together():
+    config, picks, providers = plan_of()
+    rows = [live("novita/fp4", 0.08, 0.35, quantization="fp4"), live("deepinfra/fp8", quantization="fp8")]
+    with respx.mock(assert_all_called=False) as router:
+        listed(router, MODEL, rows)
+        result = await check(config, picks, providers, quantizations=["fp8"], ignore=["deepinfra"])
+        spare = await check(config, picks, providers, quantizations=["fp8", "fp4"], ignore=["deepinfra"])
+    assert [i.level for i in served(result)] == ["error"]
+    assert served(spare) == []  # novita is fp4, which is allowed there, and not ignored
+
+
+async def test_a_model_that_cannot_be_served_carries_no_all_clear_for_the_same_model():
+    config, picks, providers = plan_of()
+    with respx.mock(assert_all_called=False) as router:
+        listed(router, MODEL, [live("novita/fp4", 0.08, 0.35, quantization="fp8")])
+        result = await check(config, picks, providers, quantizations=["bf16"])
+    assert [i.check for i in result.items] == ["served"]
+
+
+async def test_a_pinned_endpoint_that_lacks_a_parameter_is_an_error_with_require_parameters_and_a_warning_without():
+    endpoints = [
+        live("novita/fp4", 0.08, 0.35, supported_parameters=["temperature", "tools"]),
+        live("deepinfra/fp8", supported_parameters=["temperature"]),
+    ]
+    with respx.mock(assert_all_called=False) as router:
+        listed(router, MODEL, endpoints)
+        strict = await check(require_params=["tools"], require_parameters=True)
+        default = await check(require_params=["tools"])  # the requirement has always been strict
+        lenient = await check(require_params=["tools"], require_parameters=False)
+    assert strict.ok is False and default.ok is False
+    assert lenient.ok is True
+    (warning,) = [i for i in lenient.items if i.check == "params"]
+    assert (warning.level, warning.provider) == ("warning", "deepinfra/fp8")
+    assert "tools" in warning.message and "ignored" in warning.message
+
+
+async def test_the_output_cap_stays_an_error_whether_or_not_parameters_are_required():
+    endpoints = [live("novita/fp4", 0.08, 0.35, max_completion_tokens=4_096), live("deepinfra/fp8")]
+    with respx.mock(assert_all_called=False) as router:
+        listed(router, MODEL, endpoints)
+        result = await check(max_tokens=8_192, require_parameters=False)
+    assert result.ok is False and [i.check for i in of_level(result, "error")] == ["max_tokens"]
+
+
+async def test_a_preset_of_free_models_only_is_warned_about_the_daily_cap():
+    config, picks, providers = plan_of()
+    picks[0].is_free = True
+    with respx.mock(assert_all_called=False) as router:
+        live_stored(router)
+        result = await check(config, picks, providers)
+    (warning,) = [i for i in result.items if i.check == "free"]
+    assert (warning.level, warning.model, warning.provider) == ("warning", None, None)
+    assert warning.message == FREE_TIER_WARNING and "00:00 UTC" in warning.message and "1000" in warning.message
+    assert result.ok is True
+
+
+async def test_one_model_that_is_not_free_is_enough_to_leave_out_the_free_tier_warning():
+    config, picks, providers = plan_of({MODEL: STORED, OTHER: [("novita/fp4", 0.08, 0.35)]})
+    picks[0].is_free = True
+    with respx.mock(assert_all_called=False) as router:
+        live_stored(router)
+        live_stored(router, OTHER, [("novita/fp4", 0.08, 0.35)])
+        result = await check(config, picks, providers)
+        picks[1].is_free = True
+        both = await check(config, picks, providers)
+    assert not [i for i in result.items if i.check == "free"]
+    assert len([i for i in both.items if i.check == "free"]) == 1
+
+
+async def test_a_model_the_plan_did_not_pick_is_not_assumed_free():
+    config, picks, providers = plan_of()
+    picks[0].is_free = True
+    config = {**config, "models": [MODEL, "acme/unlisted"]}
+    with respx.mock(assert_all_called=False) as router:
+        live_stored(router)
+        live_stored(router, "acme/unlisted", [])
+        result = await check(config, picks, providers)
+    assert not [i for i in result.items if i.check == "free"]

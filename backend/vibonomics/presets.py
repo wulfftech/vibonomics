@@ -11,6 +11,10 @@ What this module touches, and what it leaves alone:
   Everything else in the preset (tools, reasoning, caching, other provider filters: the passthrough) is read from the
   preset as it stands and sent back as it was, so an edit made in the OpenRouter UI survives. OpenRouter keeps no
   partial update: each write is the whole config.
+* The owner can also manage guardrails (``PresetGuardrails``): temperature, token cap, penalties, quantizations, ignored
+  providers, ``require_parameters`` and the system prompt. One that is set or cleared is owned like the keys above;
+  one left unset stays in the passthrough. The system prompt is not in the config but in the system message of a write,
+  and a write with none nulls it, so every write resends the prompt in force.
 * It only ever writes a slug that starts with ``vibonomics-`` and that it created itself, or one the operator adopted
   through ``adopt`` after being shown the passthrough. A preset with that name made by hand is refused, never
   overwritten. The ``template_slug`` preset is read and never written.
@@ -45,7 +49,7 @@ from .db import session_scope
 from .http import FetchError, get_json, public_url, request, scrub_secrets
 from .jobs import failure_text
 from .orm import Model, ProviderConfig, Setting, utcnow
-from .preset_validation import Validation, cap_below, unsupported, validate_live
+from .preset_validation import FREE_TIER_WARNING, Validation, cap_below, unsupported, validate_live
 from .pricing import Task, task_cost, value_of
 from .provider_service import resolve
 from .providers.openrouter import OpenRouterAdapter
@@ -54,6 +58,7 @@ from .settings_store import (
     DEFAULT_PROFILES,
     PRESET_MAX_ITEMS,
     AppSettings,
+    PresetGuardrails,
     PresetSettings,
     adopted_slug,
     load_settings,
@@ -121,6 +126,7 @@ class Candidate:
     cache_read: float | None
     endpoints: list[dict[str, Any]]
     expires: str | None = None  # the date OpenRouter said, at the last refresh, that the model goes away
+    is_free: bool = False  # a free model shares the account's daily request cap, which a preset of them can spend
 
 
 @dataclass
@@ -153,6 +159,9 @@ class Excluded:
 
     models: int = 0
     providers: list[str] = field(default_factory=list)  # display names of the providers whose endpoints were skipped
+    # Models with endpoint data, none of which passes the managed quantization and ignore guardrails: a request to a
+    # preset that names those would be refused, so the model is left out rather than picked and left to fail.
+    unserved: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -180,6 +189,11 @@ class Plan:
     draft: bool = False  # made from unsaved settings, so it cannot be applied
     excluded: Excluded = field(default_factory=Excluded)  # what the blocklists took out of this run
     own_tests_preferred: bool = False  # the scores the ranking used: the model's own tests over the computed ones
+    # The system prompt on the live preset, the one this plan's write carries (None: no system message is sent), and
+    # where that one comes from: managed | cleared | kept (the live one, sent back as it is) | none.
+    live_prompt: str | None = None
+    prompt: str | None = None
+    prompt_source: str = "none"
     passthrough: dict[str, Any] = field(default_factory=dict)  # the keys that are sent back as they were found
     reviewed: str | None = None  # the passthrough digest to record as seen, once an apply the owner watched is done
     fingerprint: str | None = None  # which key and host the plan was made for
@@ -247,6 +261,21 @@ def _provider_label(ep: dict[str, Any]) -> str:
     return str(ep.get("provider") or tag.split("/")[0])
 
 
+def _lowered(values: Any) -> set[str]:
+    return {v.lower() for v in values or [] if isinstance(v, str)}
+
+
+def _passes_provider_filters(ep: dict[str, Any], quantizations: set[str], ignored: set[str]) -> bool:
+    """Whether OpenRouter would still route to ``ep`` under a ``provider.quantizations`` and ``provider.ignore``.
+
+    An endpoint whose precision is not given is ``unknown`` to OpenRouter, and a list that does not name ``unknown``
+    leaves it out (measured: HTTP 404 "No endpoints found for the request with quantization: fp8").
+    """
+    if quantizations and str(ep.get("quantization") or "unknown").lower() not in quantizations:
+        return False
+    return not (ignored and {n.lower() for n in _endpoint_names(ep) if n} & ignored)
+
+
 # ---- ranking -------------------------------------------------------------------------------------------------
 
 
@@ -281,8 +310,12 @@ def rank(
     if not provider_ids:
         return [], task, profile_id
     blocked_models, blocked_providers = blocklists(settings, preset)
+    # Only a value the owner manages narrows the ranking here: the live preset is not read until the plan, which
+    # filters the endpoints by whatever it finds there.
+    quantizations, ignored = _lowered(preset.guardrails.quantizations), _lowered(preset.guardrails.ignore)
     dropped: set[str] = set()
     skipped: set[str] = set()
+    unserved: set[str] = set()
     scores = compute_scores(session, settings, own_test_scores(session), own_tests_preferred(settings, preset))
     free_cost = max(0.0, settings.scoring.free_model_cost)
     best: dict[str, Candidate] = {}
@@ -311,13 +344,21 @@ def rank(
         if blocked_models and _blocked_by((m.model_id, m.canonical_id), blocked_models):
             dropped.add(m.model_id)
             continue
+        tagged = [e for e in endpoints if e.get("tag")]  # the only ones a preset could pin
         if blocked_providers and endpoints:
-            tagged = [e for e in endpoints if e.get("tag")]  # the only ones a preset could pin
             hits = [e for e in tagged if _blocked_by(_endpoint_names(e), blocked_providers)]
             skipped.update(_provider_label(e) for e in hits)
             if hits and len(hits) == len(tagged):
                 dropped.add(m.model_id)
                 continue
+            tagged = [e for e in tagged if e not in hits]
+        if (
+            (quantizations or ignored)
+            and tagged
+            and not any(_passes_provider_filters(e, quantizations, ignored) for e in tagged)
+        ):
+            unserved.add(m.model_id)
+            continue
         found = Candidate(
             model_id=m.model_id,
             name=m.name,
@@ -328,11 +369,13 @@ def rank(
             cache_read=m.price_cache_read,
             endpoints=endpoints,
             expires=(m.extra or {}).get("expiration_date") or None,
+            is_free=bool(m.is_free),
         )
         if m.model_id not in best or found.value > best[m.model_id].value:
             best[m.model_id] = found
     if excluded is not None:
         excluded.models, excluded.providers = len(dropped), sorted(skipped)
+        excluded.unserved = sorted(unserved)
     return sorted(best.values(), key=lambda c: (-c.value, -c.score, c.task_cost, c.model_id)), task, profile_id
 
 
@@ -378,12 +421,11 @@ def choose_endpoints(
         tag, price_in, price_out = ep.get("tag"), ep.get("input"), ep.get("output")
         if not isinstance(tag, str) or not tag or tag in seen or price_in is None or price_out is None:
             continue
-        if quantizations and str(ep.get("quantization") or "").lower() not in quantizations:
+        if not _passes_provider_filters(ep, quantizations, ignored):
             continue
         names = {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider") or "").lower()}
         if (
-            names & ignored
-            or (allowed and not names & allowed)
+            (allowed and not names & allowed)
             or (blocked and _blocked_by(_endpoint_names(ep), blocked))
             or unsupported(ep.get("params"), require_params)
             or cap_below(ep.get("max_completion_tokens"), max_tokens)
@@ -416,18 +458,72 @@ def choose_endpoints(
 # ---- the config ----------------------------------------------------------------------------------------------
 
 
+# The guardrails that sit at the top of the config, and those inside `provider`. The system prompt is neither: it is
+# not a config key at OpenRouter, but a system message that goes with each write.
+GUARDRAIL_TOP = ("temperature", "max_tokens", "repetition_penalty", "frequency_penalty", "presence_penalty", "top_p")
+GUARDRAIL_PROVIDER = ("quantizations", "ignore", "require_parameters")
+SYSTEM_KEY = "system_prompt"
+# The numeric ones: a parameter an endpoint may not support, so setting one narrows which endpoints are worth pinning.
+NEEDS_SUPPORT = GUARDRAIL_TOP
+
+
+def guardrail_path(key: str) -> str:
+    """Where a guardrail key sits in a config: ``provider.<key>`` inside the provider block, else the key itself."""
+    return f"provider.{key}" if key in GUARDRAIL_PROVIDER else key
+
+
+def _guard(config: dict[str, Any], provider: dict[str, Any], guardrails: PresetGuardrails | None) -> bool:
+    """Set, or take off, each managed guardrail in ``config`` and ``provider`` (both edited in place).
+
+    Returns whether a key was taken off the provider block, which can leave it empty. A key that is not managed is
+    not touched: whatever the live preset has stays.
+    """
+    if guardrails is None:
+        return False
+    values = guardrails.set_values()
+    removed = False
+    for key in GUARDRAIL_TOP:
+        if key in values:
+            config[key] = values[key]
+        elif key in guardrails.clear:
+            config.pop(key, None)
+    for key in GUARDRAIL_PROVIDER:
+        if key in values:
+            provider[key] = values[key]
+        elif key in guardrails.clear and key in provider:
+            del provider[key]
+            removed = True
+    return removed
+
+
+def apply_guardrails(config: dict[str, Any], guardrails: PresetGuardrails | None) -> dict[str, Any]:
+    """A copy of ``config`` with the managed guardrails in force. What a plan filters endpoints by is this, not the
+    live config: a value the owner set is what applies, and one they cleared no longer does."""
+    out = copy.deepcopy(config)
+    raw = out.get("provider")
+    provider = raw if isinstance(raw, dict) else {}
+    removed = _guard(out, provider, guardrails)
+    if provider:
+        out["provider"] = provider
+    elif removed:
+        out.pop("provider", None)
+    return out
+
+
 def build_config(
     base: dict[str, Any] | None,
     model_ids: list[str],
     tags: list[str],
     route: str = "fallback",
     sort: str | None = None,
+    guardrails: PresetGuardrails | None = None,
 ) -> dict[str, Any]:
     """``base`` with the models, the provider lists and the route replaced; every other key is the operator's.
 
     One model is ``model``. Several are ``model`` (the lead) and ``models`` (all of them, in order, the lead first),
     so a preset that keeps only one of the two is still a working preset. ``route`` ``sort`` writes ``route: "sort"``
-    and ``provider.sort`` (price unless ``sort`` says otherwise); ``fallback`` writes neither.
+    and ``provider.sort`` (price unless ``sort`` says otherwise); ``fallback`` writes neither. A guardrail the owner
+    manages is set, or taken off; one they do not is left as ``base`` has it.
     """
     config = copy.deepcopy(base) if base else {}
     config["model"] = model_ids[0]
@@ -452,17 +548,71 @@ def build_config(
         # sets are taken off a preset that had them: they are Vibonomics's to decide.
         config.pop("route", None)
         provider.pop("sort", None)
+    removed = _guard(config, provider, guardrails)
     # No default is written for the operator (allow_fallbacks is on at OpenRouter already): a key that Vibonomics adds
     # and the account does not keep would make every later plan differ from the live preset.
-    if provider or "provider" in config:
+    if provider:
+        config["provider"] = provider
+    elif removed:
+        # A block that only a guardrail taken off emptied is not worth writing: OpenRouter may not keep an empty one.
+        config.pop("provider", None)
+    elif "provider" in config:
         config["provider"] = provider
     return config
 
 
-def owned_view(config: dict[str, Any]) -> dict[str, Any]:
-    """The only keys Vibonomics decides: what a plan is compared on, to tell an update from nothing to do."""
+def _prompt_text(value: str | None) -> str | None:
+    """A system prompt as it is sent: nothing and an empty one are the same."""
+    return value if isinstance(value, str) and value else None
+
+
+def _norm_prompt(value: str | None) -> str | None:
+    """A system prompt as two of them are compared: space around the text is not a difference, since a store is free
+    to trim it, and a version made for that alone would be one nobody asked for."""
+    text = (value or "").strip() if isinstance(value, str) else ""
+    return text or None
+
+
+def prompts_differ(a: str | None, b: str | None) -> bool:
+    """Whether two system prompts are not the same text, with nothing and an empty one the same."""
+    return _norm_prompt(a) != _norm_prompt(b)
+
+
+def prompt_in_force(guardrails: PresetGuardrails, live: str | None) -> tuple[str | None, str]:
+    """The system prompt a write carries, and whose it is.
+
+    OpenRouter takes the prompt from the system message of each write, and a write with none sets it to null: the
+    version before it is not carried over. So a prompt the owner does not manage is the live one, sent back as it is.
+    """
+    if guardrails.system_prompt is not None:
+        return guardrails.system_prompt, "managed"
+    if SYSTEM_KEY in guardrails.clear:
+        return None, "cleared"
+    live = _prompt_text(live)
+    return live, "kept" if live is not None else "none"
+
+
+def write_body(config: dict[str, Any], prompt: str | None) -> dict[str, Any]:
+    """The request that makes a version: the config, and the messages the create endpoint insists on.
+
+    A system message is the only way to give the version a system prompt, so it is there whenever one is in force.
+    """
+    messages = [dict(m) for m in PLACEHOLDER_MESSAGES]
+    if prompt is not None:
+        messages.insert(0, {"role": "system", "content": prompt})
+    return {**config, "messages": messages}
+
+
+def owned_view(
+    config: dict[str, Any], guardrails: PresetGuardrails | None = None, system_prompt: str | None = None
+) -> dict[str, Any]:
+    """The only keys Vibonomics decides: what a plan is compared on, to tell an update from nothing to do.
+
+    A guardrail key is in the view exactly when the owner manages it (sets it or takes it off); one they leave alone is
+    not Vibonomics's to compare. The system prompt is the pseudo-key ``system_prompt``.
+    """
     provider = config.get("provider") if isinstance(config.get("provider"), dict) else {}
-    return {
+    view = {
         "model": config.get("model"),
         "models": config.get("models"),
         "route": config.get("route"),
@@ -470,6 +620,14 @@ def owned_view(config: dict[str, Any]) -> dict[str, Any]:
         "order": provider.get("order"),
         "sort": provider.get("sort"),
     }
+    for key in guardrails.owned_keys() if guardrails else []:
+        if key == SYSTEM_KEY:
+            view[key] = _norm_prompt(system_prompt)
+        elif key in GUARDRAIL_PROVIDER:
+            view[key] = provider.get(key)
+        else:
+            view[key] = config.get(key)
+    return view
 
 
 # What Vibonomics decides in a preset. Every other key is sent back as it was found.
@@ -477,16 +635,30 @@ MANAGED_KEYS = ["model", "models", "route", "provider.only", "provider.order", "
 _MANAGED_PROVIDER_KEYS = ("only", "order", "sort")
 
 
-def passthrough_view(config: dict[str, Any]) -> dict[str, Any]:
+def managed_keys(guardrails: PresetGuardrails | None = None) -> list[str]:
+    """``MANAGED_KEYS`` and the guardrail keys the owner manages in this preset, as config paths."""
+    owned = [guardrail_path(key) for key in guardrails.owned_keys()] if guardrails else []
+    return [*MANAGED_KEYS, *owned]
+
+
+def passthrough_view(config: dict[str, Any], guardrails: PresetGuardrails | None = None) -> dict[str, Any]:
     """The keys of ``config`` that Vibonomics does not decide and sends back unchanged.
 
-    That is every top-level key but the managed ones, and the other keys inside ``provider``. It is what the operator
-    is shown before handing a preset over, as raw JSON.
+    That is every top-level key but the managed ones, and the other keys inside ``provider``. A guardrail the owner
+    manages is Vibonomics's, so it is not in here; one they leave alone is. It is what the operator is shown before
+    handing a preset over, as raw JSON.
     """
-    out = {k: copy.deepcopy(v) for k, v in config.items() if k not in ("model", "models", "route", "provider")}
+    own_top = {k for k in (guardrails.owned_keys() if guardrails else []) if k in GUARDRAIL_TOP}
+    own_provider = {k for k in (guardrails.owned_keys() if guardrails else []) if k in GUARDRAIL_PROVIDER}
+    hidden = {"model", "models", "route", "provider", *own_top}
+    out = {k: copy.deepcopy(v) for k, v in config.items() if k not in hidden}
     provider = config.get("provider")
     if isinstance(provider, dict):
-        rest = {k: copy.deepcopy(v) for k, v in provider.items() if k not in _MANAGED_PROVIDER_KEYS}
+        rest = {
+            k: copy.deepcopy(v)
+            for k, v in provider.items()
+            if k not in _MANAGED_PROVIDER_KEYS and k not in own_provider
+        }
         if rest:
             out["provider"] = rest
     elif "provider" in config:
@@ -494,14 +666,25 @@ def passthrough_view(config: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def passthrough_digest(config: dict[str, Any]) -> str:
-    """Names the passthrough of ``config``, to tell whether it changed since the operator looked at it."""
-    raw = json.dumps(passthrough_view(config), sort_keys=True, separators=(",", ":"))
+def passthrough_digest(
+    config: dict[str, Any], guardrails: PresetGuardrails | None = None, system_prompt: str | None = None
+) -> str:
+    """Names the passthrough of ``config``, to tell whether it changed since the operator looked at it.
+
+    The live system prompt is part of it unless the owner manages the prompt: then what is there gets replaced and no
+    longer matters. A preset with no prompt hashes as it always did, so a digest recorded earlier still matches.
+    """
+    view: Any = passthrough_view(config, guardrails)
+    prompt = _prompt_text(system_prompt)
+    if prompt is not None and SYSTEM_KEY not in (guardrails.owned_keys() if guardrails else []):
+        view = [view, prompt]
+    raw = json.dumps(view, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-# Keys whose storage OpenRouter does not document, so a write may come back without them.
-UNDOCUMENTED = {"route": "route", "provider.sort": "sort"}
+# Keys whose storage OpenRouter does not document, so a write may come back without them. The system prompt is
+# kept (measured), but a write whose read-back showed it was not is not sent again for the same result.
+UNDOCUMENTED = {"route": "route", "provider.sort": "sort", SYSTEM_KEY: SYSTEM_KEY}
 
 
 def _unkept(state: dict[str, Any], slug: str) -> set[str]:
@@ -510,9 +693,16 @@ def _unkept(state: dict[str, Any], slug: str) -> set[str]:
     return {UNDOCUMENTED[k] for k in applied.get("unsaved") or [] if k in UNDOCUMENTED}
 
 
-def _owned_differs(want: dict[str, Any], have: dict[str, Any], unkept: Collection[str] = ()) -> bool:
+def _owned_differs(
+    want: dict[str, Any],
+    have: dict[str, Any],
+    unkept: Collection[str] = (),
+    guardrails: PresetGuardrails | None = None,
+    want_prompt: str | None = None,
+    have_prompt: str | None = None,
+) -> bool:
     """Whether the keys Vibonomics decides differ, leaving out the ones the live preset lacks and cannot be given."""
-    a, b = owned_view(want), owned_view(have)
+    a, b = owned_view(want, guardrails, want_prompt), owned_view(have, guardrails, have_prompt)
     for name in unkept:
         if b.get(name) is None:
             a.pop(name, None)
@@ -581,8 +771,17 @@ def _json(value: Any) -> str | None:
     return None if value is None else json.dumps(value, sort_keys=True)
 
 
-def diff_config(before: dict[str, Any] | None, after: dict[str, Any]) -> list[Change]:
-    """What differs, key by key, with the provider block opened up one level."""
+def diff_config(
+    before: dict[str, Any] | None,
+    after: dict[str, Any],
+    before_prompt: str | None = None,
+    after_prompt: str | None = None,
+) -> list[Change]:
+    """What differs, key by key, with the provider block opened up one level.
+
+    The system prompt is not in a config, so it is compared apart and shows as the pseudo-key ``system_prompt``, with
+    its text (not JSON) as the before and the after.
+    """
     before = before or {}
     changes: list[Change] = []
     for key in sorted(set(before) | set(after)):
@@ -594,11 +793,17 @@ def diff_config(before: dict[str, Any] | None, after: dict[str, Any]) -> list[Ch
                     changes.append(Change(f"provider.{sub}", _json(old.get(sub)), _json(new.get(sub))))
         elif old != new:
             changes.append(Change(key, _json(old), _json(new)))
+    if _norm_prompt(before_prompt) != _norm_prompt(after_prompt):
+        changes.append(Change(SYSTEM_KEY, _prompt_text(before_prompt), _prompt_text(after_prompt)))
     return changes
 
 
-def unsaved_keys(desired: dict[str, Any], stored: dict[str, Any]) -> list[str]:
-    """The keys OpenRouter did not keep as sent: it persists only what overlaps its own preset config."""
+def unsaved_keys(desired: dict[str, Any], stored: dict[str, Any], cleared: Iterable[str] = ()) -> list[str]:
+    """The keys OpenRouter did not keep as sent: it persists only what overlaps its own preset config.
+
+    ``cleared`` are the paths the write took off (``temperature``, ``provider.ignore``); one that is still on the
+    stored preset was not removed.
+    """
     out: list[str] = []
     for key, want in desired.items():
         have = stored.get(key)
@@ -606,17 +811,27 @@ def unsaved_keys(desired: dict[str, Any], stored: dict[str, Any]) -> list[str]:
             out += [f"provider.{sub}" for sub, value in want.items() if have.get(sub) != value]
         elif have != want:
             out.append(key)
+    provider = stored.get("provider") if isinstance(stored.get("provider"), dict) else {}
+    for path in cleared:
+        key, _, sub = path.partition(".")
+        if (provider.get(sub) if sub else stored.get(key)) is not None:
+            out.append(path)
     return out
 
 
-def digest_of(slug: str, config: dict[str, Any], fingerprint: str | None = None, version: int | None = None) -> str:
+def digest_of(
+    slug: str,
+    config: dict[str, Any],
+    fingerprint: str | None = None,
+    version: int | None = None,
+    system_prompt: str | None = None,
+) -> str:
     """Names a plan. The account and the live version are in it, so a plan reviewed against one account, or before
-    someone made another version, is refused by apply."""
-    raw = json.dumps(
-        {"slug": slug, "config": config, "account": fingerprint, "version": version},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    someone made another version, is refused by apply. So is the system prompt that would be sent, when there is one."""
+    named: dict[str, Any] = {"slug": slug, "config": config, "account": fingerprint, "version": version}
+    if _prompt_text(system_prompt) is not None:
+        named["system_prompt"] = system_prompt
+    raw = json.dumps(named, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -633,7 +848,8 @@ def owner_fingerprint(base_url: str, api_key: str) -> str:
 
 
 # Kept per slug, so a write to one preset leaves what another's record says alone.
-_PER_SLUG = ("owners", "pins", "applied", "last", "reviewed")
+_PER_SLUG = ("owners", "pins", "applied", "last", "reviewed", "system_backups")
+BACKUP_MAX_CHARS = 20_000
 
 
 def _normalise_state(raw: dict[str, Any]) -> dict[str, Any]:
@@ -769,6 +985,22 @@ def _claim_record(
             "created_at": old.get("created_at") or created_at,
         }
     return _owner_record(plan.fingerprint or "", None, preset_id, created_at)
+
+
+def _backup_of(plan: Plan) -> dict[str, Any] | None:
+    """What to keep of the live system prompt before a write that replaces or removes it; None when none is lost.
+
+    Resending the prompt unchanged loses nothing, so it records nothing and an earlier backup is not overwritten.
+    """
+    if plan.live_prompt is None or plan.current is None:
+        return None
+    if _norm_prompt(plan.live_prompt) == _norm_prompt(plan.prompt):
+        return None
+    return {
+        "text": plan.live_prompt[:BACKUP_MAX_CHARS],
+        "version": plan.current.version,
+        "at": utcnow().isoformat(),
+    }
 
 
 def _stable_id(data: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -977,6 +1209,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         excluded=inputs.excluded,
         own_tests_preferred=own_tests_preferred(inputs.settings, cfg),
     )
+    # Until the live preset is read, a managed prompt is what the plan would send; the live one is looked at after.
+    plan.prompt, plan.prompt_source = prompt_in_force(cfg.guardrails, None)
     blocked_providers = blocklists(inputs.settings, cfg)[1]
     if cfg.adopted and not is_adopted(inputs.state, cfg.slug):
         # `adopted` in the settings is only a claim. A preset made by hand is written only after the owner adopted it
@@ -999,6 +1233,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
     except FetchError as exc:
         return _blocked(plan, f"Could not read the preset from OpenRouter: {exc}")
     plan.current = remote
+    plan.live_prompt = _prompt_text(remote.system_prompt) if remote is not None else None
+    plan.prompt, plan.prompt_source = prompt_in_force(cfg.guardrails, plan.live_prompt)
     if remote is None and cfg.adopted:
         return _blocked(
             plan,
@@ -1006,7 +1242,7 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             "it was only handed. Take it out of the list, or adopt the preset again if it was made anew.",
         )
     if remote is not None and remote.readable:
-        plan.passthrough = passthrough_view(remote.config)
+        plan.passthrough = passthrough_view(remote.config, cfg.guardrails)
     if remote is not None and remote.status == "archived":
         return _blocked(
             plan,
@@ -1047,24 +1283,32 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             log.info("Preset %s was recorded as ours before accounts were tracked; adopting it for this key", cfg.slug)
             record = _owner_record(plan.fingerprint, None, remote.preset_id, remote.created_at)
             await asyncio.to_thread(_update_state, {}, cfg.slug, record, True)
-    if remote is not None and remote.system_prompt:
-        return _blocked(
-            plan,
-            "The preset has a system prompt, and OpenRouter's API cannot carry one over to a new version. Clear it "
-            "in the OpenRouter web UI, or use another name.",
-        )
     if not inputs.candidates:
         return _blocked(
             plan,
             "No OpenRouter model passes the filters. Loosen the minimum score, the value floor, the cost limit or the "
             "other filters."
-            + (" The blocklists took out models that would otherwise pass." if inputs.excluded.models else ""),
+            + (" The blocklists took out models that would otherwise pass." if inputs.excluded.models else "")
+            + (
+                " The quantization and ignore guardrails took out models none of whose endpoints pass them."
+                if inputs.excluded.unserved
+                else ""
+            ),
         )
 
     before = current_models(remote.config) if remote else []
     plan.picks, plan.kept_current = select_models(inputs.candidates, before, cfg.max_models, cfg.switch_margin_pct)
     pick = plan.pick = plan.picks[0]
     plan.runners_up = [c for c in inputs.candidates if c not in plan.picks][:RUNNERS_UP]
+    if all(c.is_free for c in plan.picks):
+        plan.warnings.append(FREE_TIER_WARNING)
+    if inputs.excluded.unserved:
+        left = inputs.excluded.unserved
+        shown = ", ".join(left[:5]) + (f" and {len(left) - 5} more" if len(left) > 5 else "")
+        plan.warnings.append(
+            f"Left out of the ranking because none of their live endpoints passes the quantization and ignore "
+            f"guardrails, so this preset would never be served them: {shown}."
+        )
 
     base_config = remote.config if remote else None
     if remote is None and cfg.template_slug:
@@ -1081,12 +1325,17 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
                 "Vibonomics could not read what to start from. Try again later.",
             )
         base_config = template.config
-        if template.system_prompt:
+        if template.system_prompt and cfg.guardrails.system_prompt is None:
+            # A template lends its settings, not its text: the prompt is the owner's to give a new preset.
             plan.warnings.append(
-                "The template has a system prompt, which a new preset cannot take over; it is left out."
+                "The template has a system prompt, which a new preset does not copy. Set a system prompt in this "
+                "preset's guardrails to give it one."
             )
 
-    provider_block = (base_config or {}).get("provider")
+    # What the endpoints are filtered by is the config this plan will write, so a guardrail the owner manages is what
+    # applies (and one they took off no longer does), whatever the live preset says.
+    guarded = apply_guardrails(base_config or {}, cfg.guardrails)
+    provider_block = guarded.get("provider")
     provider_block = provider_block if isinstance(provider_block, dict) else {}
     live_provider = remote.config.get("provider") if remote else None
     live_provider = live_provider if isinstance(live_provider, dict) else {}
@@ -1103,21 +1352,26 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             f"The template's provider list (only: {', '.join(allow)}) is applied: only those providers are "
             "considered for this preset."
         )
-    per_pick = [
-        (
-            c.model_id,
-            choose_endpoints(
-                c.endpoints,
-                inputs.task,
-                provider_block,
-                cfg.max_providers,
-                current=live_tags,
-                allow=allow,
-                blocked=blocked_providers,
-            ),
+    values = cfg.guardrails.set_values()
+    need = [k for k in NEEDS_SUPPORT if k in values]
+    per_pick: list[tuple[str, list[dict[str, Any]]]] = []
+    for c in plan.picks:
+        pinned, notes, stop = _pin_for(
+            c,
+            inputs.task,
+            provider_block,
+            cfg.max_providers,
+            live_tags=live_tags,
+            allow=allow,
+            blocked=blocked_providers,
+            need=need,
+            cap=values.get("max_tokens"),
+            strict=provider_block.get("require_parameters") is True,
         )
-        for c in plan.picks
-    ]
+        if stop:
+            return _blocked(plan, stop)
+        plan.warnings.extend(notes)
+        per_pick.append((c.model_id, pinned))
     bare = [c.name for c, (_id, eps) in zip(plan.picks, per_pick, strict=True) if not eps]
     if len(bare) == len(plan.picks):
         plan.warnings.append(
@@ -1140,7 +1394,10 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
                 f"Each of the {len(plan.picks)} models keeps a provider of its own, so the preset lists "
                 f"{len(plan.providers)} providers, more than the limit of {cfg.max_providers}."
             )
-    unseen = [k for k in UNSEEN_FILTERS if k in provider_block]
+    # What the owner manages is handled, not unseen: it is set or taken off here.
+    owned = cfg.guardrails.owned_keys()
+    raw_block = (base_config or {}).get("provider")
+    unseen = [k for k in UNSEEN_FILTERS if isinstance(raw_block, dict) and k in raw_block and k not in owned]
     if unseen:
         plan.warnings.append(
             f"OpenRouter applies {', '.join(unseen)} itself and this ranking cannot see it, so a listed provider "
@@ -1148,12 +1405,14 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         )
 
     ids = [c.model_id for c in plan.picks]
-    plan.config = build_config(base_config, ids, [p["tag"] for p in plan.providers], cfg.route, cfg.sort)
-    plan.passthrough = passthrough_view(plan.config)
+    plan.config = build_config(
+        base_config, ids, [p["tag"] for p in plan.providers], cfg.route, cfg.sort, cfg.guardrails
+    )
+    plan.passthrough = passthrough_view(plan.config, cfg.guardrails)
     plan.url = f"{inputs.base_url}/presets/{quote(cfg.slug, safe='')}/chat/completions"
-    plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
-    plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None)
-    plan.changes = diff_config(remote.config if remote else None, plan.config)
+    plan.body = write_body(plan.config, plan.prompt)
+    plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None, plan.prompt)
+    plan.changes = diff_config(remote.config if remote else None, plan.config, plan.live_prompt, plan.prompt)
     plan.pinned = ids if plan.providers else []
     # The models whose providers the live preset named when it was last in step with a plan, and that have none now.
     known = (inputs.state.get("pins") or {}).get(cfg.slug) or []
@@ -1166,7 +1425,14 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             if len(ids) == 1
             else f"Creates {cfg.slug} with {len(ids)} models, led by {pick.name}."
         )
-    elif not _owned_differs(plan.config, remote.config, unkept := _unkept(inputs.state, cfg.slug)):
+    elif not _owned_differs(
+        plan.config,
+        remote.config,
+        unkept := _unkept(inputs.state, cfg.slug),
+        cfg.guardrails,
+        plan.prompt,
+        plan.live_prompt,
+    ):
         plan.action = "unchanged"
         best = inputs.candidates[0]
         plan.reason = "Already up to date." + (
@@ -1182,8 +1448,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
                 "it no more now, so it is not sent again. Nothing is written until something else changes."
             )
             plan.config = copy.deepcopy(remote.config)
-            plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
-            plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version)
+            plan.body = write_body(plan.config, plan.prompt)
+            plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version, plan.prompt)
             plan.changes = []
     elif lost and (live_provider.get("only") or live_provider.get("order")):
         # A failed endpoint lookup, or the option switched off, leaves a model with no data for a while. Writing now
@@ -1197,15 +1463,21 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             "instead of being unpinned. Nothing is written until the data is back."
         )
         plan.config = copy.deepcopy(remote.config)
-        plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
-        plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version)
+        plan.body = write_body(plan.config, plan.prompt)
+        plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version, plan.prompt)
         plan.changes, plan.pinned = [], None
     elif before != ids:
         plan.action, plan.reason = "update", _model_change(before, plan.picks, inputs.candidates)
     else:
         plan.action = "update"
         paths = {c.path for c in plan.changes}
-        what = "route" if paths and paths <= {"route", "provider.sort"} else "provider list"
+        mine = {guardrail_path(k) for k in cfg.guardrails.owned_keys()}
+        if paths and paths <= {"route", "provider.sort"}:
+            what = "route"
+        elif paths and paths <= mine:
+            what = "system prompt" if paths == {SYSTEM_KEY} else "guardrails"
+        else:
+            what = "provider list" + (" and guardrails" if paths & mine else "")
         plan.reason = f"Same {'model' if len(ids) == 1 else 'models'}, {pick.name}; the {what} changed."
     if remote is not None and cfg.route == "fallback":
         gone = [k for k in ("route", "provider.sort") if k in {c.path for c in plan.changes}]
@@ -1216,8 +1488,120 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             )
     # Last, so the check is as fresh as it can be when an apply goes on to write: it reads the live listing, not the
     # stored copy the ranking used. Read-only, so a draft is checked too.
-    plan.validation = await validate_live(inputs.base_url, plan.config, plan.picks, plan.providers)
+    block = plan.config.get("provider") if isinstance(plan.config.get("provider"), dict) else {}
+    plan.validation = await validate_live(
+        inputs.base_url,
+        plan.config,
+        plan.picks,
+        plan.providers,
+        require_params=need,
+        max_tokens=values.get("max_tokens"),
+        # What the plan will write is what applies: a managed value, or else the live preset's own.
+        quantizations=[q for q in block.get("quantizations") or [] if isinstance(q, str)],
+        ignore=[s for s in block.get("ignore") or [] if isinstance(s, str)],
+        require_parameters=block.get("require_parameters") is True,
+    )
     return plan
+
+
+def _unmet(endpoints: list[dict[str, Any]], need: Sequence[str], cap: int | None) -> list[tuple[str, str]]:
+    """What the owner asks of an endpoint that none of ``endpoints`` meets, as (name, why).
+
+    Each parameter is looked at by itself first. When every one is supported by some endpoint and no endpoint takes
+    them all, the combination is what is unmet.
+    """
+    if not endpoints:
+        return []
+    out = [
+        (name, "no live endpoint supports it")
+        for name in need
+        if all(unsupported(ep.get("params"), [name]) for ep in endpoints)
+    ]
+    if cap is not None and all(cap_below(ep.get("max_completion_tokens"), cap) for ep in endpoints):
+        out = [item for item in out if item[0] != "max_tokens"]  # the cap is the more exact reason
+        out.append(("max_tokens", f"no live endpoint allows {cap:,} output tokens"))
+    if not out and need:
+        out = [(" and ".join(need), "no live endpoint supports them all at once")]
+    return out
+
+
+def _pin_for(
+    c: Candidate,
+    task: Task,
+    provider_block: dict[str, Any],
+    limit: int,
+    *,
+    live_tags: Sequence[str],
+    allow: Sequence[str],
+    blocked: Sequence[str],
+    need: Sequence[str],
+    cap: int | None,
+    strict: bool,
+) -> tuple[list[dict[str, Any]], list[str], str | None]:
+    """The endpoints to pin for one model, what could not be honoured, and a reason to block the plan, if any.
+
+    The parameters the owner sets (``need``) and the token cap (``cap``) are asked of the endpoints first. A model with
+    no endpoint that meets them is pinned to the others and warned about, since OpenRouter ignores a parameter an
+    endpoint does not take; unless ``strict`` (``provider.require_parameters``), where it refuses every request instead,
+    and the plan is blocked. A model with no endpoint data at all, or none that passes the other filters, is left
+    unpinned as it always was.
+    """
+    common = {"current": live_tags, "allow": allow, "blocked": blocked}
+    pinned = choose_endpoints(c.endpoints, task, provider_block, limit, require_params=need, max_tokens=cap, **common)
+    if pinned or not need:
+        return pinned, [], None
+    everyone = choose_endpoints(c.endpoints, task, provider_block, max(len(c.endpoints), 1), **common)
+    if not everyone:
+        return [], [], None
+    by_tag = {ep.get("tag"): ep for ep in c.endpoints if isinstance(ep, dict)}
+    unmet = _unmet([by_tag[e["tag"]] for e in everyone if e["tag"] in by_tag], need, cap)
+    if strict:
+        names = ", ".join(name for name, _why in unmet)
+        why = "; ".join(f"{name}: {reason}" for name, reason in unmet)
+        return (
+            [],
+            [],
+            f"{c.model_id} could not be served: require_parameters is on and {why}, so OpenRouter would refuse every "
+            f"request to it. Turn require_parameters off, or stop setting {names}.",
+        )
+    notes = [f"{name} will be ignored for {c.model_id}: {why}." for name, why in unmet]
+    return everyone[:limit], notes, None
+
+
+def _supports(ep: dict[str, Any] | None, param: str) -> str:
+    """Whether one endpoint takes ``param``: yes, no, or unknown when it did not say (or is not known at all)."""
+    params = ep.get("params") if isinstance(ep, dict) else None
+    if not isinstance(params, list):
+        return "unknown"
+    return "yes" if param in params else "no"
+
+
+def capability_rows(plan: Plan) -> list[dict[str, Any]]:
+    """For each model of the plan, whether the endpoint it is pinned to takes the numeric parameters the owner sets.
+
+    A model pinned to several endpoints has a row for each. One that is pinned to none (no provider data, or the preset
+    leaves OpenRouter to route) has a row with no provider, which says ``yes`` or ``no`` only when every endpoint it is
+    known to have agrees, and ``unknown`` when they disagree or none says.
+    """
+    asked = [k for k in NEEDS_SUPPORT if k in plan.settings.guardrails.set_values()]
+    if not asked:
+        return []
+    rows: list[dict[str, Any]] = []
+    for c in plan.picks:
+        known = {ep.get("tag"): ep for ep in c.endpoints if isinstance(ep, dict)}
+        tags = [p["tag"] for p in plan.providers if c.model_id in (p.get("models") or [])]
+        if tags:
+            rows += [
+                {"model_id": c.model_id, "provider": tag, "supports": {k: _supports(known.get(tag), k) for k in asked}}
+                for tag in tags
+            ]
+            continue
+        supports = {}
+        for k in asked:
+            seen = {_supports(ep, k) for ep in known.values()}
+            supports[k] = seen.pop() if len(seen) == 1 else "unknown"
+        rows.append({"model_id": c.model_id, "provider": None, "supports": supports})
+    return rows
 
 
 def _model_change(before: list[str], picks: list[Candidate], candidates: list[Candidate]) -> str:
@@ -1245,8 +1629,12 @@ class _Unconfirmed(Exception):
     """OpenRouter answered a write with a success status but did not report the version it made."""
 
 
-def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any]]:
-    """The preset, its live version and the config OpenRouter stored, from a write's response.
+# What a write's answer says of the system prompt when it does not say: not the same as saying there is none.
+_UNREPORTED: Any = object()
+
+
+def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any], Any]:
+    """The preset, its live version, the config and the system prompt OpenRouter stored, from a write's response.
 
     A 2xx alone proves nothing: an error can ride a 200, and a body with no version means no version was made.
     """
@@ -1259,7 +1647,7 @@ def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any
         and isinstance(live.get("config"), dict)
         and data.get("slug", slug) == slug
     ):
-        return data, live["version"], live["config"]
+        return data, live["version"], live["config"], live.get("system_prompt", _UNREPORTED)
     error = body.get("error") if isinstance(body, dict) else None
     detail = error.get("message") if isinstance(error, dict) else error
     raise _Unconfirmed(f"the answer named no version of {slug}" + (f" ({str(detail)[:200]})" if detail else ""))
@@ -1274,17 +1662,30 @@ async def _settle(
     preset_id: str | None,
     created_at: str | None,
     read_back: bool = False,
+    stored_prompt: Any = _UNREPORTED,
 ) -> Applied:
     """Record a write that went through: the slug is ours from here on, and the run is logged."""
     assert plan.config is not None
     slug = plan.slug
-    unsaved = unsaved_keys(plan.config, stored)
+    cleared = [guardrail_path(k) for k in plan.settings.guardrails.clear if k != SYSTEM_KEY]
+    unsaved = unsaved_keys(plan.config, stored, cleared)
+    unverified = False
+    if plan.prompt is not None or plan.live_prompt is not None:
+        # Whatever was sent, the prompt the version holds is compared with it: a version that lost it has lost the
+        # owner's text, and must not pass for a write that went well.
+        seen = stored_prompt if stored_prompt is not _UNREPORTED else await _stored_prompt(inputs, slug)
+        if seen is _UNREPORTED:
+            unverified = True
+        elif _norm_prompt(seen) != _norm_prompt(plan.prompt):
+            unsaved.append(SYSTEM_KEY)
     verb = "Created" if plan.action == "create" else "Updated"
     message = f"{verb} {slug} as version {version}: {plan.reason}"
     if read_back:
         message += " OpenRouter's answer did not arrive, so this was read back from the preset."
     if unsaved:
         message += f" OpenRouter did not keep: {', '.join(unsaved)}."
+    if unverified:
+        message += " It could not be checked whether OpenRouter kept the system prompt."
     applied = {
         "slug": slug,
         "model_id": plan.config.get("model"),
@@ -1301,6 +1702,16 @@ async def _settle(
     await asyncio.to_thread(_update_state, patch, slug, owner)
     await asyncio.to_thread(_record_run, slug, "applied", message, trigger)
     return Applied(version=version, unsaved=unsaved, message=message)
+
+
+async def _stored_prompt(inputs: Inputs, slug: str) -> Any:
+    """The system prompt the live version holds, by a plain read, for a write whose answer did not carry it."""
+    assert inputs.api_key is not None
+    try:
+        seen = await fetch_remote(inputs.base_url, inputs.api_key, slug)
+    except FetchError:
+        return _UNREPORTED
+    return seen.system_prompt if seen is not None and seen.readable else _UNREPORTED
 
 
 async def _identity(
@@ -1332,10 +1743,23 @@ async def _read_back(plan: Plan, inputs: Inputs, trigger: str) -> Applied | None
         remote = await fetch_remote(inputs.base_url, inputs.api_key, plan.slug)
     except FetchError:
         return None
-    if remote is None or not remote.readable or remote.config != plan.config:
+    if (
+        remote is None
+        or not remote.readable
+        or remote.config != plan.config
+        or _norm_prompt(remote.system_prompt) != _norm_prompt(plan.prompt)
+    ):
         return None
     return await _settle(
-        plan, inputs, trigger, remote.version, remote.config, remote.preset_id, remote.created_at, True
+        plan,
+        inputs,
+        trigger,
+        remote.version,
+        remote.config,
+        remote.preset_id,
+        remote.created_at,
+        True,
+        remote.system_prompt,
     )
 
 
@@ -1355,7 +1779,7 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
         if digest is not None and plan.digest != digest:
             raise PlanChanged("The plan changed since you looked at it. Preview it again.")
         if is_adopted(inputs.state, cfg.slug) and plan.current is not None and plan.current.readable:
-            seen = passthrough_digest(plan.current.config)
+            seen = passthrough_digest(plan.current.config, cfg.guardrails, plan.current.system_prompt)
             if trigger == "manual":
                 if plan.action in ("create", "update", "unchanged"):
                     plan.reviewed = seen  # the owner has just been shown the plan, the keys it sends back included
@@ -1383,6 +1807,10 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
             await asyncio.to_thread(_record_run, cfg.slug, "blocked", str(invalid), trigger)
             raise invalid
         assert inputs.api_key is not None
+        if (backup := _backup_of(plan)) is not None:
+            # The write replaces the live system prompt, and the version it held stays only in OpenRouter's history,
+            # which no call here can read it from. Kept first, so the owner can get the text back whatever follows.
+            await asyncio.to_thread(_update_state, {"system_backups": {cfg.slug: backup}})
         headers = {**_auth(inputs.api_key), "Content-Type": "application/json"}
         try:
             resp = await request(
@@ -1393,7 +1821,7 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
                 timeout=30,
                 retries=0,  # a retried create would leave a second version behind
             )
-            data, version, stored = _confirmed(resp.json(), cfg.slug)
+            data, version, stored, stored_prompt = _confirmed(resp.json(), cfg.slug)
         except asyncio.CancelledError:
             # Whoever cancelled has stopped waiting, but OpenRouter may have taken the write. Claim it if so, or the
             # preset it made would be blocked as someone else's.
@@ -1413,7 +1841,7 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
         ident = _stable_id(data)
         if plan.action == "create":
             ident = await _identity(inputs, cfg.slug, ident)
-        return plan, await _settle(plan, inputs, trigger, version, stored, *ident)
+        return plan, await _settle(plan, inputs, trigger, version, stored, *ident, stored_prompt=stored_prompt)
 
 
 async def sync(slug: str, trigger: str = "schedule") -> None:
@@ -1451,8 +1879,9 @@ class Inspection:
 
 
 def inspection_digest(remote: Remote) -> str:
-    """Names the preset as shown: its slug, its live version and its config. Adopt refuses if any has moved."""
-    return digest_of(remote.slug, remote.config, None, remote.version)
+    """Names the preset as shown: its slug, its live version, its config and its system prompt. Adopt refuses if any
+    has moved."""
+    return digest_of(remote.slug, remote.config, None, remote.version, remote.system_prompt)
 
 
 def _managed_slugs() -> list[str]:
@@ -1471,11 +1900,6 @@ def _blockers(slug: str, remote: Remote, state: dict[str, Any], managed_slugs: l
         out.append("The preset is archived on OpenRouter, and an archived preset takes no new versions.")
     if not remote.readable:
         out.append("OpenRouter returned no live version for it, so there is nothing to read what it holds from.")
-    if remote.system_prompt:
-        out.append(
-            "The preset has a system prompt, and OpenRouter's API cannot carry one over to a new version. Clear it "
-            "in the OpenRouter web UI first."
-        )
     if is_owned(state, slug) or slug in managed_slugs:
         out.append("Vibonomics already manages a preset with this name.")
     elif len(managed_slugs) >= PRESET_MAX_ITEMS:
@@ -1526,7 +1950,7 @@ def _record_adoption(slug: str, fingerprint: str, remote: Remote) -> PresetSetti
             "preset_id": remote.preset_id,
             "created_at": remote.created_at,
         }
-        patch = {"reviewed": {slug: passthrough_digest(remote.config)}}
+        patch = {"reviewed": {slug: passthrough_digest(remote.config, item.guardrails, remote.system_prompt)}}
         _merge_state(state, patch, slug, record)
         _store_state(s, state)
         return item

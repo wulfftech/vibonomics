@@ -13,7 +13,9 @@ from vibonomics.api import settings as settings_api
 from vibonomics.db import init_db, session_scope
 from vibonomics.orm import Setting
 from vibonomics.settings_store import (
+    GUARDRAIL_KEYS,
     AppSettings,
+    PresetGuardrails,
     PresetSettings,
     RefreshSettings,
     ScoringSettings,
@@ -212,7 +214,7 @@ def test_a_stored_value_that_no_longer_validates_falls_back_without_losing_the_r
 
 def _single_preset(**changes: object) -> dict:
     """The section as a release with one preset stored it: that preset's own fields, and nothing around them."""
-    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort", "prefer_own_tests"}
+    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort", "prefer_own_tests", "guardrails"}
     return PresetSettings(**changes).model_dump(mode="json", exclude=new)
 
 
@@ -255,7 +257,7 @@ def test_the_one_preset_an_older_release_stored_becomes_the_first_item_with_ever
     loaded = _stored_presets(old).presets
 
     (item,) = loaded.items
-    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort", "prefer_own_tests"}
+    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort", "prefer_own_tests", "guardrails"}
     assert item.model_dump(mode="json", exclude=new) == old
     assert (item.route, item.sort, item.adopted, item.blocked_models, item.blocked_providers) == (
         "fallback",
@@ -392,3 +394,148 @@ def test_an_infinite_weight_in_a_save_is_refused_and_nothing_is_stored(client):
 
     assert response.status_code >= 400
     assert client.get("/api/settings").json()["settings"]["scoring"]["coding_weight"] == 0.35
+
+
+# ---- guardrails ---------------------------------------------------------------------------------------------------
+
+EVERY_GUARDRAIL = {
+    "temperature": 0.7,
+    "max_tokens": 8_192,
+    "repetition_penalty": 1.1,
+    "frequency_penalty": -0.5,
+    "presence_penalty": 0.5,
+    "top_p": 0.9,
+    "quantizations": ["fp8", "bf16"],
+    "ignore": ["deepinfra", "google-vertex/europe"],
+    "require_parameters": True,
+    "system_prompt": "Answer in one line.",
+}
+
+
+def _guardrailed(guardrails: dict) -> dict:
+    """The settings document with one preset that carries ``guardrails``, as the screen would send it."""
+    item = PresetSettings(slug="vibonomics-mine").model_dump(mode="json")
+    return {**AppSettings().model_dump(mode="json"), "presets": {"items": [{**item, "guardrails": guardrails}]}}
+
+
+def test_every_guardrail_starts_unset_so_nothing_is_managed_until_the_owner_chooses():
+    g = PresetSettings().guardrails
+    assert g == PresetGuardrails()
+    assert [name for name in GUARDRAIL_KEYS if getattr(g, name) is not None] == []
+    assert g.clear == []
+    assert set(GUARDRAIL_KEYS) == set(EVERY_GUARDRAIL)
+
+
+def test_a_preset_stored_before_guardrails_existed_loads_with_every_one_unset():
+    stored = PresetSettings(slug="vibonomics-kept", min_score=70).model_dump(mode="json")
+    del stored["guardrails"]
+
+    (item,) = _stored_presets({"items": [stored]}).presets.items
+
+    assert (item.slug, item.min_score) == ("vibonomics-kept", 70)
+    assert item.guardrails == PresetGuardrails()
+
+
+def test_every_guardrail_is_saved_and_comes_back_as_it_was_sent(client):
+    saved = client.put("/api/settings", json={"settings": _guardrailed(EVERY_GUARDRAIL)})
+    assert saved.status_code == 200, saved.text
+    sent = {**EVERY_GUARDRAIL, "clear": []}
+    assert saved.json()["settings"]["presets"]["items"][0]["guardrails"] == {
+        **{name: None for name in GUARDRAIL_KEYS},
+        **sent,
+    }
+    with session_scope() as s:
+        loaded = load_settings(s).presets.items[0].guardrails
+    assert loaded.model_dump(mode="json", exclude={"clear"}) == EVERY_GUARDRAIL
+
+
+def test_a_guardrail_can_be_named_for_removal_and_the_list_keeps_its_order_once_each(client):
+    body = _guardrailed({"clear": ["top_p", "system_prompt", "top_p", "ignore"]})
+    saved = client.put("/api/settings", json={"settings": body})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["settings"]["presets"]["items"][0]["guardrails"]["clear"] == [
+        "top_p",
+        "system_prompt",
+        "ignore",
+    ]
+    assert client.put("/api/settings", json={"settings": _guardrailed({"clear": ["not_a_key"]})}).status_code == 422
+    # `clear` is not itself something to clear
+    assert client.put("/api/settings", json={"settings": _guardrailed({"clear": ["clear"]})}).status_code == 422
+
+
+@pytest.mark.parametrize("key", GUARDRAIL_KEYS)
+def test_a_guardrail_cannot_be_both_set_and_removed(client, key):
+    body = _guardrailed({key: EVERY_GUARDRAIL[key], "clear": [key]})
+    refused = client.put("/api/settings", json={"settings": body})
+    assert refused.status_code == 422
+    assert key in refused.text
+    with pytest.raises(ValidationError):
+        PresetGuardrails(**{key: EVERY_GUARDRAIL[key], "clear": [key]})
+
+
+@pytest.mark.parametrize(
+    ("key", "ok", "bad"),
+    [
+        ("temperature", [0, 0.0, 2, 1.3], [-0.01, 2.01, "hot", True]),
+        ("max_tokens", [1, 2_000_000, 8192], [0, -1, 2_000_001, 1.5, True]),
+        ("repetition_penalty", [0.01, 1, 2], [0, -1, 2.01, True]),
+        ("frequency_penalty", [-2, 0, 2], [-2.01, 2.01, True]),
+        ("presence_penalty", [-2, 0, 2], [-2.01, 2.01, True]),
+        ("top_p", [0.01, 1], [0, -0.1, 1.01, True]),
+        ("quantizations", [["fp8"], ["unknown", "int4"]], [[], ["fp7"], ["FP8"], "fp8", [8]]),
+        (
+            "ignore",
+            [["a"], ["deepinfra", "azure"], ["x" * 100]],
+            [[], ["has space"], ["a*"], ["-lead"], [""], ["x" * 101]],
+        ),
+        ("require_parameters", [True, False], ["yes", 2]),
+        ("system_prompt", ["x", "y" * 20_000, "line\nbreak"], ["", "   \n ", "z" * 20_001]),
+    ],
+)
+def test_each_guardrail_has_its_bounds(client, key, ok, bad):
+    for value in ok:
+        saved = client.put("/api/settings", json={"settings": _guardrailed({key: value})})
+        assert saved.status_code == 200, (key, value, saved.text)
+    for value in bad:
+        refused = client.put("/api/settings", json={"settings": _guardrailed({key: value})})
+        assert refused.status_code == 422, (key, value)
+
+
+def test_at_most_fifty_providers_can_be_ignored(client):
+    assert PresetGuardrails(ignore=[f"p{n}" for n in range(50)]).ignore is not None
+    over = client.put("/api/settings", json={"settings": _guardrailed({"ignore": [f"p{n}" for n in range(51)]})})
+    assert over.status_code == 422
+
+
+def test_the_lists_are_cleaned_of_repeats_and_keep_their_order():
+    g = PresetGuardrails(quantizations=["fp8", "bf16", "fp8"], ignore=["DeepInfra", " azure ", "deepinfra"])
+    assert g.quantizations == ["fp8", "bf16"]
+    assert g.ignore == ["DeepInfra", "azure"]
+
+
+@pytest.mark.parametrize("key", ["temperature", "repetition_penalty", "frequency_penalty", "presence_penalty", "top_p"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_number_that_is_not_finite_is_refused(key, value):
+    with pytest.raises(ValidationError):
+        PresetGuardrails(**{key: value})
+
+
+def test_a_bad_stored_guardrail_resets_that_one_guardrail_and_nothing_else():
+    good = PresetSettings(slug="vibonomics-good", min_score=70).model_dump(mode="json")
+    stored = good | {"guardrails": {"temperature": 9, "top_p": 0.5, "clear": ["top_k", "ignore"]}}
+
+    (item,) = _stored_presets({"items": [stored]}).presets.items
+
+    assert item.min_score == 70
+    assert item.guardrails.temperature is None, "a bad value falls back to unmanaged, which sends the live one back"
+    assert item.guardrails.top_p == 0.5
+    assert item.guardrails.clear == ["ignore"]
+
+
+def test_a_stored_guardrail_set_and_removed_at_once_is_dropped_whole_rather_than_guessed_at():
+    stored = PresetSettings(slug="vibonomics-both").model_dump(mode="json")
+    stored["guardrails"] = {"temperature": 0.5, "clear": ["temperature"], "top_p": 0.4}
+
+    (item,) = _stored_presets({"items": [stored]}).presets.items
+
+    assert item.guardrails == PresetGuardrails()
