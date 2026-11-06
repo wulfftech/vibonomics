@@ -17,6 +17,7 @@ from vibonomics.app import create_app
 from vibonomics.config import get_config
 from vibonomics.db import init_db, session_scope
 from vibonomics.orm import BenchmarkScore, EvalResult, EvalRun, Model, ProviderConfig, Setting
+from vibonomics.preset_validation import FREE_TIER_WARNING
 from vibonomics.presets import (
     PLACEHOLDER_MESSAGES,
     STATE_KEY,
@@ -4116,3 +4117,100 @@ def test_when_the_guardrails_leave_no_model_the_plan_says_so(client):
         plan = _plan(client)
     assert plan["action"] == "blocked" and "No OpenRouter model passes" in plan["reason"]
     assert "quantization and ignore guardrails" in plan["reason"]
+
+
+# ---- the live check with the guardrails, and the free tier -----------------------------------------------------------
+
+
+def _live_with(rows: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [_live_ep(tag, 0.1, 0.4, **fields) for tag, fields in rows]
+
+
+def test_a_plan_whose_live_endpoints_no_longer_pass_the_managed_quantization_is_refused_as_unservable(client):
+    _settings(guardrails={"quantizations": ["bf16"]})  # the stored copy has wafer/bf16, which is what gets pinned
+    live = _live_with([("wafer/bf16", {"quantization": "fp8"}), ("novita/fp4", {"quantization": "fp4"})])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router, live)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["valid"] is False
+        assert [(c["check"], c["level"]) for c in plan["validation"]] == [("served", "error")]
+        assert "will never be served acme/best" in _errors(plan)[0]["message"]
+        assert _apply(client, plan).status_code == 409
+        assert post.call_count == 0
+
+
+def test_the_live_check_uses_the_filters_the_plan_will_write_even_when_the_owner_does_not_manage_them(client):
+    _own_as(KEY)
+    live_preset = {"model": "acme/best", "provider": {"ignore": ["wafer", "novita", "deepinfra", "slow"]}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live_preset, version=2)
+        _live_listing(router)
+        plan = _plan(client)
+    assert plan["valid"] is False and [c["check"] for c in _errors(plan)] == ["served"]
+
+
+def test_a_pinned_endpoint_that_lacks_a_managed_parameter_is_an_error_only_with_require_parameters(client):
+    _stored(
+        "acme/best",
+        _endpoint("novita/fp4", 0.08, ["temperature"]),
+        _endpoint("deepinfra/fp8", 0.1, ["temperature"]),
+    )
+    live = _live_with(
+        [
+            ("novita/fp4", {"supported_parameters": ["temperature"]}),
+            ("deepinfra/fp8", {"supported_parameters": ["tools"]}),  # the listing has moved on from the stored copy
+        ]
+    )
+    for strict, valid in ((True, False), (False, True)):
+        _settings(guardrails={"temperature": 0.5, "require_parameters": strict})
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, None)
+            _live_listing(router, live)
+            plan = _plan(client)
+        problems = [c for c in plan["validation"] if c["check"] == "params"]
+        assert plan["valid"] is valid, strict
+        assert [(c["level"], c["provider"]) for c in problems] == [("error" if strict else "warning", "deepinfra/fp8")]
+
+
+def test_a_managed_token_cap_above_what_a_live_endpoint_allows_is_an_error(client):
+    _stored("acme/best", _endpoint("novita/fp4", 0.08, ["max_tokens"], cap=65_536))
+    live = _live_with([("novita/fp4", {"max_completion_tokens": 4_096})])
+    _settings(guardrails={"max_tokens": 8_192})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router, live)
+        plan = _plan(client)
+    assert plan["valid"] is False and [c["check"] for c in _errors(plan)] == ["max_tokens"]
+
+
+def test_a_preset_of_free_models_only_warns_in_the_plan_and_in_the_live_check(client):
+    _settings(include_free=True)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _live_listing(router)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/free:free"
+    assert FREE_TIER_WARNING in plan["warnings"]
+    assert "Every model here is free" in FREE_TIER_WARNING and "00:00 UTC" in FREE_TIER_WARNING
+    assert plan["valid"] is True  # a warning, never a refusal
+    free = [c for c in plan["validation"] if c["check"] == "free"]
+    assert [(c["level"], c["message"]) for c in free] == [("warning", FREE_TIER_WARNING)]
+
+
+def test_a_lineup_with_one_paid_model_does_not_warn_about_the_free_cap(client):
+    _settings(include_free=True, max_models=2)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/free:free" and len(plan["picks"]) == 2
+    assert not any("free" in w and "daily" in w for w in plan["warnings"])
+    assert not [c for c in plan["validation"] if c["check"] == "free"]
+
+
+def test_a_preset_with_no_free_model_has_no_free_warning(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert not any("daily" in w for w in plan["warnings"])

@@ -45,7 +45,7 @@ from .db import session_scope
 from .http import FetchError, get_json, public_url, request, scrub_secrets
 from .jobs import failure_text
 from .orm import Model, ProviderConfig, Setting, utcnow
-from .preset_validation import Validation, cap_below, unsupported, validate_live
+from .preset_validation import FREE_TIER_WARNING, Validation, cap_below, unsupported, validate_live
 from .pricing import Task, task_cost, value_of
 from .provider_service import resolve
 from .providers.openrouter import OpenRouterAdapter
@@ -1289,6 +1289,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
     plan.picks, plan.kept_current = select_models(inputs.candidates, before, cfg.max_models, cfg.switch_margin_pct)
     pick = plan.pick = plan.picks[0]
     plan.runners_up = [c for c in inputs.candidates if c not in plan.picks][:RUNNERS_UP]
+    if all(c.is_free for c in plan.picks):
+        plan.warnings.append(FREE_TIER_WARNING)
     if inputs.excluded.unserved:
         left = inputs.excluded.unserved
         shown = ", ".join(left[:5]) + (f" and {len(left) - 5} more" if len(left) > 5 else "")
@@ -1475,7 +1477,19 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             )
     # Last, so the check is as fresh as it can be when an apply goes on to write: it reads the live listing, not the
     # stored copy the ranking used. Read-only, so a draft is checked too.
-    plan.validation = await validate_live(inputs.base_url, plan.config, plan.picks, plan.providers)
+    block = plan.config.get("provider") if isinstance(plan.config.get("provider"), dict) else {}
+    plan.validation = await validate_live(
+        inputs.base_url,
+        plan.config,
+        plan.picks,
+        plan.providers,
+        require_params=need,
+        max_tokens=values.get("max_tokens"),
+        # What the plan will write is what applies: a managed value, or else the live preset's own.
+        quantizations=[q for q in block.get("quantizations") or [] if isinstance(q, str)],
+        ignore=[s for s in block.get("ignore") or [] if isinstance(s, str)],
+        require_parameters=block.get("require_parameters") is True,
+    )
     return plan
 
 

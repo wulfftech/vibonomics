@@ -32,13 +32,18 @@ MIN_UPTIME = 50.0  # percent over the last 30 minutes, below which a pinned endp
 PRICE_DRIFT = 0.20  # how far a live price may be from the planned one before it is called out, as a fraction
 EXPIRY_WINDOW = timedelta(days=7)
 
+FREE_TIER_WARNING = (
+    "Every model here is free, and free models share a daily request cap (1000 a day with credits, 50 without). "
+    "When it is spent, requests to this preset fail until the cap resets at 00:00 UTC."
+)
+
 Level = Literal["ok", "warning", "error"]
 
 
 @dataclass
 class Check:
     level: Level
-    check: str  # listing | provider | pins | health | price | expiry | params | max_tokens
+    check: str  # listing | provider | pins | health | price | expiry | params | max_tokens | served | free
     model: str | None
     provider: str | None  # the provider tag the finding is about, when it is about one
     message: str
@@ -127,6 +132,18 @@ def _pinned(config: dict[str, Any], providers: list[dict[str, Any]], models: lis
     return pins
 
 
+def _passes(ep: dict[str, Any], quantizations: set[str], ignored: set[str]) -> bool:
+    """Whether OpenRouter would still route to a live endpoint under the preset's quantization list and ignore list.
+
+    An endpoint with no precision listed is ``unknown``, which a list that does not name it leaves out.
+    """
+    if quantizations and str(ep.get("quantization") or "unknown").lower() not in quantizations:
+        return False
+    tag = ep.get("tag") if isinstance(ep.get("tag"), str) else ""
+    names = {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider_name") or "").lower()} - {""}
+    return not names & ignored
+
+
 def _matches(tag: str, endpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The live endpoints a pinned tag names: by its full tag, the provider part of it, or the provider's name."""
     want = tag.lower()
@@ -187,6 +204,9 @@ def _check_model(
     now: datetime,
     require: Sequence[str],
     max_tokens: int | None,
+    quantizations: set[str],
+    ignored: set[str],
+    strict: bool,
 ) -> list[Check]:
     if listing.state == "missing":
         return [
@@ -197,6 +217,20 @@ def _check_model(
     endpoints = listing.endpoints
     if not endpoints:
         return [Check("error", "listing", model, None, f"{model} has no live endpoint on OpenRouter right now.")]
+
+    if (quantizations or ignored) and not any(_passes(ep, quantizations, ignored) for ep in endpoints):
+        # OpenRouter would refuse a request for this model under the preset's own filters (HTTP 404, no endpoints).
+        # Not an error by itself: the preset's other models may still be served.
+        return [
+            Check(
+                "warning",
+                "served",
+                model,
+                None,
+                f"This preset will never be served {model}: none of its live endpoints passes the preset's "
+                "quantization and ignore filters.",
+            )
+        ]
 
     found: list[Check] = []
     expires = _when(listing.data.get("expiration_date")) or _when(pick.expires if pick else None)
@@ -214,7 +248,7 @@ def _check_model(
             continue
         live_pins += 1
         for ep in matched:
-            found.extend(_check_endpoint(model, tag, ep, matched, pick, rows.get(tag), require, max_tokens))
+            found.extend(_check_endpoint(model, tag, ep, matched, pick, rows.get(tag), require, max_tokens, strict))
     if pins and not live_pins:
         found.append(
             Check(
@@ -268,6 +302,7 @@ def _check_endpoint(
     row: dict[str, Any] | None,
     require: Sequence[str],
     max_tokens: int | None,
+    strict: bool,
 ) -> list[Check]:
     """What a live endpoint that the preset pins says about itself."""
     out: list[Check] = []
@@ -296,7 +331,7 @@ def _check_endpoint(
             out.append(Check("warning", "price", model, tag, f"{tag} on {model} now charges {'; '.join(moved)}."))
 
     missing = unsupported(ep.get("supported_parameters"), require)
-    if missing:
+    if missing and strict:
         out.append(
             Check(
                 "error",
@@ -304,6 +339,18 @@ def _check_endpoint(
                 model,
                 tag,
                 f"{tag} on {model} does not support {', '.join(missing)}, which the preset requires.",
+            )
+        )
+    elif missing:
+        # Without provider.require_parameters OpenRouter sends the request anyway and the endpoint drops what it does
+        # not take, so the preset works and the setting does nothing there.
+        out.append(
+            Check(
+                "warning",
+                "params",
+                model,
+                tag,
+                f"{tag} on {model} does not support {', '.join(missing)}, so it is ignored there.",
             )
         )
     if cap_below(ep.get("max_completion_tokens"), max_tokens):
@@ -328,11 +375,20 @@ async def validate_live(
     *,
     require_params: Sequence[str] = (),
     max_tokens: int | None = None,
+    quantizations: Sequence[str] = (),
+    ignore: Sequence[str] = (),
+    require_parameters: bool = True,
 ) -> Validation:
     """What is wrong with ``config`` if it were written now, from the live listing of each of its models.
 
     ``picks`` and ``providers`` are the plan's: the models as ranked (their stored endpoints give the planned prices)
     and the providers it chose, each with the models it serves. Reads only, and never raises for a listing that fails.
+
+    ``require_params`` and ``max_tokens`` are what the owner asks of an endpoint. ``quantizations`` and ``ignore`` are
+    the preset's provider filters: a model none of whose live endpoints passes them will never be served, which is a
+    warning, and an error when it is true of every model in the preset. ``require_parameters`` is whether OpenRouter is
+    told to refuse an endpoint that lacks a parameter: with it, a pinned endpoint that lacks one is an error, without
+    it a warning, since OpenRouter drops the parameter there and serves the request.
     """
     models = _model_ids(config)
     gate = asyncio.Semaphore(CONCURRENCY)
@@ -341,9 +397,29 @@ async def validate_live(
     picked = {c.model_id: c for c in picks}
     rows = {p["tag"]: p for p in providers if isinstance(p.get("tag"), str)}
     pins = _pinned(config, providers, models)
+    wanted = {q.lower() for q in quantizations if isinstance(q, str)}
+    ignored = {s.lower() for s in ignore if isinstance(s, str)}
     items: list[Check] = []
     for model, listing in zip(models, listings, strict=True):
         items.extend(
-            _check_model(model, listing, picked.get(model), pins[model], rows, now, tuple(require_params), max_tokens)
+            _check_model(
+                model,
+                listing,
+                picked.get(model),
+                pins[model],
+                rows,
+                now,
+                tuple(require_params),
+                max_tokens,
+                wanted,
+                ignored,
+                require_parameters,
+            )
         )
+    unserved = [item for item in items if item.check == "served"]
+    if models and len(unserved) == len(models):
+        for item in unserved:
+            item.level = "error"  # nothing in the preset could be served, which is a preset that cannot work
+    if models and all(model in picked and picked[model].is_free for model in models):
+        items.append(Check("warning", "free", None, None, FREE_TIER_WARNING))
     return Validation(items=items, checked_at=now, ok=not any(item.level == "error" for item in items))

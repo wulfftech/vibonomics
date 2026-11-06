@@ -93,7 +93,8 @@ class PresetExcludedOut(BaseModel):
 class PresetCheckOut(BaseModel):
     level: Literal["ok", "warning", "error"] = Field(description="An error refuses the write; a warning does not")
     check: str = Field(
-        description="What was checked: listing, provider, pins, health, price, expiry, params or max_tokens"
+        description="What was checked: listing, provider, pins, health, price, expiry, params, max_tokens, served "
+        "(whether the preset's own quantization and ignore filters leave the model any endpoint) or free"
     )
     model: str | None = Field(description="The model the finding is about, by id; null when it is about none")
     provider: str | None = Field(description="The provider tag the finding is about; null when it is about none")
