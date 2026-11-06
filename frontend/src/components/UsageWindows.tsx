@@ -1,5 +1,6 @@
 import { Group, Progress, Stack, Text } from '@mantine/core';
 import { resetLabel, usageColor } from '../lib/claudeUsage';
+import { tone } from '../lib/tone';
 import type { UsageWindowView } from '../lib/usageWindows';
 
 /** Progress rows for usage windows (Claude's plan windows, OpenCode Go's rolling/weekly/monthly). */
@@ -12,7 +13,7 @@ export function UsageWindows({ windows }: { windows: UsageWindowView[] }) {
             <Text size="xs" truncate="end">
               {window.label}
             </Text>
-            <Text size="xs" fw={600} c={usageColor(window.used_percentage)}>
+            <Text size="xs" fw={600} style={{ color: tone(usageColor(window.used_percentage)) }}>
               {window.used_percentage.toFixed(window.used_percentage < 10 ? 1 : 0)}%
             </Text>
           </Group>

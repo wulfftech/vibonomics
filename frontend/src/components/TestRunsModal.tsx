@@ -191,10 +191,13 @@ function ResultRow({
     <Fragment>
       <Table.Tr style={{ cursor: 'pointer' }} onClick={onToggle}>
         <Table.Td>
-          <Group gap={4} wrap="nowrap">
-            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            <Text size="sm">{result.task_id}</Text>
-          </Group>
+          {/* No handler of its own: its click bubbles to the row, so a key press toggles once, like a mouse click. */}
+          <UnstyledButton aria-expanded={expanded}>
+            <Group gap={4} wrap="nowrap">
+              {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <Text size="sm">{result.task_id}</Text>
+            </Group>
+          </UnstyledButton>
         </Table.Td>
         {showModel && (
           <Table.Td>

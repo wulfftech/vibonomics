@@ -16,6 +16,8 @@ export function useRotateClaudeToken() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: () => api.post('/api/subscription/claude/rotate'),
+    // The answer carries the new ingest token, which the query cache holds already; the mutation need not keep a copy.
+    gcTime: 0,
     onSuccess: (data) => {
       client.setQueryData(keys.claudeSubscription, data);
     },

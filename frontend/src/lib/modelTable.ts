@@ -65,8 +65,11 @@ export function enrichModels(rows: ModelRow[], profile: UsageProfile, options: E
     const valueCost = taskCost(valuePrice, profile, false);
     const measured = row.test?.cost_per_task ?? null;
     const reported = row.reported_cost_per_task;
-    const [shown, source]: [number | null, CostSource | null] =
-      measured !== null
+    // A free model costs nothing per task. A benchmark's reported cost (priced at the model's paid rate) or a test's
+    // cost would show it as dearer than the paid models it should sort ahead of.
+    const [shown, source]: [number | null, CostSource | null] = row.is_free
+      ? [estimated, 'estimated']
+      : measured !== null
         ? [measured, 'measured']
         : reported !== null
           ? [reported, 'reported']
@@ -90,15 +93,25 @@ export function enrichModels(rows: ModelRow[], profile: UsageProfile, options: E
         .toLowerCase(),
     };
   });
-  const index = makeValueIndex(partial.map((entry) => entry.value));
-  const tiers = valueTiers(partial.map((entry) => entry.value));
-  return partial.map((entry, i) => ({
-    ...entry,
-    valueIndex: index(entry.value),
-    priceBand: priceBand(entry.blended, entry.row.is_free),
-    valueTier: tiers[i],
-    alsoOnGo: false,
-  }));
+  return rankValue(
+    partial.map((entry) => ({
+      ...entry,
+      valueIndex: null,
+      priceBand: priceBand(entry.blended, entry.row.is_free),
+      valueTier: 'Unscored' as const,
+      alsoOnGo: false,
+    })),
+  );
+}
+
+/**
+ * Sets each row's value index and tier against the other rows given. Both are relative, so they must be
+ * computed over the rows the table shows: a row the filters hide would otherwise take a rank.
+ */
+export function rankValue(models: EnrichedModel[]): EnrichedModel[] {
+  const index = makeValueIndex(models.map((model) => model.value));
+  const tiers = valueTiers(models.map((model) => model.value));
+  return models.map((model, i) => ({ ...model, valueIndex: index(model.value), valueTier: tiers[i] }));
 }
 
 /**
@@ -324,6 +337,11 @@ export function filterModels(models: EnrichedModel[], filters: ModelFilters): En
       (!filters.hideRestricted || !model.row.client_restricted) &&
       filters.chips.every((chip) => matchesChip(model, chip)),
   );
+}
+
+/** The rows the table shows: filtered, with the OpenCode Go copies folded away, then ranked against each other. */
+export function visibleModels(models: EnrichedModel[], filters: ModelFilters): EnrichedModel[] {
+  return rankValue(foldOpenCodeOffers(filterModels(models, filters)));
 }
 
 // -- sorting ---------------------------------------------------------------------------------

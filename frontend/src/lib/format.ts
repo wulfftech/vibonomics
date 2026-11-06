@@ -2,31 +2,48 @@
 
 export const DASH = '—';
 
-/** USD with sensible precision across $0.0004 per task and $75 per 1M tokens. */
-export function money(value: number | null | undefined): string {
+/** "$" for USD or no currency, "¥" for CNY (Moonshot China, DeepSeek), otherwise the code and a no-break space. */
+function currencyPrefix(currency: string | null | undefined): string {
+  const code = currency?.trim().toUpperCase();
+  if (!code || code === 'USD') {
+    return '$';
+  }
+  return code === 'CNY' ? '¥' : `${code}\u00a0`;
+}
+
+/**
+ * An amount with sensible precision across $0.0004 per task and $75 per 1M tokens. USD unless a currency
+ * is given: a balance in yuan must not read as dollars.
+ */
+export function money(value: number | null | undefined, currency?: string | null): string {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return DASH;
   }
+  const prefix = currencyPrefix(currency);
   if (value === 0) {
-    return '$0';
+    return `${prefix}0`;
   }
   const abs = Math.abs(value);
   const sign = value < 0 ? '−' : '';
   if (abs >= 1000) {
-    return `${sign}$${Math.round(abs).toLocaleString('en-US')}`;
+    return `${sign}${prefix}${Math.round(abs).toLocaleString('en-US')}`;
   }
   if (abs >= 100) {
-    return `${sign}$${abs.toFixed(0)}`;
+    return `${sign}${prefix}${abs.toFixed(0)}`;
   }
   if (abs >= 1) {
-    return `${sign}$${abs.toFixed(2)}`;
+    return `${sign}${prefix}${abs.toFixed(2)}`;
   }
   if (abs >= 0.01) {
     // $0.075, $0.40
     const fixed = abs.toFixed(3);
-    return `${sign}$${fixed.endsWith('0') ? abs.toFixed(2) : fixed}`;
+    return `${sign}${prefix}${fixed.endsWith('0') ? abs.toFixed(2) : fixed}`;
   }
-  return `${sign}$${Number(abs.toPrecision(2)).toString()}`;
+  if (abs < 1e-6) {
+    // Number#toString switches to exponent notation here ("5e-7").
+    return `${value < 0 ? '>' : '<'}${sign}${prefix}0.000001`;
+  }
+  return `${sign}${prefix}${Number(abs.toPrecision(2)).toString()}`;
 }
 
 /**

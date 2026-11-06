@@ -9,7 +9,6 @@ import {
   NavLink as MantineNavLink,
   Text,
   Tooltip,
-  useComputedColorScheme,
   useMantineColorScheme,
   VisuallyHidden,
 } from '@mantine/core';
@@ -20,6 +19,7 @@ import {
   LayoutList,
   LogIn,
   LogOut,
+  Monitor,
   Moon,
   Settings,
   Sun,
@@ -43,19 +43,27 @@ const REFRESH_LABELS: Record<string, string> = {
   usage: 'Refreshing spend history…',
 };
 
-function ColorSchemeToggle() {
-  const { setColorScheme } = useMantineColorScheme();
-  const computed = useComputedColorScheme('light', { getInitialValueInEffect: true });
-  const isDark = computed === 'dark';
+/** In the order the button steps through them. `auto` follows the OS, which a plain light/dark toggle never could. */
+const SCHEME_CYCLE = [
+  { value: 'auto', label: 'Match system', icon: Monitor },
+  { value: 'light', label: 'Light', icon: Sun },
+  { value: 'dark', label: 'Dark', icon: Moon },
+] as const;
+
+/** Steps through following the system, light and dark. Mantine keeps the choice under the same key as before. */
+export function ColorSchemeToggle() {
+  const { colorScheme, setColorScheme } = useMantineColorScheme();
+  const index = Math.max(
+    0,
+    SCHEME_CYCLE.findIndex((choice) => choice.value === colorScheme),
+  );
+  const current = SCHEME_CYCLE[index];
+  const next = SCHEME_CYCLE[(index + 1) % SCHEME_CYCLE.length];
+  const label = `Colour scheme: ${current.label}. Switch to ${next.label}`;
   return (
-    <Tooltip label={isDark ? 'Switch to the light theme' : 'Switch to the dark theme'}>
-      <ActionIcon
-        variant="default"
-        size="lg"
-        aria-label="Toggle the colour scheme"
-        onClick={() => setColorScheme(isDark ? 'light' : 'dark')}
-      >
-        {isDark ? <Sun size={16} /> : <Moon size={16} />}
+    <Tooltip label={label}>
+      <ActionIcon variant="default" size="lg" aria-label={label} onClick={() => setColorScheme(next.value)}>
+        <current.icon size={16} />
       </ActionIcon>
     </Tooltip>
   );

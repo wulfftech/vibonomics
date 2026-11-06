@@ -1,5 +1,6 @@
 import { MantineProvider } from '@mantine/core';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { EvalResultOut, EvalRunOut } from '../api/types';
 import { TestRunsModal } from './TestRunsModal';
@@ -35,9 +36,17 @@ const run: EvalRunOut = {
 };
 
 const results = [
-  { task_id: 'instr-json', category: 'instruction', status: 'passed', score: 100, check_score: 100 },
-  { task_id: 'tool-pick', category: 'tools', status: 'error', score: 0 },
-  { task_id: 'agentic-fix-mean', category: 'agentic', status: 'ungraded', score: 0 },
+  {
+    id: 1,
+    task_id: 'instr-json',
+    category: 'instruction',
+    status: 'passed',
+    score: 100,
+    check_score: 100,
+    transcript: [],
+  },
+  { id: 2, task_id: 'tool-pick', category: 'tools', status: 'error', score: 0 },
+  { id: 3, task_id: 'agentic-fix-mean', category: 'agentic', status: 'ungraded', score: 0 },
 ] as unknown as EvalResultOut[];
 
 // What the modal shows; a test swaps it to see another run.
@@ -147,6 +156,47 @@ describe('TestRunsModal, a score that rests on few tasks', () => {
     } finally {
       shown = { run, results };
     }
+  });
+});
+
+/** Presses Tab from wherever focus is until it reaches the element, as a keyboard user would. */
+async function tabTo(user: UserEvent, element: HTMLElement) {
+  // The modal moves focus to its first control once it has opened; focusing something earlier would be undone.
+  await waitFor(() => expect(document.activeElement).not.toBe(document.body));
+  for (let step = 0; step < 20 && document.activeElement !== element; step += 1) {
+    await user.tab();
+  }
+  expect(element).toHaveFocus();
+}
+
+describe('TestRunsModal, from the keyboard', () => {
+  it('opens and closes a result row with Enter and Space, and says whether it is open', async () => {
+    const user = userEvent.setup();
+    renderModal();
+    const toggle = screen.getByRole('button', { name: 'instr-json' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Transcript')).not.toBeInTheDocument();
+
+    await tabTo(user, toggle);
+    await user.keyboard('{Enter}');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Transcript')).toBeInTheDocument();
+
+    await user.keyboard(' ');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Transcript')).not.toBeInTheDocument();
+  });
+
+  it('opens a row once for one mouse click, on the button or elsewhere in the row', async () => {
+    const user = userEvent.setup();
+    renderModal();
+    const toggle = screen.getByRole('button', { name: 'instr-json' });
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await user.click(screen.getByText('instruction'));
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
   });
 });
 

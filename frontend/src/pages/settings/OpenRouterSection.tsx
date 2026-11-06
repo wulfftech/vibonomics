@@ -334,7 +334,8 @@ export function OpenRouterSection() {
         </Text>
       )}
       <SaveBar
-        dirty={dirty && !nameMissing}
+        dirty={dirty}
+        canSave={!nameMissing}
         saving={saving}
         onReset={reset}
         onSave={() => submit({ onSaved: presets.enabled ? pushSaved : undefined })}

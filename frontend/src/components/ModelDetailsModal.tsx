@@ -16,7 +16,7 @@ import {
 } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
 import { ExternalLink } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useModelDetail } from '../api/models';
 import type { ModelDetail, UsageProfile } from '../api/types';
 import { compactTokens, dateOnly, dateTime, DASH, discountLabel, integer, money, relativeTime } from '../lib/format';
@@ -28,6 +28,7 @@ import { ModelBadges, ScoreNumber } from './models/cells';
 import { CopyIconButton } from './CopyIconButton';
 import { ProviderDot } from './ProviderDot';
 import { providerTextColor } from '../lib/providerColors';
+import { tone } from '../lib/tone';
 import { EmptyState, ErrorState, LoadingState } from './DataState';
 import { SnippetTabs } from './SnippetTabs';
 
@@ -207,15 +208,21 @@ function OverviewTab({ detail, profile }: { detail: ModelDetail; profile: UsageP
   );
 }
 
-function ScoreCard({ label, value, hint }: { label: string; value: number | null | undefined; hint?: string }) {
+export function ScoreCard({ label, value, hint }: { label: string; value: number | null | undefined; hint?: string }) {
   return (
     <Card withBorder padding="sm">
       <Text size="xs" c="dimmed">
         {label}
       </Text>
-      <Text size="xl" fw={700} c={value === null || value === undefined ? 'dimmed' : scoreColor(value)}>
-        {value === null || value === undefined ? DASH : Math.round(value)}
-      </Text>
+      {value === null || value === undefined ? (
+        <Text size="xl" fw={700} c="dimmed">
+          {DASH}
+        </Text>
+      ) : (
+        <Text size="xl" fw={700} style={{ color: tone(scoreColor(value)) }}>
+          {Math.round(value)}
+        </Text>
+      )}
       {hint && (
         <Text size="xs" c="dimmed">
           {hint}
@@ -603,11 +610,17 @@ export function ModelDetailsModal({
 }) {
   const mobile = useMediaQuery('(max-width: 48em)');
   const detail = useModelDetail(modelId);
-  const data = detail.data;
+  const [lastData, setLastData] = useState<ModelDetail | undefined>(undefined);
+  if (detail.data !== undefined && detail.data !== lastData) {
+    setLastData(detail.data);
+  }
+  // Closing clears the id, which disables the query and empties it. The modal fades out for a moment, so it keeps
+  // the last model's content until it is gone rather than flashing "Loading…".
+  const data = modelId === null ? lastData : detail.data;
 
   return (
     <Modal opened={modelId !== null} onClose={onClose} title={data?.row.name ?? 'Model'} size="xl" fullScreen={mobile}>
-      {detail.isPending && <LoadingState />}
+      {modelId !== null && detail.isPending && <LoadingState />}
       {detail.isError && <ErrorState message={detail.error.message} />}
       {data && (
         <Stack gap="md">

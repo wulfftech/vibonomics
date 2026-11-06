@@ -9,6 +9,7 @@
  * - Value: `composite / taskCost` (∞ for a free model with a score)
  * - Value index: log-scaled 0–100 across the dataset's finite values; ∞ → 100
  */
+import { toneLight } from './tone';
 
 export interface Prices {
   input?: number | null;
@@ -163,26 +164,27 @@ export function profileFormula(profile: Profile): string {
 /**
  * Shading for the blended price: cheapest is preferred. Under $1 uses accessible green shades
  * (varying by price), $1–5 an amber tone, and anything above $5 red. Free is the best case.
+ * The light shades are `tone()`'s: palette shade 9 alone is 4.3:1 on white for green and orange.
  */
 export function blendedColor(blended: number | null, isFree = false): string | undefined {
   if (isFree || blended === 0) {
-    return 'light-dark(var(--mantine-color-green-9), var(--mantine-color-green-3))';
+    return `light-dark(${toneLight('green')}, var(--mantine-color-green-3))`;
   }
   if (blended === null || !Number.isFinite(blended)) {
     return undefined;
   }
   if (blended < 1) {
     if (blended < 0.1) {
-      return 'light-dark(var(--mantine-color-green-9), var(--mantine-color-green-2))';
+      return `light-dark(${toneLight('green')}, var(--mantine-color-green-2))`;
     }
     if (blended < 0.5) {
-      return 'light-dark(var(--mantine-color-green-9), var(--mantine-color-green-3))';
+      return `light-dark(${toneLight('green')}, var(--mantine-color-green-3))`;
     }
-    return 'light-dark(var(--mantine-color-green-8), var(--mantine-color-green-4))';
+    return `light-dark(${toneLight('green')}, var(--mantine-color-green-4))`;
   }
   if (blended < 5) {
     // Yellow text on white can't reach AA, so the light theme uses the darker amber shade.
-    return 'light-dark(var(--mantine-color-orange-9), var(--mantine-color-yellow-4))';
+    return `light-dark(${toneLight('orange')}, var(--mantine-color-yellow-4))`;
   }
-  return 'light-dark(var(--mantine-color-red-9), var(--mantine-color-red-4))';
+  return `light-dark(${toneLight('red')}, var(--mantine-color-red-4))`;
 }
