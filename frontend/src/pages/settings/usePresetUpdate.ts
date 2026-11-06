@@ -16,6 +16,11 @@ export function isWritable(plan: PresetPlan): boolean {
   return ['create', 'update'].includes(plan.action) && Boolean(plan.digest) && !plan.draft;
 }
 
+/** What the live check objected to first, for a plan it failed. */
+function firstError(plan: PresetPlan): string {
+  return plan.validation.find((finding) => finding.level === 'error')?.message ?? 'see the preview for the problem';
+}
+
 /**
  * The dry run and the write for whichever preset is open. One plan is kept at a time, and it says whose it is
  * (`plan.slug`), so a page that shows another preset must not show it.
@@ -74,6 +79,15 @@ export function usePresetUpdate() {
         {
           onSuccess: (fresh) => {
             if (fresh.draft) {
+              return;
+            }
+            if (!fresh.valid) {
+              // The server would refuse this write, so it is not asked to. The plan on screen carries the findings.
+              notifications.show({
+                message: `Saved. Not sent to OpenRouter: the live check failed: ${firstError(fresh)}`,
+                color: 'yellow',
+                autoClose: 12000,
+              });
               return;
             }
             if (!isWritable(fresh) || !fresh.digest) {

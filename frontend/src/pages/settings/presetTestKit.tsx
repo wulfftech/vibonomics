@@ -137,7 +137,10 @@ export interface ServeOptions {
   /** What a sync finds; the catalogue after Refresh. */
   afterSync?: { catalog: CatalogPreset[]; syncedAt: string };
   state?: Record<string, PresetSlugState>;
-  plan?: PresetPlan;
+  /** What a dry run answers; a function is told how many came before it, to answer a re-plan differently. */
+  plan?: PresetPlan | ((earlier: number) => PresetPlan);
+  /** Makes the write fail, as the server does when the live check refuses it. */
+  applyError?: { status: number; detail: string };
   inspect?: PresetInspect | ((slug: string) => PresetInspect) | { status: number; detail: string };
   adopt?: AdoptAnswer | ((sent: { slug: string; digest: string }) => AdoptAnswer);
   canChange?: boolean;
@@ -190,6 +193,7 @@ export function serve(opts: ServeOptions = {}): World {
     error: world.catalogError,
     presets: world.catalog,
   });
+  let planned = 0;
   const body = (init?: RequestInit) =>
     JSON.parse((init?.body as string | undefined) ?? '{}') as Record<string, unknown>;
 
@@ -227,13 +231,18 @@ export function serve(opts: ServeOptions = {}): World {
     if (url === 'api/presets/plan') {
       const sent = body(init) as { slug?: string; settings?: PresetSettings };
       const slug = sent.slug ?? sent.settings?.slug ?? 'vibonomics-best-value';
+      const made = typeof opts.plan === 'function' ? opts.plan(planned) : opts.plan;
+      planned += 1;
       return json({
-        ...(opts.plan ?? plan()),
+        ...(made ?? plan()),
         slug,
-        draft: sent.settings !== undefined || (opts.plan?.draft ?? false),
+        draft: sent.settings !== undefined || (made?.draft ?? false),
       });
     }
     if (url === 'api/presets/apply') {
+      if (opts.applyError !== undefined) {
+        return json({ detail: opts.applyError.detail }, opts.applyError.status);
+      }
       return json({
         applied: opts.applied ?? true,
         message: 'Updated vibonomics-best-value as version 5.',

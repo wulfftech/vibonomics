@@ -24,8 +24,9 @@ export function PresetPreview({
   const slug = itemSlug(item);
   const asked = plannedSlug(plan.variables) === slug;
   const current = plan.data?.slug === slug ? plan.data : undefined;
-  // Apply plans from what is saved, so only a plan made from saved settings can be applied.
-  const canApply = current !== undefined && isWritable(current) && item.enabled && !unsaved;
+  // Apply plans from what is saved, so only a plan made from saved settings can be applied. A plan the live check
+  // failed would be refused by the server anyway; the plan view says why.
+  const canApply = current !== undefined && isWritable(current) && current.valid && item.enabled && !unsaved;
 
   return (
     <Card withBorder padding="md">
