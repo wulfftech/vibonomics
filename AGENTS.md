@@ -72,6 +72,16 @@ docker compose logs -f vibonomics
   is never retried: a retry would leave a second version. The routes (`plan`, `apply`, and `list`, which
   fills the template picker) are POSTs, so a visitor to an open-read instance cannot make them call out with the
   operator's key.
+- **Preset catalogue** (`preset_catalog.py`, `api/preset_catalog.py`): a copy of every preset on the account
+  (up to 100, archived included) in the `preset_catalog` setting: `GET {base}/presets`, then one read per preset,
+  six at a time, to the same host and with the same key as the preset update. It writes nothing to OpenRouter.
+  One run at a time (`single_flight`); callers who arrive during it share it. A preset whose read fails keeps its
+  last entry, and the sync says `partial` in `error`; a failed list keeps the whole catalogue. `managed` is worked
+  out from `preset_state.owned` each time the catalogue is read, never stored. Timer `preset-catalog-sync`
+  (30 minutes, added by `scheduler.start`, so a settings save never moves it) and one run after the start-up
+  work. `GET /api/presets/catalog` checks `is_authenticated` itself, because a preset's config is the owner's and
+  the GET is open to a visitor otherwise. A test that runs `_startup_work` must stub `scheduler.sync_catalogue`,
+  or it calls OpenRouter for real when an earlier test left a key in the database.
 - **Usage history** (`usage.py`, `api/usage.py`, the `usage` refresh kind): OpenRouter's activity API needs a
   management key and returns 30 finished UTC days, so every day it returns is stored in `usage_days` and the
   history outgrows that. `key_hash` is empty for whole-account rows and a key's hash for that key's rows: sum one
