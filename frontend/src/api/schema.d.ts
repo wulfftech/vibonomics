@@ -146,6 +146,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/presets/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Preset Catalog
+         * @description Every preset on the account as of the last sync, with the ones Vibonomics manages marked.
+         */
+        get: operations["read_preset_catalog_api_presets_catalog_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/presets/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sync Preset Catalog
+         * @description Read the account's presets now. A sync already running is joined, not repeated.
+         */
+        post: operations["sync_preset_catalog_api_presets_sync_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/presets/state": {
         parameters: {
             query?: never;
@@ -199,9 +239,52 @@ export interface paths {
          * Preset Plan
          * @description The dry run: rank the models, read the preset, and show the exact request an update would send.
          *
-         *     With ``settings`` it previews those, unsaved, so a change can be tried before it is kept.
+         *     ``slug`` plans a saved preset. ``settings`` previews those settings, unsaved, so a change can be tried before it is
+         *     kept, or a preset that is not saved yet.
          */
         post: operations["preset_plan_api_presets_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/presets/inspect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preset Inspect
+         * @description Read any preset on the account and say whether Vibonomics could take it over. Writes nothing.
+         */
+        post: operations["preset_inspect_api_presets_inspect_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/presets/adopt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preset Adopt
+         * @description Hand a preset made by hand over to Vibonomics, if it is still what `inspect` showed.
+         *
+         *     Writes nothing to OpenRouter: the preset joins the list switched off, and its first update is a later step.
+         */
+        post: operations["preset_adopt_api_presets_adopt_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -671,7 +754,7 @@ export interface components {
             benchmarks?: components["schemas"]["BenchmarkSettings"];
             evals?: components["schemas"]["EvalSettings"];
             subscriptions?: components["schemas"]["SubscriptionSettings"];
-            presets?: components["schemas"]["PresetSettings"];
+            presets?: components["schemas"]["PresetsSettings"];
         };
         /** AuthStatus */
         AuthStatus: {
@@ -784,6 +867,62 @@ export interface components {
             id: string;
             /** Name */
             name: string;
+        };
+        /** CatalogPresetOut */
+        CatalogPresetOut: {
+            /** Slug */
+            slug: string;
+            /**
+             * Preset Id
+             * @description The id OpenRouter gives the preset, null when it names none
+             */
+            preset_id: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Status
+             * @description `active` or `archived`
+             */
+            status: string;
+            /**
+             * Version
+             * @description The live version; null when OpenRouter returned none
+             */
+            version: number | null;
+            /** Updated At */
+            updated_at: string | null;
+            /**
+             * Models
+             * @description The `model` and the `models` fallbacks, in order, once each
+             */
+            models: string[];
+            /**
+             * Providers
+             * @description `provider.only`
+             */
+            providers: string[];
+            /**
+             * Config
+             * @description The live version's config as OpenRouter holds it
+             */
+            config: {
+                [key: string]: unknown;
+            };
+            /**
+             * Has System Prompt
+             * @description A preset with a system prompt is never written
+             */
+            has_system_prompt: boolean;
+            /**
+             * Passthrough Keys
+             * @description Config keys Vibonomics has no setting for and would send back as they are, such as `temperature` or `provider.data_collection`
+             */
+            passthrough_keys: string[];
+            /**
+             * Managed
+             * @description Whether Vibonomics manages this preset; worked out when the catalogue is read
+             */
+            managed: boolean;
         };
         /** ClaudeSubscriptionOut */
         ClaudeSubscriptionOut: {
@@ -1140,8 +1279,23 @@ export interface components {
             /** Is Free */
             is_free: boolean;
         };
+        /** PresetAdoptIn */
+        PresetAdoptIn: {
+            /** Slug */
+            slug: string;
+            /**
+             * Digest
+             * @description The digest `inspect` returned for the preset the operator looked at
+             */
+            digest: string;
+        };
         /** PresetApplyIn */
         PresetApplyIn: {
+            /**
+             * Slug
+             * @description The saved preset to write
+             */
+            slug: string;
             /**
              * Digest
              * @description The digest of the plan that was reviewed
@@ -1184,6 +1338,26 @@ export interface components {
             /** Discount */
             discount: number | null;
         };
+        /** PresetCatalogOut */
+        PresetCatalogOut: {
+            /**
+             * Synced At
+             * @description When the last sync finished; null before the first
+             */
+            synced_at: string | null;
+            /**
+             * Syncing
+             * @description A sync is running now
+             */
+            syncing: boolean;
+            /**
+             * Error
+             * @description Why the last sync could not read everything: no key, OpenRouter failing, or a partial read
+             */
+            error: string | null;
+            /** Presets */
+            presets: components["schemas"]["CatalogPresetOut"][];
+        };
         /** PresetChangeOut */
         PresetChangeOut: {
             /** Path */
@@ -1199,6 +1373,104 @@ export interface components {
              */
             after: string | null;
         };
+        /** PresetExcludedOut */
+        PresetExcludedOut: {
+            /**
+             * Models
+             * @description Models that passed the filters and were left out by a blocklist
+             */
+            models: number;
+            /**
+             * Providers
+             * @description Providers whose endpoints a blocklist kept from being chosen
+             */
+            providers: string[];
+        };
+        /** PresetInspectIn */
+        PresetInspectIn: {
+            /**
+             * Slug
+             * @description Any preset on the OpenRouter account, managed by Vibonomics or not
+             */
+            slug: string;
+        };
+        /** PresetInspectOut */
+        PresetInspectOut: {
+            /** Slug */
+            slug: string;
+            /**
+             * Status
+             * @description `active` or `archived`
+             */
+            status: string;
+            /**
+             * Version
+             * @description The live version; null when OpenRouter returned none
+             */
+            version: number | null;
+            /** Updated At */
+            updated_at: string | null;
+            /**
+             * Preset Id
+             * @description The id OpenRouter gave the preset; null when it names none
+             */
+            preset_id: string | null;
+            /**
+             * Workspace
+             * @description The workspace OpenRouter names for the preset; null when it names none
+             */
+            workspace: string | null;
+            /**
+             * Config
+             * @description The live config, as OpenRouter holds it
+             */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Has System Prompt */
+            has_system_prompt: boolean;
+            /**
+             * Models
+             * @description The models the config names, the lead first
+             */
+            models: string[];
+            /**
+             * Providers
+             * @description The providers the config restricts it to (`provider.only`)
+             */
+            providers: string[];
+            /** Versions */
+            versions: components["schemas"]["PresetVersionOut"][];
+            /**
+             * Managed Keys
+             * @description The keys Vibonomics would decide if it managed the preset
+             */
+            managed_keys: string[];
+            /**
+             * Passthrough
+             * @description Every other key, which Vibonomics would send back as it found it, as raw JSON
+             */
+            passthrough: {
+                [key: string]: unknown;
+            };
+            /**
+             * Managed
+             * @description Vibonomics already manages a preset with this name
+             */
+            managed: boolean;
+            /** Adoptable */
+            adoptable: boolean;
+            /**
+             * Blockers
+             * @description Why it cannot be adopted; empty when it can
+             */
+            blockers: string[];
+            /**
+             * Digest
+             * @description Names the slug, the live version and the config; `adopt` refuses a changed one
+             */
+            digest: string;
+        };
         /** PresetListOut */
         PresetListOut: {
             /** Presets */
@@ -1211,7 +1483,12 @@ export interface components {
         };
         /** PresetPlanIn */
         PresetPlanIn: {
-            /** @description Preset settings to preview in place of the saved ones, to try them out. Nothing is saved, and a plan made from them cannot be applied. */
+            /**
+             * Slug
+             * @description A saved preset to plan
+             */
+            slug?: string | null;
+            /** @description Settings for one preset to preview in place of the saved ones, to try them out; its own slug names the preset. Nothing is saved, and a plan made from them cannot be applied. */
             settings?: components["schemas"]["PresetSettings"] | null;
         };
         /** PresetPlanOut */
@@ -1229,6 +1506,17 @@ export interface components {
             enabled: boolean;
             /** Auto Apply */
             auto_apply: boolean;
+            /**
+             * Route
+             * @description The routing mode the preset is set to
+             * @enum {string}
+             */
+            route: "fallback" | "sort";
+            /**
+             * Sort
+             * @description What `provider.sort` is on the sort route; price when null
+             */
+            sort: ("price" | "throughput" | "latency") | null;
             /**
              * Draft
              * @description Made from unsaved settings: a preview only, not something to apply
@@ -1264,6 +1552,16 @@ export interface components {
             /** Runners Up */
             runners_up: components["schemas"]["PresetCandidateOut"][];
             /**
+             * Preset Id
+             * @description The id OpenRouter gave the preset; null when it names none
+             */
+            preset_id?: string | null;
+            /**
+             * Workspace
+             * @description The workspace OpenRouter names for the preset (slug or id); null when it names none
+             */
+            workspace?: string | null;
+            /**
              * Current Version
              * @description The version of the preset that is live on OpenRouter now
              */
@@ -1288,6 +1586,20 @@ export interface components {
             digest: string | null;
             /** Warnings */
             warnings: string[];
+            /** @description What the blocklists removed from this run */
+            excluded: components["schemas"]["PresetExcludedOut"];
+            /**
+             * Passthrough
+             * @description The keys Vibonomics does not manage and sends back as it found them, as raw JSON
+             */
+            passthrough: {
+                [key: string]: unknown;
+            };
+            /**
+             * Managed Keys
+             * @description The keys Vibonomics decides: `provider.*` ones are inside `provider`
+             */
+            managed_keys: string[];
             state: components["schemas"]["PresetStateOut"];
         };
         /** PresetProviderOut */
@@ -1335,11 +1647,12 @@ export interface components {
         };
         /**
          * PresetSettings
-         * @description The OpenRouter preset Vibonomics keeps pointed at the best-value models, and how it picks them.
+         * @description One OpenRouter preset Vibonomics keeps pointed at the best-value models, and how it picks them.
          *
          *     Off by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts
          *     with ``vibonomics-`` (it is added to whatever name is typed), so a preset the operator made by hand can never be
-         *     the one that is rewritten.
+         *     the one that is rewritten, unless the operator adopted it: ``adopted`` keeps the slug as typed, and grants
+         *     nothing by itself, because the engine also wants the adoption to be on record.
          */
         PresetSettings: {
             /**
@@ -1360,6 +1673,12 @@ export interface components {
              * @default 24
              */
             interval_hours: number;
+            /**
+             * Adopted
+             * @description A preset made by hand that Vibonomics now manages. Its name is kept as it is, and it counts only if the adoption was recorded when it was adopted.
+             * @default false
+             */
+            adopted: boolean;
             /**
              * Slug
              * @description The preset's name. vibonomics- is put in front of it if it is not already there.
@@ -1431,19 +1750,31 @@ export interface components {
              * @default 3
              */
             max_providers: number;
+            /**
+             * Blocked Models
+             * @description Models this preset never considers, as patterns: `openai/*`, `*:free`, an exact id. Added to the list that applies to every preset.
+             */
+            blocked_models?: string[];
+            /**
+             * Blocked Providers
+             * @description Providers this preset never pins, as patterns matched against the endpoint tag, its provider part and the display name. Added to the list that applies to every preset.
+             */
+            blocked_providers?: string[];
+            /**
+             * Route
+             * @description `fallback` writes no `route` and takes the models in order; `sort` writes `route: sort` and `provider.sort`. OpenRouter does not document `route`, so the page reports it when it is not kept.
+             * @default fallback
+             * @enum {string}
+             */
+            route: "fallback" | "sort";
+            /**
+             * Sort
+             * @description What `provider.sort` is when `route` is `sort`; price when not set
+             */
+            sort?: ("price" | "throughput" | "latency") | null;
         };
-        /** PresetStateOut */
-        PresetStateOut: {
-            /**
-             * Owned
-             * @description Slugs Vibonomics created, the only ones it will ever write
-             */
-            owned: string[];
-            /**
-             * Slug
-             * @description The preset last written
-             */
-            slug?: string | null;
+        /** PresetSlugStateOut */
+        PresetSlugStateOut: {
             /** Model Id */
             model_id?: string | null;
             /** Version */
@@ -1461,6 +1792,21 @@ export interface components {
             last_message?: string | null;
             /** Last Trigger */
             last_trigger?: string | null;
+        };
+        /** PresetStateOut */
+        PresetStateOut: {
+            /**
+             * Owned
+             * @description Slugs Vibonomics created or adopted, the only ones it will ever write
+             */
+            owned: string[];
+            /**
+             * Slugs
+             * @description What was last written and run, for each of them
+             */
+            slugs: {
+                [key: string]: components["schemas"]["PresetSlugStateOut"];
+            };
         };
         /** PresetSummaryOut */
         PresetSummaryOut: {
@@ -1501,6 +1847,24 @@ export interface components {
              * @description Whether this is the version requests to the preset use now
              */
             live: boolean;
+        };
+        /**
+         * PresetsSettings
+         * @description Every OpenRouter preset Vibonomics manages, and the blocklists that apply to all of them.
+         */
+        PresetsSettings: {
+            /** Items */
+            items?: components["schemas"]["PresetSettings"][];
+            /**
+             * Blocked Models
+             * @description Models no preset considers, as patterns: `openai/*`, `*:free`, an exact id
+             */
+            blocked_models?: string[];
+            /**
+             * Blocked Providers
+             * @description Providers no preset pins, as patterns matched against the endpoint tag, its provider part and the display name
+             */
+            blocked_providers?: string[];
         };
         /** PriceOut */
         PriceOut: {
@@ -1807,6 +2171,11 @@ export interface components {
             /** Own Test */
             own_test?: number | null;
             /**
+             * Own Test Preferred
+             * @default false
+             */
+            own_test_preferred: boolean;
+            /**
              * Source Count
              * @default 0
              */
@@ -1831,10 +2200,22 @@ export interface components {
             agentic_weight: number;
             /**
              * Own Tests Weight
-             * @description Weight of Vibonomics's own test results vs third-party data
+             * @description Weight of Vibonomics's own test results vs third-party data. Has no effect on a model whose own test score is preferred (see prefer_own_tests)
              * @default 1
              */
             own_tests_weight: number;
+            /**
+             * Prefer Own Tests
+             * @description When a model has enough graded own-test results, its own test score is its coding and agentic score instead of being blended with third-party percentiles
+             * @default false
+             */
+            prefer_own_tests: boolean;
+            /**
+             * Prefer Own Tests Min Tasks
+             * @description The fewest graded task results a model must have, summed over providers, before its own test score replaces the computed one; a model tested on a handful of tasks is too noisy to override a benchmark
+             * @default 5
+             */
+            prefer_own_tests_min_tasks: number;
             /**
              * Free Model Cost
              * @description Assumed blended USD per 1M tokens for free models when ranking value (they would otherwise have infinite value)
@@ -2830,6 +3211,46 @@ export interface operations {
             };
         };
     };
+    read_preset_catalog_api_presets_catalog_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetCatalogOut"];
+                };
+            };
+        };
+    };
+    sync_preset_catalog_api_presets_sync_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetCatalogOut"];
+                };
+            };
+        };
+    };
     preset_state_api_presets_state_get: {
         parameters: {
             query?: never;
@@ -2890,6 +3311,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PresetPlanOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preset_inspect_api_presets_inspect_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PresetInspectIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetInspectOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preset_adopt_api_presets_adopt_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PresetAdoptIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetSettings"];
                 };
             };
             /** @description Validation Error */
