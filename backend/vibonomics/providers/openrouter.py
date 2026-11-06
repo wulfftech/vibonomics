@@ -32,12 +32,19 @@ def pick_discounted_endpoint(listed: Price, endpoints: list[dict[str, Any]], tas
     price. So the discounted endpoints are ranked by what one ``task`` costs on each, not by percentage, and the
     winner is used only when it is no dearer than the listed price. The listed endpoint may be the discounted
     one itself, hence the small tolerance.
+
+    A price of nothing has nothing to discount: a free model, or an endpoint priced at zero, never wins, so the
+    caller never shows a "30% off" on a price of $0 or computes a list price from it.
     """
+    if listed.is_zero():
+        return None
     listed_cost = task_cost(listed.input, listed.output, listed.cache_read, task)
     best: dict[str, Any] | None = None
     best_cost = 0.0
     for entry in endpoints:
         if not 0 < entry["discount"] < 1 or entry["input"] is None or entry["output"] is None:
+            continue
+        if entry["input"] == 0 and entry["output"] == 0:
             continue
         cost = task_cost(entry["input"], entry["output"], listed.cache_read, task)
         if cost is None:
@@ -131,8 +138,6 @@ class OpenRouterAdapter(ProviderAdapter):
 
         async def one(offer: ModelOffer) -> None:
             nonlocal failures
-            if offer.is_free:
-                return
             async with sem:
                 try:
                     data = await get_json(f"{API}/models/{offer.model_id}/endpoints", timeout=20, retries=1)
@@ -159,6 +164,10 @@ class OpenRouterAdapter(ProviderAdapter):
                     }
                 )
             offer.extra["endpoints"] = summary
+            # A free model is looked up only so a preset can pin one of its endpoints. Its listed price stays as it is,
+            # even when an endpoint of it carries a price and a discount.
+            if offer.is_free:
+                return
             entry = pick_discounted_endpoint(offer.price, summary, task)
             if entry:
                 disc, cur_in, cur_out = entry["discount"], entry["input"], entry["output"]
