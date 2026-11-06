@@ -375,7 +375,8 @@ second row of tabs under Providers, where settings that belong to one provider l
   profile, and the least value it may give, in score points per dollar of one task (the figure the preview
   shows; the Models page's 0 to 100 index is relative to whatever is on screen, so it makes a poor fixed
   floor). A model already in the preset keeps its place unless another beats it by a set percentage, so the
-  preset does not flap between near ties.
+  preset does not flap between near ties. Each preset can turn the prefer-own-tests option (under Scoring) on or
+  off for itself; left unset it follows that setting, and the preview says which scores it ranked with.
 - **Blocklists.** A list of models and a list of providers that the update never considers: one list for every
   preset, one per preset, added together. Entries are patterns, matched in any case: `openai/*`, `*:free`, an
   exact id, `deepinfra`. A blocked model (matched on its OpenRouter id or its canonical id) is never picked and
