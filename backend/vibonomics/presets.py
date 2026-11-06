@@ -16,6 +16,8 @@ What this module touches, and what it leaves alone:
   overwritten. The ``template_slug`` preset is read and never written.
 * Every plan carries the exact request, so the dry run is the same body the apply sends. Apply takes the digest of the
   plan the operator looked at and refuses if the plan has changed since.
+* The ranking runs on a stored copy of the model data. Each plan therefore ends with a check against the live listing
+  (``preset_validation``), and an apply that finds an error in it writes nothing.
 
 OpenRouter has no way to delete a preset through its API, so this module never does.
 """
@@ -43,6 +45,7 @@ from .db import session_scope
 from .http import FetchError, get_json, public_url, request, scrub_secrets
 from .jobs import failure_text
 from .orm import Model, ProviderConfig, Setting, utcnow
+from .preset_validation import Validation, cap_below, unsupported, validate_live
 from .pricing import Task, task_cost, value_of
 from .provider_service import resolve
 from .providers.openrouter import OpenRouterAdapter
@@ -99,6 +102,14 @@ class PresetWriteError(Exception):
     """OpenRouter refused or failed the write."""
 
 
+class PresetInvalid(Exception):
+    """The live listing, read as the write was asked for, shows the plan is wrong, so nothing was written."""
+
+    def __init__(self, messages: list[str]):
+        self.messages = messages
+        super().__init__("Live check failed: " + "; ".join(messages))
+
+
 @dataclass
 class Candidate:
     model_id: str
@@ -109,6 +120,7 @@ class Candidate:
     discount: float | None
     cache_read: float | None
     endpoints: list[dict[str, Any]]
+    expires: str | None = None  # the date OpenRouter said, at the last refresh, that the model goes away
 
 
 @dataclass
@@ -173,6 +185,9 @@ class Plan:
     fingerprint: str | None = None  # which key and host the plan was made for
     # The listed models whose providers the preset names once this plan stands; None when nothing is to be recorded.
     pinned: list[str] | None = None
+    # The live listing's verdict on what this plan would write; None when nothing was checked (a blocked plan). It is
+    # not part of the digest: the same config is the same plan whatever the listing says at the moment.
+    validation: Validation | None = None
     generated_at: datetime = field(default_factory=utcnow)
 
 
@@ -312,6 +327,7 @@ def rank(
             discount=m.discount,
             cache_read=m.price_cache_read,
             endpoints=endpoints,
+            expires=(m.extra or {}).get("expiration_date") or None,
         )
         if m.model_id not in best or found.value > best[m.model_id].value:
             best[m.model_id] = found
@@ -329,12 +345,18 @@ def choose_endpoints(
     current: Sequence[str] = (),
     allow: Sequence[str] = (),
     blocked: Sequence[str] = (),
+    require_params: Sequence[str] = (),
+    max_tokens: int | None = None,
 ) -> list[dict[str, Any]]:
     """The cheapest endpoints for one task that the preset's own provider filters would still let through.
 
     ``allow`` is a template's own ``only`` list: an endpoint whose provider (by slug, full tag or name) is not on it
     is skipped. An empty one restricts nothing. ``blocked`` is the blocklist's patterns: an endpoint they match is
     skipped, and nothing is written to the preset to say so.
+
+    ``require_params`` skips an endpoint whose stored parameters lack one of them, and ``max_tokens`` one whose output
+    cap is below it. An endpoint stored without that data (before it was kept, or not listed) is not skipped: unknown
+    is not a failure.
 
     Each endpoint is costed with its own cache-read price. One that lists none is costed as uncached: the model's
     listed price is the best endpoint's, and an endpoint without a cache would be ranked ahead on a discount it does
@@ -363,6 +385,8 @@ def choose_endpoints(
             names & ignored
             or (allowed and not names & allowed)
             or (blocked and _blocked_by(_endpoint_names(ep), blocked))
+            or unsupported(ep.get("params"), require_params)
+            or cap_below(ep.get("max_completion_tokens"), max_tokens)
         ):
             continue
         cache = ep.get("cache_read")
@@ -1190,6 +1214,9 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
                 f"The preset sets {' and '.join(gone)}, which Vibonomics decides: on the fallback route it takes "
                 f"{'it' if len(gone) == 1 else 'them'} off. Choose the sort route to keep sorting."
             )
+    # Last, so the check is as fresh as it can be when an apply goes on to write: it reads the live listing, not the
+    # stored copy the ranking used. Read-only, so a draft is checked too.
+    plan.validation = await validate_live(inputs.base_url, plan.config, plan.picks, plan.providers)
     return plan
 
 
@@ -1316,7 +1343,8 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
     """Write the plan for ``slug`` if there is something to write.
 
     ``digest`` pins it to a plan the operator reviewed. The plan is made from the saved item, never from a draft, and
-    one lock covers every preset, so two writes never overlap.
+    one lock covers every preset, so two writes never overlap. A create or update whose plan has an error in its live
+    check raises ``PresetInvalid`` before anything is sent; a preset that is already up to date is not refused.
     """
     async with _lock:
         inputs = await asyncio.to_thread(load_inputs, slug)
@@ -1347,6 +1375,13 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
                 known["reviewed"] = {cfg.slug: plan.reviewed}
             await asyncio.to_thread(_record_run, cfg.slug, plan.action, plan.reason, trigger, known or None)
             return plan, None
+        if plan.validation is not None and not plan.validation.ok:
+            # make_plan, a moment ago and from this same call, read the live listing again, so this is the double
+            # check at the time of writing and not the preview's answer, which can be hours old. Blocked, not failed:
+            # OpenRouter took no write and refused none.
+            invalid = PresetInvalid([c.message for c in plan.validation.items if c.level == "error"])
+            await asyncio.to_thread(_record_run, cfg.slug, "blocked", str(invalid), trigger)
+            raise invalid
         assert inputs.api_key is not None
         headers = {**_auth(inputs.api_key), "Content-Type": "application/json"}
         try:
@@ -1389,6 +1424,9 @@ async def sync(slug: str, trigger: str = "schedule") -> None:
         return
     except PresetWriteError as exc:
         log.warning("Preset %s update failed: %s", slug, exc)
+        return
+    except PresetInvalid as exc:
+        log.warning("Preset %s was not written: %s", slug, exc)
         return
     except Exception as exc:  # the scheduler must survive any single failure
         log.exception("Preset sync of %s failed", slug)
