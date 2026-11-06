@@ -47,6 +47,8 @@ export type PresetApplyResult = Schemas['PresetApplyOut'];
 export type PresetVersion = Schemas['PresetVersionOut'];
 export type PresetProvider = Schemas['PresetProviderOut'];
 export type PresetCandidate = Schemas['PresetCandidateOut'];
+export type PresetGuardrails = Schemas['PresetGuardrails'];
+export type PresetCapability = Schemas['PresetCapabilityOut'];
 
 export type ClaudeSubscriptionOut = Schemas['ClaudeSubscriptionOut'];
 export type SubscriptionSnapshot = Schemas['SnapshotOut'];
@@ -85,6 +87,60 @@ export interface FullSettings {
   presets: PresetsSettings & { items: PresetSettings[]; blocked_models: string[]; blocked_providers: string[] };
 }
 
+export type GuardrailKey = NonNullable<PresetGuardrails['clear']>[number];
+/** The guardrails as the server keeps them, every key present. */
+export type Guardrails = Required<PresetGuardrails>;
+
+/** In the order the server lists them, which is also the order of the form. */
+export const GUARDRAIL_KEYS: readonly GuardrailKey[] = [
+  'temperature',
+  'max_tokens',
+  'repetition_penalty',
+  'frequency_penalty',
+  'presence_penalty',
+  'top_p',
+  'quantizations',
+  'ignore',
+  'require_parameters',
+  'system_prompt',
+];
+
+/** Every guardrail left alone: nothing is managed, so whatever is live on OpenRouter stays. */
+export const NO_GUARDRAILS: Guardrails = {
+  temperature: null,
+  max_tokens: null,
+  repetition_penalty: null,
+  frequency_penalty: null,
+  presence_penalty: null,
+  top_p: null,
+  quantizations: null,
+  ignore: null,
+  require_parameters: null,
+  system_prompt: null,
+  clear: [],
+};
+
+/**
+ * Guardrails with every key present and `clear` in the server's order, so a draft built from them compares equal to
+ * what is saved (the comparison is by JSON text, which keeps key order and array order).
+ */
+export function normalizeGuardrails(guardrails: PresetGuardrails | null | undefined): Guardrails {
+  const given = guardrails ?? {};
+  return {
+    temperature: given.temperature ?? null,
+    max_tokens: given.max_tokens ?? null,
+    repetition_penalty: given.repetition_penalty ?? null,
+    frequency_penalty: given.frequency_penalty ?? null,
+    presence_penalty: given.presence_penalty ?? null,
+    top_p: given.top_p ?? null,
+    quantizations: given.quantizations ?? null,
+    ignore: given.ignore ?? null,
+    require_parameters: given.require_parameters ?? null,
+    system_prompt: given.system_prompt ?? null,
+    clear: GUARDRAIL_KEYS.filter((key) => given.clear?.includes(key)),
+  };
+}
+
 /** One preset as the server starts it, every field present so a draft compares equal to what is saved. */
 export const PRESET_DEFAULTS: PresetSettings = {
   enabled: false,
@@ -109,6 +165,7 @@ export const PRESET_DEFAULTS: PresetSettings = {
   route: 'fallback',
   sort: null,
   prefer_own_tests: null,
+  guardrails: NO_GUARDRAILS,
 };
 
 export type SettingsSectionKey = keyof FullSettings;
@@ -153,7 +210,11 @@ export function fullSettings(settings: AppSettings): FullSettings {
       blocked_models: [],
       blocked_providers: [],
       ...settings.presets,
-      items: (settings.presets?.items ?? []).map((item) => ({ ...PRESET_DEFAULTS, ...item })),
+      items: (settings.presets?.items ?? []).map((item) => ({
+        ...PRESET_DEFAULTS,
+        ...item,
+        guardrails: normalizeGuardrails(item.guardrails),
+      })),
     },
   };
 }

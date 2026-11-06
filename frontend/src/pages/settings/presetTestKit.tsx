@@ -58,6 +58,10 @@ export function plan(over: Partial<PresetPlan> = {}): PresetPlan {
     own_tests_preferred: false,
     passthrough: {},
     managed_keys: ['model', 'models', 'provider.only'],
+    guardrails: { set: {}, cleared: [] },
+    system_prompt: { live: null, planned: null, source: 'none', changed: false },
+    capabilities: [],
+    system_backup_at: null,
     validation: [],
     validated_at: null,
     valid: true,
@@ -98,6 +102,7 @@ export function inspection(slug: string, over: Partial<PresetInspect> = {}): Pre
     workspace: 'team-a',
     config: { model: 'acme/one', temperature: 0.2, provider: { only: ['deepinfra'], data_collection: 'deny' } },
     has_system_prompt: false,
+    system_prompt: null,
     models: ['acme/one'],
     providers: ['deepinfra'],
     versions: [

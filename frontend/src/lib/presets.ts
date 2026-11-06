@@ -1,5 +1,8 @@
 import type { CatalogPreset, PresetSettings } from '../api/types';
 
+// The three-state mapping of the guardrail settings lives apart for size, and is part of the same vocabulary.
+export * from './guardrails';
+
 /** The prefix every preset Vibonomics writes starts with; it is how the backend knows a preset is its own. */
 export const PRESET_PREFIX = 'vibonomics-';
 
