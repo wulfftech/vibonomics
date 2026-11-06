@@ -64,7 +64,8 @@ function plan(over: Partial<PresetPlan> = {}): PresetPlan {
 }
 
 describe('PresetPlanView', () => {
-  it('shows what would happen, the live version and the versions behind it', () => {
+  it('shows what would happen, the live version and the versions behind it', async () => {
+    const user = userEvent.setup();
     render(
       <MantineProvider>
         <PresetPlanView plan={plan()} />
@@ -75,7 +76,8 @@ describe('PresetPlanView', () => {
     expect(screen.getByText('Live version').parentElement).toHaveTextContent('v4');
     expect(screen.getByText('@preset/vibonomics-best-value')).toBeInTheDocument();
     expect(screen.getByText('No provider data for one runner-up.')).toBeInTheDocument();
-    const versions = within(screen.getByRole('table', { name: 'Preset versions' }));
+    await user.click(screen.getByRole('button', { name: 'Versions on OpenRouter (2, live v4)' }));
+    const versions = within(await screen.findByRole('table', { name: 'Preset versions' }));
     expect(versions.getByText('v3')).toBeInTheDocument();
     expect(versions.getByText('live')).toBeInTheDocument();
     expect(within(screen.getByRole('table', { name: 'Changes' })).getByText('"deepseek/flash"')).toBeInTheDocument();
@@ -156,8 +158,8 @@ describe('PresetPlanView', () => {
       '2GLM z-ai/glm66$0.07940',
     ]);
     const providers = within(screen.getByRole('table', { name: 'Providers' }));
-    expect(providers.getByText('Flash, GLM')).toBeInTheDocument();
-    expect(providers.getByText('GLM')).toBeInTheDocument();
+    expect(providers.getAllByRole('row')[1]).toHaveTextContent('Flash, GLM');
+    expect(providers.getAllByRole('link', { name: 'Open GLM on OpenRouter' })).toHaveLength(2);
   });
 });
 
