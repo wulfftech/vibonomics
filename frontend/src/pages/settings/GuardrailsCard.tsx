@@ -45,7 +45,7 @@ const NUMBERS: { key: NumberKey; label: string; notes: string[] }[] = [
 
 const WIDE = { gridColumn: '1 / -1' } as const;
 // The form sits in a column beside the list, so its columns follow the width of that column, not of the window.
-const TWO_COLUMNS = { base: 1, '44rem': 2 };
+const TWO_COLUMNS = { base: 1, '34rem': 2 };
 
 /** The live system prompt in a few words: it is only text once a preview or an inspection has read it. */
 function describePrompt(prompt: string | null | undefined): string {

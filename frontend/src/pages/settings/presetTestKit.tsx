@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, type RenderResult } from '@testing-library/react';
+import { configure, render, type RenderResult } from '@testing-library/react';
 import { vi, type Mock } from 'vitest';
 import {
   PRESET_DEFAULTS,
@@ -14,6 +14,10 @@ import {
 import { OpenRouterSection } from './OpenRouterSection';
 
 /** Shared by the tests of the OpenRouter settings: fixtures, and a fetch that behaves like the server. */
+
+// The page is a lot of Mantine inputs, and when the whole suite runs at once its first render can take longer than
+// the 1 s that findBy waits by default.
+configure({ asyncUtilTimeout: 5000 });
 
 // Annotated because an exported inferred vitest type cannot be named from here.
 export const fetchMock: Mock = vi.fn();
