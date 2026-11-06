@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import re
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
     BaseModel,
@@ -182,7 +182,13 @@ PRESET_MAX_ITEMS = 20
 PRESET_ADOPTED_SLUG_MAX = 100
 BLOCK_ENTRY_MAX = 100
 BLOCK_LIST_MAX = 200
+GUARDRAIL_IGNORE_MAX = 50
+GUARDRAIL_SLUG_MAX = 100
+GUARDRAIL_PROMPT_MAX = 20_000
+GUARDRAIL_MAX_TOKENS = 2_000_000
 _TEMPLATE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A provider to ignore is named the way OpenRouter names one: `deepinfra`, or with a variant, `google-vertex/europe`.
+_PROVIDER_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9._-]+)?$")
 # A blocklist entry is an fnmatch pattern, matched case-insensitively: `openai/*`, `*:free`, `deepinfra`.
 BlockEntry = Annotated[str, StringConstraints(strip_whitespace=True, max_length=BLOCK_ENTRY_MAX)]
 
@@ -212,6 +218,132 @@ def adopted_slug(value: str) -> str:
     if len(slug) > PRESET_ADOPTED_SLUG_MAX:
         raise ValueError(f"A preset slug is at most {PRESET_ADOPTED_SLUG_MAX} long")
     return slug
+
+
+# OpenRouter's own list of the precisions an endpoint serves at. An endpoint that does not say is `unknown`, and a
+# preset that names any other precision does not reach it.
+Quantization = Literal[
+    "int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown"
+]
+# The settings a preset can hold that Vibonomics does not pick itself: the owner chooses, per preset and per key,
+# whether Vibonomics leaves it alone, sets it, or takes it off. `system_prompt` is not a config key at OpenRouter: it
+# comes from a system message, which is why it is handled apart wherever the others are.
+GuardrailKey = Literal[
+    "temperature",
+    "max_tokens",
+    "repetition_penalty",
+    "frequency_penalty",
+    "presence_penalty",
+    "top_p",
+    "quantizations",
+    "ignore",
+    "require_parameters",
+    "system_prompt",
+]
+GUARDRAIL_KEYS: tuple[str, ...] = get_args(GuardrailKey)
+
+
+def _unique(values: list[Any], key: Any = lambda v: v) -> list[Any]:
+    """``values`` once each, in their order; ``key`` says which two count as the same."""
+    seen: dict[Any, Any] = {}
+    for value in values:
+        seen.setdefault(key(value), value)
+    return list(seen.values())
+
+
+class PresetGuardrails(BaseModel):
+    """What the owner wants held in a preset besides the models: each key is left alone, set, or removed.
+
+    A key that is ``None`` and not in ``clear`` is not managed: whatever is on the preset at OpenRouter stays, and is
+    sent back with every write. A value is managed: it is written. A key named in ``clear`` is managed too, and is
+    taken off the preset. One key cannot be both.
+    """
+
+    temperature: float | None = Field(None, ge=0, le=2, allow_inf_nan=False, strict=True)
+    max_tokens: int | None = Field(
+        None,
+        ge=1,
+        le=GUARDRAIL_MAX_TOKENS,
+        strict=True,
+        description="Sent as `max_tokens`: OpenRouter drops `max_completion_tokens` from a preset.",
+    )
+    repetition_penalty: float | None = Field(None, gt=0, le=2, allow_inf_nan=False, strict=True)
+    frequency_penalty: float | None = Field(None, ge=-2, le=2, allow_inf_nan=False, strict=True)
+    presence_penalty: float | None = Field(None, ge=-2, le=2, allow_inf_nan=False, strict=True)
+    top_p: float | None = Field(None, gt=0, le=1, allow_inf_nan=False, strict=True)
+    quantizations: list[Quantization] | None = Field(
+        None,
+        description="Only endpoints serving at one of these precisions. An endpoint whose precision OpenRouter lists "
+        "as `unknown` is left out unless `unknown` is named.",
+    )
+    ignore: list[str] | None = Field(
+        None,
+        max_length=GUARDRAIL_IGNORE_MAX,
+        description="Providers the preset never routes to, by slug: `deepinfra`, or `google-vertex/europe`.",
+    )
+    require_parameters: bool | None = Field(
+        None,
+        strict=True,
+        description="Route only to endpoints that support every parameter in the request. A preset with it on is "
+        "refused by OpenRouter when no endpoint of the model qualifies.",
+    )
+    system_prompt: str | None = Field(
+        None,
+        max_length=GUARDRAIL_PROMPT_MAX,
+        description="The system prompt the preset holds. Sent as a system message with every write.",
+    )
+    clear: list[GuardrailKey] = Field(
+        default_factory=list, description="Keys to take off the preset. A key is not also set."
+    )
+
+    @field_validator("quantizations")
+    @classmethod
+    def _quantizations(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("Name at least one quantization, or put `quantizations` in `clear` to take it off")
+        return _unique(value)
+
+    @field_validator("ignore")
+    @classmethod
+    def _ignore(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = [entry.strip() for entry in value]
+        for entry in cleaned:
+            if len(entry) > GUARDRAIL_SLUG_MAX or not _PROVIDER_SLUG.match(entry):
+                raise ValueError(f"{entry!r} is not a provider slug: letters, digits, dots, hyphens, one optional /")
+        if not cleaned:
+            raise ValueError("Name at least one provider, or put `ignore` in `clear` to take it off")
+        return _unique(cleaned, str.lower)
+
+    @field_validator("system_prompt")
+    @classmethod
+    def _prompt(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("The system prompt is blank: put `system_prompt` in `clear` to take it off")
+        return value
+
+    @field_validator("clear")
+    @classmethod
+    def _clear_once(cls, value: list[str]) -> list[str]:
+        return _unique(value)
+
+    @model_validator(mode="after")
+    def _not_both(self) -> PresetGuardrails:
+        both = [name for name in self.clear if getattr(self, name) is not None]
+        if both:
+            raise ValueError(f"{both[0]} is set and also in `clear`: choose one")
+        return self
+
+    def set_values(self) -> dict[str, Any]:
+        """The keys with a value, in a fixed order: what Vibonomics writes."""
+        return {name: getattr(self, name) for name in GUARDRAIL_KEYS if getattr(self, name) is not None}
+
+    def owned_keys(self) -> list[str]:
+        """The keys Vibonomics manages here, set or cleared, in a fixed order."""
+        return [name for name in GUARDRAIL_KEYS if getattr(self, name) is not None or name in self.clear]
 
 
 def _clean_patterns(value: list[str]) -> list[str]:
@@ -318,6 +450,11 @@ class PresetSettings(BaseModel):
         description="For this preset, prefer the model's own test scores over the computed ones. None follows the "
         "global Scoring setting.",
     )
+    guardrails: PresetGuardrails = Field(
+        default_factory=PresetGuardrails,
+        description="Temperature, token cap, penalties, quantization, ignored providers and the system prompt: each "
+        "left as it is on the preset, set, or removed.",
+    )
 
     @field_validator("slug")
     @classmethod
@@ -422,7 +559,12 @@ def _drop(data: Any, loc: tuple[int | str, ...]) -> bool:
 
 
 # What a stored document held before several presets: the section was one preset's own fields.
-_SINGLE_PRESET_FIELDS = frozenset(PresetSettings.model_fields) - {"blocked_models", "blocked_providers", "adopted"}
+_SINGLE_PRESET_FIELDS = frozenset(PresetSettings.model_fields) - {
+    "blocked_models",
+    "blocked_providers",
+    "adopted",
+    "guardrails",
+}
 
 
 def _slug_of(item: Any) -> str | None:
