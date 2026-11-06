@@ -6,6 +6,7 @@ import { CopyIconButton } from '../../components/CopyIconButton';
 import { DASH, discountLabel, money } from '../../lib/format';
 import { openRouterPresetUrl } from '../../lib/presets';
 import type { PresetPlan } from '../../api/types';
+import { PresetLiveCheck } from './PresetLiveCheck';
 import { ModelLink, ModelLinks, PassthroughBlock, PresetPageLink, PresetVersions } from './PresetParts';
 
 const ACTIONS: Record<PresetPlan['action'], { label: string; color: string }> = {
@@ -93,6 +94,8 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
           {warning}
         </Alert>
       ))}
+
+      <PresetLiveCheck plan={plan} />
 
       {plan.picks.length === 1 && plan.pick && (
         <Stack gap={4}>
