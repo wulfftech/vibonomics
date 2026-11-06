@@ -300,7 +300,7 @@ export function ScoringSection() {
         </Stack>
       </Card>
 
-      <SaveBar dirty={dirty && !invalid} saving={saving} onReset={reset} onSave={() => submit()} />
+      <SaveBar dirty={dirty} canSave={!invalid} saving={saving} onReset={reset} onSave={() => submit()} />
     </Stack>
   );
 }

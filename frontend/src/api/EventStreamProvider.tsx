@@ -186,19 +186,29 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
     let source: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
+    let opened = false;
 
     const open = () => {
       source = new EventSource('api/events');
       source.onopen = () => {
         setConnected(true);
-        // Anything may have changed while the stream was down.
-        void client.invalidateQueries({ queryKey: keys.refreshStatus });
+        if (opened) {
+          // The server does not replay what was missed while the stream was down (a sleeping laptop, a dropped
+          // proxy), and nothing refetches on focus, so anything on screen may be stale.
+          void client.invalidateQueries();
+        } else {
+          opened = true;
+          void client.invalidateQueries({ queryKey: keys.refreshStatus });
+        }
       };
       source.onerror = () => {
         setConnected(false);
         // The browser retries on its own unless the response was an error; then reopen by hand.
         if (source?.readyState === EventSource.CLOSED && !disposed) {
           source.close();
+          // A 401 (the session is gone) only ever shows up here. Ask the auth status, which the guard exempts,
+          // so the login card replaces the stale page instead of this loop retrying over it.
+          void client.invalidateQueries({ queryKey: keys.auth });
           retry = setTimeout(open, 5000);
         }
       };
