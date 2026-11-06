@@ -24,10 +24,14 @@ function useInvalidateProviders() {
   };
 }
 
+// The mutations below carry typed keys as variables, and a mutation lingers in the cache for five minutes by
+// default, so they are dropped as soon as nothing is watching them.
+
 export function useCreateProvider() {
   const invalidate = useInvalidateProviders();
   return useMutation({
     mutationFn: (body: ProviderIn) => api.post('/api/providers', { body }),
+    gcTime: 0,
     onSuccess: invalidate,
   });
 }
@@ -37,6 +41,7 @@ export function useUpdateProvider() {
   return useMutation({
     mutationFn: ({ id, body }: { id: number; body: ProviderUpdate }) =>
       api.put('/api/providers/{provider_id}', { path: { provider_id: id }, body }),
+    gcTime: 0,
     onSuccess: invalidate,
   });
 }
@@ -53,6 +58,7 @@ export function useTestProvider() {
   return useMutation({
     mutationFn: ({ id, body }: { id: number; body?: ProviderTestOverride }) =>
       api.post('/api/providers/{provider_id}/test', { path: { provider_id: id }, body: body ?? {} }),
+    gcTime: 0,
   });
 }
 
@@ -60,6 +66,7 @@ export function useTestProvider() {
 export function useTestProviderDraft() {
   return useMutation({
     mutationFn: (body: ProviderIn) => api.post('/api/providers/test', { body }),
+    gcTime: 0,
   });
 }
 
