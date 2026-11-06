@@ -3,17 +3,18 @@
 This file records what was checked and decided, so a settled question does not get raised again, and it is
 where a new follow-up goes: what it is, how it was verified, who it affects, and what fixing it would take.
 
-Last reviewed 2026-10-28, against `main` at `b7d253c`.
+Last reviewed 2026-11-06, against `main` after the full-repository code review of 2026-11-05 was worked
+through (see "Code review of 2026-11-05" below).
 
 ## Open
 
-- **The live instance has no password and no allowed-host list** (`/api/auth/status` answers
-  `enabled: false`). The HTTPS name is behind Authelia, but `http://192.168.10.78:2289` is not, so anything
-  on the LAN, and any web page a LAN browser opens (DNS rebinding), can use the whole API. The code now
-  supports `VIBONOMICS_ALLOWED_HOSTS` and withholds saved keys from a different host, but neither is set
-  there: that is a decision for the operator (a password, the allowed hosts, or the port reachable only from
-  the proxy).
-- **Five concerns the second review could not confirm.** Each says what would settle it.
+- **The live instance has a password but no allowed-host list.** `VIBONOMICS_PASSWORD` and
+  `VIBONOMICS_OPEN_READ=1` have been set since 2026-10-29, so changes need the login. Reads are open, and
+  `http://192.168.10.78:2289` is not behind Authelia, so a web page a LAN browser opens (DNS rebinding) can
+  still read what a visitor can. Writes are also refused when the request comes from another site (the
+  `auth_guard` cross-site check, 2026-11-05). `VIBONOMICS_ALLOWED_HOSTS` would close the read gap; it is the
+  operator's decision.
+- **Four concerns the second review could not confirm.** Each says what would settle it.
   - TCP layout only: code in the sandbox might reach the app through the internal network's gateway address
     and the published port, which arrives on an address the guard does not refuse. Run
     `curl http://<sandboxnet gateway>:2289/ping` from the sidecar. The default socket layout, which is what
@@ -24,13 +25,79 @@ Last reviewed 2026-10-28, against `main` at `b7d253c`.
   - Synchronous SQLite writes (`ingest_claude`, the eval runner's progress and result writes) run on the
     event loop and may stall every request while a refresh holds the write lock. Time `/ping` during a large
     `persist_scores`.
-  - `follow_redirects=True` on both HTTP clients: httpx drops only `Authorization` on a cross-origin
-    redirect, so `x-api-key` and `x-goog-api-key` would follow one.
   - The Epoch archive is decompressed and parsed on the event loop, with no cap on its decompressed size.
 - **Concurrent sandbox runs share `/tmp`'s 256 MB.** One run can fill it and leave the other's workspace
   unwritable, which now reads as a task left ungraded. Per-run quotas would need a tmpfs per run.
 - **Terminal-Bench still replaces all of its rows when some submission files fail to parse.** Unlike
   Arena and OpenRouter, its failures are per model, not per metric, so there is no metric to keep.
+- **Epoch can still lose a metric's rows.** `read_csv` returns `[]` for a run CSV missing from the archive
+  while the ECI file is present, so that metric's rows are deleted and the refresh counts as `ok`. It is the
+  same class as the OpenRouter sources, which now raise on an unreadable payload.
+- **The code review's deferred and declined items** are listed under "Code review of 2026-11-05".
+
+## Code review of 2026-11-05
+
+A full-repository review at `23822cb` (about 85 findings), worked through in three waves of fixes with
+the tests that reproduce each. `CODE_REVIEW.md` has been deleted; this section is where what it left lives.
+
+**Fixed.** Wave 1 (secrets, auth, data integrity): PR-1, PR-2, PR-3, PR-8, PR-9, PR-11, PR-14, PR-15, A-1
+to A-4, A-6, A-8, J-1 to J-4, J-8 to J-11, J-13, V-6, P-15. Wave 2 (correctness): the preset ownership,
+write-verification, provider and churn findings P-1 to P-8 and P-10, the usage findings P-9 and P-11 to P-14,
+the pricing and value findings PR-4, PR-6, PR-7, PR-10, PR-12, PR-13, V-1 to V-5, V-7, V-9, V-10, and the
+benchmark and job findings J-5 to J-7, J-12, J-14, J-15, plus the event-before-commit sweep and single-flight
+for the models.dev fetch. Wave 3 (frontend): F-1 to F-14 (F-3 was already fixed), PR-5, V-8, V-11.
+CI-1 was fixed in the review's own PR. B-3 was already fixed on `main`.
+
+**What the fixes taught, for the next change.**
+- `get_session` commits before the response is sent (`Depends(..., scope="function")`), so a handler that
+  publishes an event must commit first. Migrations run with foreign keys off and are checked afterwards.
+- The `follow_redirects` concern from the second review was confirmed (PR-3) and is fixed: a cross-origin
+  redirect now loses every key header (`http.drop_secrets_on_redirect`).
+- The sandbox concurrency, fork-bomb and leftover-file cases did run, as root in a Linux container, and
+  passed; the fork-bomb test failed there 4 of 4 times because of S-1 below.
+- OpenRouter keeps `allow_fallbacks` in a preset (version 6 of the live preset held it), so the churn P-4
+  described did not occur on a real account. The code stopped writing it anyway.
+
+**Open or decided against, with the reason.**
+- **S-1: the fork-bomb sandbox test races the reaper.** It checks for survivors at once, and under a slow
+  PID 1 the zombies still count; the executor also frees the uid before its process count reaches 0. Passes
+  with tini (the sidecar and CI). The fix is to poll in the test and wait, bounded, before `_release_uid`.
+  Not done: it cannot be run on Windows.
+- **CI-2: `publish.yml` does not wait for CI.** A `v*` tag ships even with `main` red. Gate it on CI.
+- **CI-3: version drift.** CI tests Python 3.12 while the image runs 3.13, and `AGENTS.md` says Node 22+
+  while CI and the image use 24.
+- **A-5: no login rate limit, and a session cannot be revoked** except by changing the password. Accepted for
+  a LAN tool.
+- **A-7: `GET /api/subscription/claude` mints a token** for an authenticated caller (a GET with a write).
+  Harmless today.
+- **The Claude OAuth `utilization` unit** (0 to 1 or 0 to 100) was never confirmed against the live
+  endpoint, so it is still rescaled by a heuristic. `used_percentage` from the status line is not rescaled.
+- **`VIBONOMICS_CUSTOM_OPENAI_API_KEY` goes to every custom endpoint** on every host (`provider_service.resolve`
+  applies env keys per type). A decision: key per row, or a host check.
+- **`crypto.py`:** after the secret key changes, every stored key reads as "not set" with no log line.
+- **PR-16: the pricing-page glue is copied in seven adapters,** and five of them discard good page prices when
+  the live `/models` list fails. A shared helper would fix both; it is a refactor and was left out.
+- **Presets.** A key rotation blocks the existing preset name until it is renamed; a "re-claim for this
+  key" action would need a route and a button. The ownership check also compares the preset's `id` and
+  `created_at`, whose behaviour on a live account is unverified: if a plan ever reads "no longer the one
+  Vibonomics created", look there first. A template's provider allow-list applies only when a preset is
+  created. A create whose stored config differs from what was sent (OpenRouter dropping a key) is not
+  adopted after a lost answer. `pick_discounted_endpoint` still uses the model's listed cache price.
+  Unverified without a second look at OpenRouter: that `provider.only` applies to every entry in `models`
+  (the code assumes it does), and that `GET /keys` returns `last_used_at`.
+- **Usage.** A period with only own-key (BYOK) traffic shows no cost per million tokens; the activity API
+  gives no per-row token split.
+- **Matching.** `guess_canonical` now returns nothing when two models tie. Against the live catalogue it
+  changed 16 of 617 answers and lost none.
+- **Frontend.** A draft in an open Settings section is lost when the session expires (the login card
+  replaces the page); a save that hits a 401 now says so. Logout removes only the cached data nobody is
+  watching and refetches the rest, so a mounted page keeps updating. The value index and tiers rank among the
+  rows shown, so a search changes them (the Models page's index was already relative to the screen).
+  `--mantine-color-error` (form error text, about 3.6:1 in light mode) is below AA and was left alone. The
+  per-card balance spinner ends when a balance is written or after 120 s; a `refresh.finished` hook would be
+  exact.
+- **A source switched off mid-refresh** can reappear in the database after the settings purge. The rows
+  route hides it and the next refresh deletes it.
 
 ## Fixed on 2026-10-28, second pass (an independent review of the first)
 
