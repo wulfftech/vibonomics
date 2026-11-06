@@ -44,7 +44,15 @@ from .pricing import Task, task_cost, value_of
 from .provider_service import resolve
 from .providers.openrouter import OpenRouterAdapter
 from .scoring import compute_scores, own_test_scores, score_key
-from .settings_store import DEFAULT_PROFILES, AppSettings, PresetSettings, load_settings
+from .settings_store import (
+    DEFAULT_PROFILES,
+    PRESET_MAX_ITEMS,
+    AppSettings,
+    PresetSettings,
+    adopted_slug,
+    load_settings,
+    save_settings,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +70,18 @@ _lock = asyncio.Lock()
 
 class PresetNotConfigured(Exception):
     """A slug that is not among the presets Vibonomics manages was asked for."""
+
+
+class PresetNotFound(Exception):
+    """OpenRouter has no preset with that slug."""
+
+
+class NoApiKey(Exception):
+    """There is no OpenRouter key to read the account with."""
+
+
+class AdoptRefused(Exception):
+    """A preset cannot be handed over to Vibonomics, and the message says why."""
 
 
 class PresetDisabled(Exception):
@@ -145,6 +165,7 @@ class Plan:
     draft: bool = False  # made from unsaved settings, so it cannot be applied
     excluded: Excluded = field(default_factory=Excluded)  # what the blocklists took out of this run
     passthrough: dict[str, Any] = field(default_factory=dict)  # the keys that are sent back as they were found
+    reviewed: str | None = None  # the passthrough digest to record as seen, once an apply the owner watched is done
     fingerprint: str | None = None  # which key and host the plan was made for
     # The listed models whose providers the preset names once this plan stands; None when nothing is to be recorded.
     pinned: list[str] | None = None
@@ -606,24 +627,38 @@ def read_state() -> dict[str, Any]:
         return _load_state(s)
 
 
+def _merge_state(
+    state: dict[str, Any],
+    patch: dict[str, Any],
+    own: str | None = None,
+    owner: dict[str, Any] | None = None,
+    keep_owner: bool = False,
+) -> None:
+    """Merge ``patch`` into ``state`` in place, slug by slug. ``own`` adds a slug to ``owned`` and ``owner`` is its
+    account record; ``keep_owner`` leaves a record that is already there alone."""
+    for key, value in patch.items():
+        state[key] = {**(state.get(key) or {}), **value} if key in _PER_SLUG else value
+    if own and own not in state.get("owned", []):
+        state["owned"] = [*state.get("owned", []), own]
+    if own and owner is not None and not (keep_owner and own in (state.get("owners") or {})):
+        state["owners"] = {**(state.get("owners") or {}), own: owner}
+
+
+def _store_state(session: Session, state: dict[str, Any]) -> None:
+    row = session.get(Setting, STATE_KEY)
+    if row is None:
+        session.add(Setting(key=STATE_KEY, value=state))
+    else:
+        row.value = state
+
+
 def _update_state(
     patch: dict[str, Any], own: str | None = None, owner: dict[str, Any] | None = None, keep_owner: bool = False
 ) -> None:
-    """Merge ``patch`` into the stored state, slug by slug. ``own`` adds a slug to ``owned`` and ``owner`` is its
-    account record; ``keep_owner`` leaves a record that is already there alone."""
     with session_scope() as s:
-        row = s.get(Setting, STATE_KEY)
         state = _load_state(s)
-        for key, value in patch.items():
-            state[key] = {**(state.get(key) or {}), **value} if key in _PER_SLUG else value
-        if own and own not in state.get("owned", []):
-            state["owned"] = [*state.get("owned", []), own]
-        if own and owner is not None and not (keep_owner and own in (state.get("owners") or {})):
-            state["owners"] = {**(state.get("owners") or {}), own: owner}
-        if row is None:
-            s.add(Setting(key=STATE_KEY, value=state))
-        else:
-            row.value = state
+        _merge_state(state, patch, own, owner, keep_owner)
+        _store_state(s, state)
 
 
 def _record_run(slug: str, status: str, message: str, trigger: str, patch: dict[str, Any] | None = None) -> None:
@@ -634,6 +669,12 @@ def _record_run(slug: str, status: str, message: str, trigger: str, patch: dict[
 
 def is_owned(state: dict[str, Any], slug: str) -> bool:
     return slug in (state.get("owned") or [])
+
+
+def is_adopted(state: dict[str, Any], slug: str) -> bool:
+    """Whether ``slug`` was handed over by the adopt route: owned, with a record that says so."""
+    record = (state.get("owners") or {}).get(slug)
+    return is_owned(state, slug) and isinstance(record, dict) and record.get("adopted") is True
 
 
 def _same_instant(a: str, b: str) -> bool:
@@ -902,6 +943,14 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         excluded=inputs.excluded,
     )
     blocked_providers = blocklists(inputs.settings, cfg)[1]
+    if cfg.adopted and not is_adopted(inputs.state, cfg.slug):
+        # `adopted` in the settings is only a claim. A preset made by hand is written only after the owner adopted it
+        # through the route that looks at it first, and that left a record.
+        return _blocked(
+            plan,
+            f"{cfg.slug} is marked as adopted, but no adoption of it was recorded, so it is left alone. Adopt it from "
+            "the list of presets on the account, which shows what Vibonomics would send back.",
+        )
     if not inputs.api_key:
         return _blocked(plan, "Add an OpenRouter API key under Settings, Providers first.")
     plan.fingerprint = owner_fingerprint(inputs.base_url, inputs.api_key)
@@ -915,6 +964,12 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
     except FetchError as exc:
         return _blocked(plan, f"Could not read the preset from OpenRouter: {exc}")
     plan.current = remote
+    if remote is None and cfg.adopted:
+        return _blocked(
+            plan,
+            f"The adopted preset {cfg.slug} is gone from OpenRouter. Vibonomics does not create a preset under a name "
+            "it was only handed. Take it out of the list, or adopt the preset again if it was made anew.",
+        )
     if remote is not None and remote.readable:
         plan.passthrough = passthrough_view(remote.config)
     if remote is not None and remote.status == "archived":
@@ -1202,8 +1257,10 @@ async def _settle(
     }
     # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
     owner = _claim_record(plan, inputs.state, version, preset_id, created_at)
-    pins = {"pins": {slug: plan.pinned or []}}
-    await asyncio.to_thread(_update_state, {"applied": {slug: applied}, **pins}, slug, owner)
+    patch: dict[str, Any] = {"applied": {slug: applied}, "pins": {slug: plan.pinned or []}}
+    if plan.reviewed:
+        patch["reviewed"] = {slug: plan.reviewed}
+    await asyncio.to_thread(_update_state, patch, slug, owner)
     await asyncio.to_thread(_record_run, slug, "applied", message, trigger)
     return Applied(version=version, unsaved=unsaved, message=message)
 
@@ -1258,10 +1315,26 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
         plan = await make_plan(slug, inputs)
         if digest is not None and plan.digest != digest:
             raise PlanChanged("The plan changed since you looked at it. Preview it again.")
+        if is_adopted(inputs.state, cfg.slug) and plan.current is not None and plan.current.readable:
+            seen = passthrough_digest(plan.current.config)
+            if trigger == "manual":
+                if plan.action in ("create", "update", "unchanged"):
+                    plan.reviewed = seen  # the owner has just been shown the plan, the keys it sends back included
+            elif plan.action in ("create", "update") and seen != (inputs.state.get("reviewed") or {}).get(cfg.slug):
+                # No one is watching, and the keys the owner agreed to hand over are no longer the keys there.
+                _blocked(
+                    plan,
+                    "Keys changed on OpenRouter since you reviewed them, so nothing was written. Preview the "
+                    "preset and apply it yourself to accept them.",
+                )
+                await asyncio.to_thread(_record_run, cfg.slug, "blocked", plan.reason, trigger)
+                return plan, None
         if plan.action not in ("create", "update") or plan.body is None or plan.url is None or plan.config is None:
             # An unchanged preset is in step with this plan, so what it pins is known now.
-            known = {"pins": {cfg.slug: plan.pinned}} if plan.pinned is not None else None
-            await asyncio.to_thread(_record_run, cfg.slug, plan.action, plan.reason, trigger, known)
+            known: dict[str, Any] = {"pins": {cfg.slug: plan.pinned}} if plan.pinned is not None else {}
+            if plan.reviewed:
+                known["reviewed"] = {cfg.slug: plan.reviewed}
+            await asyncio.to_thread(_record_run, cfg.slug, plan.action, plan.reason, trigger, known or None)
             return plan, None
         assert inputs.api_key is not None
         headers = {**_auth(inputs.api_key), "Content-Type": "application/json"}
@@ -1311,3 +1384,140 @@ async def sync(slug: str, trigger: str = "schedule") -> None:
         await asyncio.to_thread(_record_run, slug, "failed", f"{type(exc).__name__}: {failure_text(exc)}", trigger)
         return
     log.info("Preset %s: %s", plan.slug, applied.message if applied else plan.reason)
+
+
+# ---- looking at a preset made by hand, and adopting it ---------------------------------------------------------
+
+
+@dataclass
+class Inspection:
+    """A preset on the account as it stands, with whether Vibonomics could take it over and why not."""
+
+    remote: Remote
+    managed: bool
+    adoptable: bool
+    blockers: list[str]
+    digest: str
+    passthrough: dict[str, Any]
+
+
+def inspection_digest(remote: Remote) -> str:
+    """Names the preset as shown: its slug, its live version and its config. Adopt refuses if any has moved."""
+    return digest_of(remote.slug, remote.config, None, remote.version)
+
+
+def _managed_slugs() -> list[str]:
+    with session_scope() as s:
+        return [item.slug for item in load_settings(s).presets.items]
+
+
+def _blockers(slug: str, remote: Remote, state: dict[str, Any], managed_slugs: list[str]) -> list[str]:
+    """Why ``remote`` cannot be adopted; empty when it can."""
+    out: list[str] = []
+    try:
+        adopted_slug(slug)
+    except ValueError as exc:
+        out.append(f"Its name cannot be kept as it is: {exc}.")
+    if remote.status == "archived":
+        out.append("The preset is archived on OpenRouter, and an archived preset takes no new versions.")
+    if not remote.readable:
+        out.append("OpenRouter returned no live version for it, so there is nothing to read what it holds from.")
+    if remote.system_prompt:
+        out.append(
+            "The preset has a system prompt, and OpenRouter's API cannot carry one over to a new version. Clear it "
+            "in the OpenRouter web UI first."
+        )
+    if is_owned(state, slug) or slug in managed_slugs:
+        out.append("Vibonomics already manages a preset with this name.")
+    elif len(managed_slugs) >= PRESET_MAX_ITEMS:
+        out.append(f"Vibonomics already manages {PRESET_MAX_ITEMS} presets, the most it will.")
+    return out
+
+
+async def _read_for_adoption(slug: str) -> tuple[str, Remote, dict[str, Any], list[str]]:
+    base, key, state = await asyncio.to_thread(load_access)
+    if not key:
+        raise NoApiKey("Add an OpenRouter API key under Settings, Providers first.")
+    remote = await fetch_remote(base, key, slug)
+    if remote is None:
+        raise PresetNotFound(f"OpenRouter has no preset called {slug}.")
+    return owner_fingerprint(base, key), remote, state, await asyncio.to_thread(_managed_slugs)
+
+
+async def inspect(slug: str) -> Inspection:
+    """Read any preset on the account, managed or not, and say whether it could be adopted. Writes nothing."""
+    _fingerprint, remote, state, managed_slugs = await _read_for_adoption(slug)
+    blockers = _blockers(slug, remote, state, managed_slugs)
+    return Inspection(
+        remote=remote,
+        managed=is_owned(state, slug) or slug in managed_slugs,
+        adoptable=not blockers,
+        blockers=blockers,
+        digest=inspection_digest(remote),
+        passthrough=passthrough_view(remote.config) if remote.readable else {},
+    )
+
+
+def _record_adoption(slug: str, fingerprint: str, remote: Remote) -> PresetSettings:
+    """In one transaction: note the adoption in the state, and add the preset to the list, switched off."""
+    with session_scope() as s:
+        settings = load_settings(s)
+        state = _load_state(s)
+        # Looked at again here, under the transaction: the checks before it were made on a read a moment ago.
+        refused = _blockers(slug, remote, state, [item.slug for item in settings.presets.items])
+        if refused:
+            raise AdoptRefused(refused[0])
+        item = PresetSettings(slug=slug, adopted=True)
+        settings.presets.items.append(item)
+        save_settings(s, settings)
+        record = {
+            "fingerprint": fingerprint,
+            "adopted": True,
+            "adopted_at": utcnow().isoformat(),
+            "preset_id": remote.preset_id,
+            "created_at": remote.created_at,
+        }
+        patch = {"reviewed": {slug: passthrough_digest(remote.config)}}
+        _merge_state(state, patch, slug, record)
+        _store_state(s, state)
+        return item
+
+
+async def adopt(slug: str, digest: str) -> PresetSettings:
+    """Hand a preset made by hand over to Vibonomics, if it is still what the operator was shown.
+
+    This writes nothing to OpenRouter: it records that the operator agreed, and the keys they saw (``reviewed``), and
+    adds the preset to the list switched off. The first write is a later, separate step.
+    """
+    async with _lock:
+        fingerprint, remote, state, managed_slugs = await _read_for_adoption(slug)
+        if inspection_digest(remote) != digest:
+            raise PlanChanged("The preset changed since you looked at it. Inspect it again.")
+        refused = _blockers(slug, remote, state, managed_slugs)
+        if refused:
+            raise AdoptRefused(refused[0])
+        return await asyncio.to_thread(_record_adoption, slug, fingerprint, remote)
+
+
+def release_adopted(kept: Iterable[str]) -> list[str]:
+    """End the adoption of any adopted preset that is no longer in the list ``kept``, and return their slugs.
+
+    Nothing is changed on OpenRouter. The preset is simply no longer Vibonomics's to write, until it is adopted again.
+    """
+    keep = set(kept)
+    with session_scope() as s:
+        state = _load_state(s)
+        gone = [
+            slug
+            for slug, record in (state.get("owners") or {}).items()
+            if isinstance(record, dict) and record.get("adopted") is True and slug not in keep
+        ]
+        if not gone:
+            return []
+        state["owned"] = [slug for slug in state.get("owned", []) if slug not in gone]
+        for key in _PER_SLUG:
+            if isinstance(state.get(key), dict):
+                state[key] = {slug: value for slug, value in state[key].items() if slug not in gone}
+        _store_state(s, state)
+    events.publish("presets.changed", {"status": "released"})
+    return gone

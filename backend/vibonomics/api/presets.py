@@ -16,7 +16,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import presets
+from .. import events, presets
 from ..http import FetchError
 from ..presets import Applied, Candidate, Plan
 from ..settings_store import PresetSettings
@@ -160,6 +160,37 @@ class PresetApplyIn(BaseModel):
     digest: str = Field(min_length=1, description="The digest of the plan that was reviewed")
 
 
+class PresetInspectIn(BaseModel):
+    slug: str = Field(min_length=1, description="Any preset on the OpenRouter account, managed by Vibonomics or not")
+
+
+class PresetInspectOut(BaseModel):
+    slug: str
+    status: str = Field(description="`active` or `archived`")
+    version: int | None = Field(description="The live version; null when OpenRouter returned none")
+    updated_at: str | None
+    preset_id: str | None = Field(description="The id OpenRouter gave the preset; null when it names none")
+    workspace: str | None = Field(description="The workspace OpenRouter names for the preset; null when it names none")
+    config: dict[str, Any] = Field(description="The live config, as OpenRouter holds it")
+    has_system_prompt: bool
+    models: list[str] = Field(description="The models the config names, the lead first")
+    providers: list[str] = Field(description="The providers the config restricts it to (`provider.only`)")
+    versions: list[PresetVersionOut]
+    managed_keys: list[str] = Field(description="The keys Vibonomics would decide if it managed the preset")
+    passthrough: dict[str, Any] = Field(
+        description="Every other key, which Vibonomics would send back as it found it, as raw JSON"
+    )
+    managed: bool = Field(description="Vibonomics already manages a preset with this name")
+    adoptable: bool
+    blockers: list[str] = Field(description="Why it cannot be adopted; empty when it can")
+    digest: str = Field(description="Names the slug, the live version and the config; `adopt` refuses a changed one")
+
+
+class PresetAdoptIn(BaseModel):
+    slug: str = Field(min_length=1)
+    digest: str = Field(min_length=1, description="The digest `inspect` returned for the preset the operator looked at")
+
+
 class PresetApplyOut(BaseModel):
     applied: bool
     message: str
@@ -280,6 +311,62 @@ async def preset_plan(body: PresetPlanIn | None = None) -> PresetPlanOut:
     except presets.PresetNotConfigured as exc:
         raise HTTPException(404, str(exc)) from exc
     return _plan_out(plan)
+
+
+def _unavailable(exc: Exception) -> HTTPException:
+    """The answer to a call that reads the account when it cannot: no key, a refusal, or no such preset."""
+    if isinstance(exc, presets.NoApiKey):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, presets.PresetNotFound):
+        return HTTPException(404, str(exc))
+    return HTTPException(502, f"Could not read the preset from OpenRouter: {exc}")
+
+
+@router.post("/inspect", response_model=PresetInspectOut)
+async def preset_inspect(body: PresetInspectIn) -> PresetInspectOut:
+    """Read any preset on the account and say whether Vibonomics could take it over. Writes nothing."""
+    try:
+        seen = await presets.inspect(body.slug)
+    except (presets.NoApiKey, presets.PresetNotFound, FetchError) as exc:
+        raise _unavailable(exc) from exc
+    remote = seen.remote
+    provider = remote.config.get("provider") if isinstance(remote.config.get("provider"), dict) else {}
+    return PresetInspectOut(
+        slug=remote.slug,
+        status=remote.status,
+        version=remote.version,
+        updated_at=remote.updated_at,
+        preset_id=remote.preset_id,
+        workspace=remote.workspace,
+        config=remote.config,
+        has_system_prompt=bool(remote.system_prompt),
+        models=presets.current_models(remote.config),
+        providers=[p for p in provider.get("only") or [] if isinstance(p, str)],
+        versions=[PresetVersionOut(**v) for v in remote.versions],
+        managed_keys=list(presets.MANAGED_KEYS),
+        passthrough=seen.passthrough,
+        managed=seen.managed,
+        adoptable=seen.adoptable,
+        blockers=seen.blockers,
+        digest=seen.digest,
+    )
+
+
+@router.post("/adopt", response_model=PresetSettings)
+async def preset_adopt(body: PresetAdoptIn) -> PresetSettings:
+    """Hand a preset made by hand over to Vibonomics, if it is still what `inspect` showed.
+
+    Writes nothing to OpenRouter: the preset joins the list switched off, and its first update is a later step.
+    """
+    try:
+        item = await presets.adopt(body.slug, body.digest)
+    except (presets.NoApiKey, presets.PresetNotFound, FetchError) as exc:
+        raise _unavailable(exc) from exc
+    except (presets.PlanChanged, presets.AdoptRefused) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    events.publish("settings.changed", {})
+    events.publish("presets.changed", {"status": "adopted"})
+    return item
 
 
 @router.post("/apply", response_model=PresetApplyOut)

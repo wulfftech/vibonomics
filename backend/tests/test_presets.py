@@ -2198,3 +2198,451 @@ def test_the_route_choice_is_saved_with_the_settings(client):
     assert (item["route"], item["sort"]) == ("sort", "latency")
     for bad in ({"route": "fastest"}, {"sort": "cheap"}):
         assert client.put("/api/settings", json={"settings": _with_item(current, **bad)}).status_code == 422
+
+
+# ---- looking at a preset made by hand, and adopting it -----------------------------------------------------------
+
+HAND = "my-tools"  # a preset the owner made in the OpenRouter UI: no prefix, nothing of ours about it
+HAND_CONFIG = {
+    "model": "other/model",
+    "models": ["other/model", "third/model"],
+    "tools": [{"type": "openrouter:web_search"}],
+    "reasoning": {"enabled": True},
+    "provider": {
+        "only": ["deepinfra/fp8"],
+        "order": ["deepinfra/fp8"],
+        "quantizations": ["fp8"],
+        "ignore": ["slow"],
+        "data_collection": "deny",
+    },
+}
+
+
+def _inspect(client: TestClient, slug: str = HAND) -> httpx.Response:
+    return client.post("/api/presets/inspect", json={"slug": slug})
+
+
+def _adopt(client: TestClient, digest: str, slug: str = HAND) -> httpx.Response:
+    return client.post("/api/presets/adopt", json={"slug": slug, "digest": digest})
+
+
+def _adopted_item(slug: str = HAND, **fields: Any) -> PresetSettings:
+    return PresetSettings(**{"adopted": True, "slug": slug, "min_context": 100_000, **fields})
+
+
+def _adopt_hand_made(client: TestClient, config: dict[str, Any] | None = None, version: int = 3, **extra: Any) -> dict:
+    """Inspect and adopt ``HAND`` against an account that holds it; returns what the inspect said."""
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, config or HAND_CONFIG, version=version, **extra)
+        seen = _inspect(client).json()
+        assert _adopt(client, seen["digest"]).status_code == 200
+    return seen
+
+
+def test_inspect_shows_a_preset_made_by_hand_with_everything_the_app_would_send_back(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, id="p-7", workspace_slug="team-a")
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        response = _inspect(client)
+        assert post.call_count == 0
+    assert response.status_code == 200, response.text
+    assert KEY not in response.text
+    body = response.json()
+    assert (body["slug"], body["status"], body["version"]) == (HAND, "active", 3)
+    assert body["config"] == HAND_CONFIG
+    assert body["models"] == ["other/model", "third/model"] and body["providers"] == ["deepinfra/fp8"]
+    assert body["has_system_prompt"] is False
+    assert body["managed_keys"] == ["model", "models", "route", "provider.only", "provider.order", "provider.sort"]
+    assert body["passthrough"] == {
+        "tools": [{"type": "openrouter:web_search"}],
+        "reasoning": {"enabled": True},
+        "provider": {"quantizations": ["fp8"], "ignore": ["slow"], "data_collection": "deny"},
+    }
+    assert (body["managed"], body["adoptable"], body["blockers"]) == (False, True, [])
+    assert (body["preset_id"], body["workspace"]) == ("p-7", "team-a")
+    assert [v["version"] for v in body["versions"]] == [3, 1] and body["versions"][0]["live"] is True
+    assert body["digest"] == digest_of(HAND, HAND_CONFIG, None, 3)
+    assert body["updated_at"] == "2026-11-04T07:36:33Z"
+
+
+def test_the_inspect_digest_names_the_slug_the_version_and_the_config(client):
+    digests = []
+    for config, version in ((HAND_CONFIG, 3), (HAND_CONFIG, 4), ({**HAND_CONFIG, "tools": []}, 3)):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, HAND, config, version=version)
+            digests.append(_inspect(client).json()["digest"])
+    assert len(set(digests)) == 3
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "other-tools", HAND_CONFIG, version=3)
+        assert _inspect(client, "other-tools").json()["digest"] != digests[0]
+
+
+def test_inspect_says_why_a_preset_cannot_be_adopted(client):
+    for word, extra in (("system prompt", {"system_prompt": "Be brief."}), ("archived", {"status": "archived"})):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, HAND, HAND_CONFIG, version=3, **extra)
+            body = _inspect(client).json()
+        assert body["adoptable"] is False, word
+        assert any(word in blocker for blocker in body["blockers"]), (word, body["blockers"])
+        assert body["has_system_prompt"] is (word == "system prompt")
+
+
+def test_inspect_reads_a_preset_the_app_manages_too_and_says_it_is_managed(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        body = _inspect(client, SLUG).json()
+    assert body["managed"] is True and body["adoptable"] is False
+    assert any("already" in blocker for blocker in body["blockers"])
+
+
+def test_inspect_has_an_answer_for_every_way_the_account_can_fail(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "nowhere", None)
+        assert _inspect(client, "nowhere").status_code == 404
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BASE}/presets/{HAND}").mock(return_value=httpx.Response(401, json={"error": "bad key"}))
+        failed = _inspect(client)
+    assert failed.status_code == 502 and "HTTP 401" in failed.json()["detail"]
+    with respx.mock(assert_all_called=False) as router:
+        _raw(router, HAND, {"slug": HAND, "status": "active"})  # no live version at all
+        body = _inspect(client).json()
+    assert body["adoptable"] is False and body["config"] == {} and body["version"] is None
+    with session_scope() as session:
+        session.query(ProviderConfig).filter_by(type="openrouter").update({"api_key_enc": None})
+    assert _inspect(client).status_code == 409
+
+
+def test_adopting_records_the_preset_as_ours_and_adds_it_to_the_list_without_writing_anything(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, id="p-7", created_at="2026-10-01T00:00:00Z")
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        seen = _inspect(client).json()
+        response = _adopt(client, seen["digest"])
+        assert post.call_count == 0
+    assert response.status_code == 200, response.text
+    item = response.json()
+    assert item["slug"] == HAND and item["adopted"] is True  # the name is kept, with no prefix added
+    assert (item["enabled"], item["auto_apply"]) == (False, False)  # adopting writes nothing, now or on a timer
+    state = _state()
+    assert state["owned"] == [HAND]
+    record = state["owners"][HAND]
+    assert record["fingerprint"] == owner_fingerprint(BASE, KEY) and record["adopted"] is True
+    assert (record["preset_id"], record["created_at"]) == ("p-7", "2026-10-01T00:00:00Z") and record["adopted_at"]
+    assert state["reviewed"] == {HAND: passthrough_digest(HAND_CONFIG)}
+    assert KEY not in json.dumps(state)
+    saved = client.get("/api/settings").json()["settings"]["presets"]["items"]
+    assert [i["slug"] for i in saved] == [SLUG, HAND] and saved[1]["adopted"] is True
+    assert client.get("/api/presets/state").json()["owned"] == [HAND]
+    # and it is no longer something to adopt
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        again = _inspect(client).json()
+    assert again["managed"] is True and again["adoptable"] is False
+
+
+def test_adopting_is_refused_when_the_preset_changed_since_it_was_shown(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        stale = _inspect(client).json()["digest"]
+    for config, version in ((HAND_CONFIG, 4), ({**HAND_CONFIG, "tools": []}, 3)):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, HAND, config, version=version)
+            response = _adopt(client, stale)
+        assert response.status_code == 409 and "changed" in response.json()["detail"]
+    assert _state() == {} and [i["slug"] for i in _saved_items(client)] == [SLUG]
+
+
+def _saved_items(client: TestClient) -> list[dict[str, Any]]:
+    return client.get("/api/settings").json()["settings"]["presets"]["items"]
+
+
+def test_adopting_is_refused_for_an_archived_preset_and_for_one_with_a_system_prompt(client):
+    for extra, word in (({"status": "archived"}, "archived"), ({"system_prompt": "Be brief."}, "system prompt")):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, HAND, HAND_CONFIG, version=3, **extra)
+            digest = _inspect(client).json()["digest"]
+            response = _adopt(client, digest)
+        assert response.status_code == 409 and word in response.json()["detail"], word
+    assert _state() == {} and [i["slug"] for i in _saved_items(client)] == [SLUG]
+
+
+def test_adopting_is_refused_for_a_preset_that_is_already_managed_or_was_made_by_the_app(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        seen = _inspect(client, SLUG).json()
+        response = _adopt(client, seen["digest"], SLUG)
+    assert response.status_code == 409 and "already" in response.json()["detail"]
+    # one that only the list holds, with no record, is as managed as the other
+    _items(_item(), _adopted_item())
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        response = _adopt(client, _inspect(client).json()["digest"])
+    assert response.status_code == 409
+    assert HAND not in _state().get("owned", [])
+
+
+def test_a_name_recorded_under_another_key_is_not_adoptable_with_this_one(client):
+    _own_as(OTHER_KEY, slug=HAND)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        body = _inspect(client).json()
+        response = _adopt(client, body["digest"])
+    assert body["adoptable"] is False and response.status_code == 409
+    assert _state()["owners"][HAND]["fingerprint"] == owner_fingerprint(BASE, OTHER_KEY)
+
+
+def test_no_more_than_twenty_presets_can_be_managed(client):
+    _items(*[_item(f"vibonomics-p{n}") for n in range(20)])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        body = _inspect(client).json()
+        response = _adopt(client, body["digest"])
+    assert body["adoptable"] is False and response.status_code == 409 and "20" in response.json()["detail"]
+
+
+def test_adopting_a_preset_that_does_not_exist_or_cannot_be_read_is_not_a_success(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "nowhere", None)
+        assert _adopt(client, "x", "nowhere").status_code == 404
+    with respx.mock(assert_all_called=False) as router:
+        _raw(router, HAND, {"slug": HAND})
+        body = _inspect(client).json()
+        assert _adopt(client, body["digest"]).status_code == 409
+    assert _state() == {}
+
+
+def test_an_adopted_preset_is_planned_under_its_own_name_and_keeps_every_key_it_has(client):
+    _adopt_hand_made(client)
+    _items(_item(), _adopted_item(enabled=True))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        plan = _plan(client, HAND)
+
+    assert plan["slug"] == HAND and plan["action"] == "update"
+    assert plan["request"]["url"] == f"{BASE}/presets/{HAND}/chat/completions"
+    config = plan["config"]
+    assert config["tools"] == HAND_CONFIG["tools"] and config["reasoning"] == {"enabled": True}
+    assert config["provider"]["quantizations"] == ["fp8"] and config["provider"]["data_collection"] == "deny"
+    assert plan["passthrough"] == passthrough_view(HAND_CONFIG)
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_slug_with_no_record_of_the_adoption_is_never_planned_or_written(client):
+    from vibonomics import presets as engine
+
+    # the list says adopted, but nothing says the owner agreed to it: not a path to writing a preset made by hand
+    _items(_item(), _adopted_item(enabled=True, auto_apply=True))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client, HAND)
+        assert plan["action"] == "blocked" and plan["request"] is None and plan["digest"] is None
+        assert "adopt" in plan["reason"].lower()
+        assert client.post("/api/presets/apply", json={"slug": HAND, "digest": "anything"}).status_code == 409
+        await engine.sync(HAND, "schedule")  # and a timer, which names no digest, gets no further
+        assert post.call_count == 0
+    assert _state()["last"][HAND]["status"] == "blocked"
+    # a record for the name that is not an adoption (a slug the app created) does not do either
+    _own_as(KEY, slug=HAND)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        assert _plan(client, HAND)["action"] == "blocked"
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 0
+
+
+def test_an_adopted_preset_that_is_gone_from_the_account_is_not_created_again(client):
+    _adopt_hand_made(client)
+    _items(_item(), _adopted_item(enabled=True))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, None)
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client, HAND)
+        assert plan["action"] == "blocked" and "gone" in plan["reason"]
+        assert post.call_count == 0
+
+
+def _set_state(state: dict[str, Any]) -> None:
+    with session_scope() as session:
+        session.merge(Setting(key=STATE_KEY, value=state))
+
+
+def _own_both(key: str = KEY) -> None:
+    """SLUG made by the app and HAND adopted, both under ``key``."""
+    mine = owner_fingerprint(BASE, key)
+    _set_state(
+        {
+            "owned": [SLUG, HAND],
+            "owners": {
+                SLUG: {"fingerprint": mine, "version_at_create": 1},
+                HAND: {"fingerprint": mine, "adopted": True, "adopted_at": "2026-11-05T00:00:00+00:00"},
+            },
+            "reviewed": {HAND: passthrough_digest(HAND_CONFIG)},
+        }
+    )
+
+
+def test_the_ownership_rules_of_a_key_hold_for_each_preset_by_itself(client):
+    _own_both()
+    _items(_item(), _adopted_item(enabled=True))
+    _use_key(OTHER_KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        for slug in (SLUG, HAND):
+            plan = _plan(client, slug)
+            assert plan["action"] == "blocked" and "different OpenRouter key or account" in plan["reason"], slug
+            assert plan["request"] is None
+    _use_key(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        assert _plan(client, SLUG)["action"] == "update" and _plan(client, HAND)["action"] == "update"
+    # an adopted name that was deleted and made again is no longer the preset that was adopted
+    state = _state()
+    state["owners"][HAND]["preset_id"] = "p-7"
+    _set_state(state)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        _remote(router, HAND, HAND_CONFIG, version=3, id="p-other")
+        assert _plan(client, HAND)["action"] == "blocked"
+        assert "no longer the one" in _plan(client, HAND)["reason"]
+        assert _plan(client, SLUG)["action"] == "update"
+
+
+def _adopted_world(client: TestClient) -> None:
+    """HAND adopted from the account as HAND_CONFIG, then switched on to write and to run on a timer."""
+    _adopt_hand_made(client)
+    _items(_item(), _adopted_item(enabled=True, auto_apply=True))
+
+
+def _write_to_hand(router: respx.Router) -> respx.Route:
+    def write(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(HAND, sent, version=4))
+
+    return router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=write)
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_writes_an_adopted_preset_only_while_its_other_keys_are_as_they_were_reviewed(client):
+    from vibonomics import presets as engine
+
+    _adopted_world(client)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        post = _write_to_hand(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 1  # nothing changed since the owner looked
+    assert _state()["last"][HAND]["status"] == "applied"
+
+    # someone adds a tool in the OpenRouter UI: the keys the owner looked at are not the keys that are there
+    changed = {**HAND_CONFIG, "tools": [{"type": "openrouter:web_search"}, {"type": "openrouter:datetime"}]}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, changed, version=5)
+        post = _write_to_hand(router)
+        await engine.sync(HAND, "schedule")
+        await engine.sync(HAND, "startup")
+        assert post.call_count == 0
+    last = _state()["last"][HAND]
+    assert last["status"] == "blocked" and "since you reviewed" in last["message"] and last["trigger"] == "startup"
+    assert _slug_state(client, HAND)["last_status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_a_manual_apply_of_an_adopted_preset_accepts_the_keys_it_showed_and_lets_the_timer_go_on(client):
+    from vibonomics import presets as engine
+
+    _adopted_world(client)
+    changed = {**HAND_CONFIG, "reasoning": {"enabled": False}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, changed, version=5)
+        post = _write_to_hand(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 0  # blocked, until the owner has seen the new keys
+        plan = _plan(client, HAND)
+        assert plan["passthrough"]["reasoning"] == {"enabled": False}  # and sees them here
+        assert _apply(client, plan, HAND).status_code == 200
+        assert post.call_count == 1
+    assert _state()["reviewed"][HAND] == passthrough_digest(changed)
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, {**changed, "model": "x/old"}, version=6)
+        post = _write_to_hand(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 1  # reviewed now, so the timer writes again
+
+
+def test_a_manual_apply_that_finds_nothing_to_write_still_counts_as_reviewing_the_keys(client):
+    _adopted_world(client)
+    changed = {**HAND_CONFIG, "reasoning": {"enabled": False}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, changed, version=5)
+        wanted = _plan(client, HAND)["config"]
+    with respx.mock(assert_all_called=False) as router:  # the preset already holds what the plan would write
+        _remote(router, HAND, wanted, version=6)
+        post = _write_to_hand(router)
+        again = _plan(client, HAND)
+        assert again["action"] == "unchanged"
+        assert _apply(client, again, HAND).json()["applied"] is False
+        assert post.call_count == 0
+    assert _state()["reviewed"][HAND] == passthrough_digest(wanted) != passthrough_digest(HAND_CONFIG)
+
+
+def test_an_ordinary_preset_is_not_held_back_by_the_review(client):
+    # SLUG was created by the app, so the owner never reviewed anything of the keys it carries
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "tools": [1]}, version=2)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert _apply(client, plan).status_code == 200
+        assert post.call_count == 1
+    assert "reviewed" not in _state()
+
+
+def test_taking_an_adopted_preset_out_of_the_list_ends_the_adoption_and_leaves_the_rest_alone(client):
+    _own_both()
+    state = _state()
+    state["last"] = {HAND: {"at": "2026-11-01T00:00:00+00:00"}, SLUG: {"at": "2026-11-01T00:00:00+00:00"}}
+    state["pins"] = {HAND: ["a"], SLUG: ["b"]}
+    _set_state(state)
+    _items(_item(), _adopted_item())
+    current = client.get("/api/settings").json()["settings"]
+
+    kept = [i for i in _saved_items(client) if i["slug"] != HAND]
+    assert client.put("/api/settings", json={"settings": _with_items(current, kept)}).status_code == 200
+
+    state = _state()
+    assert state["owned"] == [SLUG] and set(state["owners"]) == {SLUG}
+    assert HAND not in state["reviewed"] and set(state["last"]) == {SLUG} and state["pins"] == {SLUG: ["b"]}
+    # and it can be adopted again
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        assert _adopt(client, _inspect(client).json()["digest"]).status_code == 200
+
+
+def test_taking_a_preset_the_app_made_out_of_the_list_does_not_release_it(client):
+    _own_both()
+    _items(_item(), _adopted_item())
+    current = client.get("/api/settings").json()["settings"]
+
+    kept = [i for i in _saved_items(client) if i["slug"] != SLUG]
+    assert client.put("/api/settings", json={"settings": _with_items(current, kept)}).status_code == 200
+
+    assert _state()["owned"] == [SLUG, HAND]  # it still exists on the account, and is still the app's
+
+
+def _with_items(current: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {**current, "presets": {**current["presets"], "items": items}}
+
+
+def test_keeping_an_adopted_preset_in_the_list_keeps_the_adoption(client):
+    _adopt_hand_made(client)
+    current = client.get("/api/settings").json()["settings"]
+    assert client.put("/api/settings", json={"settings": current}).status_code == 200
+    assert _state()["owned"] == [HAND] and _state()["reviewed"][HAND]
