@@ -16,10 +16,10 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import events, presets
+from .. import events, presets, settings_store
 from ..http import FetchError
 from ..presets import Applied, Candidate, Plan
-from ..settings_store import PresetSettings
+from ..settings_store import GuardrailKey, PresetSettings
 
 router = APIRouter(prefix="/api/presets", tags=["presets"])
 
@@ -90,6 +90,40 @@ class PresetExcludedOut(BaseModel):
     providers: list[str] = Field(description="Providers whose endpoints a blocklist kept from being chosen")
 
 
+class PresetGuardrailsOut(BaseModel):
+    set: dict[str, Any] = Field(
+        description="The guardrails this plan writes, by key, with their values: `temperature`, `max_tokens`, "
+        "`repetition_penalty`, `frequency_penalty`, `presence_penalty`, `top_p`, `quantizations`, `ignore`, "
+        "`require_parameters` and `system_prompt`. A key that is not here is not managed, and the live value stays."
+    )
+    cleared: list[GuardrailKey] = Field(description="The guardrails this plan takes off the preset")
+
+
+class PresetSystemPromptOut(BaseModel):
+    live: str | None = Field(
+        description="The system prompt on the live preset, in full up to 20,000 characters; null when it has none"
+    )
+    planned: str | None = Field(
+        description="The system prompt the write carries, in full up to 20,000 characters; null sends none"
+    )
+    source: Literal["managed", "cleared", "kept", "none"] = Field(
+        description="`managed`: the text set under guardrails. `cleared`: the owner removes it. `kept`: the live "
+        "prompt, sent back as it is. `none`: there is none and none is set."
+    )
+    changed: bool = Field(description="Whether the write changes the system prompt")
+
+
+class PresetCapabilityOut(BaseModel):
+    model_id: str
+    provider: str | None = Field(
+        description="The provider tag the model is pinned to; null for a model pinned to none, which OpenRouter routes"
+    )
+    supports: dict[str, Literal["yes", "no", "unknown"]] = Field(
+        description="For each numeric parameter the owner sets, whether that endpoint takes it. `unknown` when the "
+        "listing did not say, and for an unpinned model when its endpoints disagree"
+    )
+
+
 class PresetCheckOut(BaseModel):
     level: Literal["ok", "warning", "error"] = Field(description="An error refuses the write; a warning does not")
     check: str = Field(
@@ -147,6 +181,18 @@ class PresetPlanOut(BaseModel):
         description="The keys Vibonomics decides: `provider.*` ones are inside `provider`. The guardrails the owner "
         "sets or removes for this preset follow the always-managed ones."
     )
+    guardrails: PresetGuardrailsOut = Field(description="What this plan writes for the guardrail keys")
+    system_prompt: PresetSystemPromptOut = Field(
+        description="The system prompt on the live preset and the one this plan sends. A write with no system "
+        "message would null the prompt, so the live one is always sent back unless the owner manages it"
+    )
+    capabilities: list[PresetCapabilityOut] = Field(
+        description="Whether each pinned endpoint takes the numeric guardrails the owner sets; empty when none is set"
+    )
+    system_backup_at: datetime | None = Field(
+        description="When the system prompt this preset had was last saved before a write replaced or removed it; "
+        "null when none was"
+    )
     validation: list[PresetCheckOut] = Field(
         description="What the live OpenRouter listing says about what this plan would write; empty when nothing was "
         "checked (a blocked plan)"
@@ -200,6 +246,9 @@ class PresetInspectOut(BaseModel):
     workspace: str | None = Field(description="The workspace OpenRouter names for the preset; null when it names none")
     config: dict[str, Any] = Field(description="The live config, as OpenRouter holds it")
     has_system_prompt: bool
+    system_prompt: str | None = Field(
+        description="The live system prompt, in full up to 20,000 characters; null when the preset has none"
+    )
     models: list[str] = Field(description="The models the config names, the lead first")
     providers: list[str] = Field(description="The providers the config restricts it to (`provider.only`)")
     versions: list[PresetVersionOut]
@@ -235,6 +284,11 @@ def _candidate(c: Candidate) -> PresetCandidateOut:
         value=round(c.value, 1),
         discount=c.discount,
     )
+
+
+def _capped(text: str | None) -> str | None:
+    """A system prompt for the screen: whole up to what the owner may set, cut there when a live one is longer."""
+    return text[: settings_store.GUARDRAIL_PROMPT_MAX] if text else None
 
 
 def _when(raw: object) -> datetime | None:
@@ -300,6 +354,15 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         own_tests_preferred=plan.own_tests_preferred,
         passthrough=plan.passthrough,
         managed_keys=presets.managed_keys(cfg.guardrails),
+        guardrails=PresetGuardrailsOut(set=cfg.guardrails.set_values(), cleared=list(cfg.guardrails.clear)),
+        system_prompt=PresetSystemPromptOut(
+            live=_capped(plan.live_prompt),
+            planned=_capped(plan.prompt),
+            source=plan.prompt_source,  # type: ignore[arg-type]
+            changed=presets.prompts_differ(plan.live_prompt, plan.prompt),
+        ),
+        capabilities=[PresetCapabilityOut(**row) for row in presets.capability_rows(plan)],
+        system_backup_at=_when(((plan.state.get("system_backups") or {}).get(plan.slug) or {}).get("at")),
         validation=[
             PresetCheckOut(level=c.level, check=c.check, model=c.model, provider=c.provider, message=c.message)
             for c in (plan.validation.items if plan.validation else [])
@@ -374,6 +437,7 @@ async def preset_inspect(body: PresetInspectIn) -> PresetInspectOut:
         workspace=remote.workspace,
         config=remote.config,
         has_system_prompt=bool(remote.system_prompt),
+        system_prompt=_capped(remote.system_prompt),
         models=presets.current_models(remote.config),
         providers=[p for p in provider.get("only") or [] if isinstance(p, str)],
         versions=[PresetVersionOut(**v) for v in remote.versions],

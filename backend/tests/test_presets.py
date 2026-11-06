@@ -4214,3 +4214,194 @@ def test_a_preset_with_no_free_model_has_no_free_warning(client):
         _remote(router, SLUG, None)
         plan = _plan(client)
     assert not any("daily" in w for w in plan["warnings"])
+
+
+# ---- what the plan says about the guardrails ------------------------------------------------------------------------
+
+
+def test_a_plan_says_which_guardrails_it_writes_and_which_it_takes_off(client):
+    _own_as(KEY)
+    _settings(guardrails={"temperature": 0.7, "quantizations": ["bf16", "fp8"], "clear": ["top_p", "system_prompt"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "top_p": 0.9}, version=2)
+        plan = _plan(client)
+    assert plan["guardrails"] == {
+        "set": {"temperature": 0.7, "quantizations": ["bf16", "fp8"]},
+        "cleared": ["top_p", "system_prompt"],
+    }
+
+
+def test_a_plan_for_a_preset_with_no_guardrails_has_none_to_show(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["guardrails"] == {"set": {}, "cleared": []}
+    assert plan["capabilities"] == [] and plan["system_backup_at"] is None
+    assert plan["system_prompt"] == {"live": None, "planned": None, "source": "none", "changed": False}
+
+
+@pytest.mark.parametrize(
+    ("guardrails", "live", "planned", "source", "changed"),
+    [
+        ({}, "Be brief.", "Be brief.", "kept", False),
+        ({"system_prompt": "Be terse."}, "Be brief.", "Be terse.", "managed", True),
+        ({"system_prompt": "Be brief."}, "Be brief.", "Be brief.", "managed", False),
+        ({"system_prompt": "New."}, None, "New.", "managed", True),
+        ({"clear": ["system_prompt"]}, "Be brief.", None, "cleared", True),
+        ({"clear": ["system_prompt"]}, None, None, "cleared", False),
+        ({}, None, None, "none", False),
+    ],
+)
+def test_the_plan_shows_the_live_prompt_the_planned_one_where_it_comes_from_and_whether_it_changes(
+    client, guardrails, live, planned, source, changed
+):
+    _own_as(KEY)
+    _settings(guardrails=guardrails)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, LIVE_DESIRED, version=2, system_prompt=live)
+        plan = _plan(client)
+    assert plan["system_prompt"] == {"live": live, "planned": planned, "source": source, "changed": changed}
+    assert (plan["action"] == "update") is changed  # the prompt is the only thing that could differ here
+    assert any(c["path"] == "system_prompt" for c in plan["changes"]) is changed
+    sent = [
+        m["content"] for m in (plan["request"]["body"]["messages"] if plan["request"] else []) if m["role"] == "system"
+    ]
+    assert sent == ([planned] if planned else [])
+
+
+def test_a_plan_for_a_preset_that_does_not_exist_yet_shows_the_managed_prompt_it_will_create_it_with(client):
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["system_prompt"] == {
+        "live": None,
+        "planned": "Answer in one line.",
+        "source": "managed",
+        "changed": True,
+    }
+
+
+def test_a_long_live_prompt_is_shown_up_to_twenty_thousand_characters_and_still_sent_whole(client):
+    _own_as(KEY)
+    long = "y" * 25_000
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2, system_prompt=long)
+        plan = _plan(client)
+    assert plan["system_prompt"]["live"] == long[:20_000] and plan["system_prompt"]["planned"] == long[:20_000]
+    assert plan["request"]["body"]["messages"][0]["content"] == long  # nothing is lost from what is sent back
+
+
+def test_a_blocked_plan_still_shows_the_prompt_the_preset_holds_and_the_one_that_is_set(client):
+    _own_as(KEY)
+    _settings(min_score=99, guardrails={"system_prompt": "Mine."})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2, system_prompt="Theirs.")
+        plan = _plan(client)
+    assert plan["action"] == "blocked"
+    assert (plan["system_prompt"]["live"], plan["system_prompt"]["planned"]) == ("Theirs.", "Mine.")
+    _settings(min_score=99, guardrails={"system_prompt": "Mine."})
+    with respx.mock(assert_all_called=False) as router:  # and one that is blocked before the preset is even read
+        router.get(f"{BASE}/presets/{SLUG}").mock(return_value=httpx.Response(401, json={"error": "bad key"}))
+        early = _plan(client)
+    assert early["action"] == "blocked"
+    assert (early["system_prompt"]["live"], early["system_prompt"]["planned"]) == (None, "Mine.")
+
+
+def test_the_plan_names_when_a_system_prompt_was_last_saved_before_a_write_took_it_away(client):
+    _own_as(KEY)
+    _settings(guardrails={"clear": ["system_prompt"]})
+    with respx.mock(assert_all_called=False) as router:
+        _PromptAccount(router, LIVE_DESIRED, "Be brief.", version=2)
+        assert _plan(client)["system_backup_at"] is None
+        assert _apply(client, _plan(client)).json()["applied"] is True
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, LIVE_DESIRED, version=3)
+        plan = _plan(client)
+    from datetime import datetime
+
+    shown = datetime.fromisoformat(plan["system_backup_at"].replace("Z", "+00:00"))
+    assert shown == datetime.fromisoformat(_state()["system_backups"][SLUG]["at"])
+
+
+def test_capabilities_say_whether_each_pinned_endpoint_takes_each_parameter_the_owner_sets(client):
+    _stored(
+        "acme/best",
+        _endpoint("full/x", 0.01, ["temperature", "top_p"]),
+        _endpoint("part/x", 0.02, ["temperature"]),
+        _endpoint("silent/x", 0.03, None),
+    )
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert _tags_of(plan) == ["full/x", "silent/x"]
+    assert plan["capabilities"] == [
+        {"model_id": "acme/best", "provider": "full/x", "supports": {"temperature": "yes", "top_p": "yes"}},
+        {"model_id": "acme/best", "provider": "silent/x", "supports": {"temperature": "unknown", "top_p": "unknown"}},
+    ]
+
+
+def test_capabilities_after_a_fallback_show_the_pinned_endpoints_that_lack_the_parameter(client):
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]))
+    _settings(guardrails={"top_p": 0.9, "max_tokens": 1_000})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["capabilities"] == [
+        {"model_id": "acme/best", "provider": "a/x", "supports": {"max_tokens": "no", "top_p": "no"}}
+    ]
+
+
+def test_a_model_pinned_to_nothing_has_a_row_with_no_provider_and_a_verdict_only_where_its_endpoints_agree(client):
+    _stored(
+        "acme/best",
+        _endpoint("a/x", 0.01, ["temperature"], cap=100),
+        _endpoint("b/x", 0.02, ["temperature", "top_p"], cap=100),
+    )
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9, "ignore": ["a", "b"]})  # every endpoint is ignored
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    # acme/best is left out of the ranking, so the lead is a model with no provider data at all
+    assert plan["pick"]["model_id"] == "acme/steady" and plan["providers"] == []
+    assert plan["capabilities"] == [
+        {"model_id": "acme/steady", "provider": None, "supports": {"temperature": "unknown", "top_p": "unknown"}}
+    ]
+    _settings(guardrails={"temperature": 0.5, "top_p": 0.9, "require_parameters": False})
+    _stored("acme/best", _endpoint("a/x", 0.01, ["tools"]), _endpoint("b/x", 0.02, ["tools"]))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert [row["provider"] for row in plan["capabilities"]] == ["a/x", "b/x"]
+
+
+def test_the_endpoints_of_an_unpinned_model_that_agree_give_a_yes_or_a_no():
+    from vibonomics.presets import Plan, capability_rows
+
+    def rows(*endpoints: dict[str, Any]) -> dict[str, str]:
+        pick = Candidate("m", "m", 1, 1, 1, None, None, list(endpoints))
+        plan = Plan("s", "update", "", PresetSettings(guardrails={"temperature": 0.5, "top_p": 0.5}), picks=[pick])
+        (row,) = capability_rows(plan)
+        assert row["provider"] is None
+        return row["supports"]
+
+    assert rows(_endpoint("a/x", 1, ["temperature"]), _endpoint("b/x", 1, ["temperature", "top_p"])) == {
+        "temperature": "yes",
+        "top_p": "unknown",  # one takes it and one does not
+    }
+    assert rows(_endpoint("a/x", 1, ["tools"]), _endpoint("b/x", 1, ["seed"])) == {"temperature": "no", "top_p": "no"}
+    assert rows() == {"temperature": "unknown", "top_p": "unknown"}
+
+
+def test_inspect_gives_the_live_system_prompt_in_full_and_nothing_when_there_is_none(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        assert _inspect(client).json()["system_prompt"] is None
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be brief.\nAnswer in one line.")
+        body = _inspect(client).json()
+    assert body["system_prompt"] == "Be brief.\nAnswer in one line." and body["has_system_prompt"] is True
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="z" * 25_000)
+        assert len(_inspect(client).json()["system_prompt"]) == 20_000

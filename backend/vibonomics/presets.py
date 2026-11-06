@@ -569,6 +569,11 @@ def _norm_prompt(value: str | None) -> str | None:
     return text or None
 
 
+def prompts_differ(a: str | None, b: str | None) -> bool:
+    """Whether two system prompts are not the same text, with nothing and an empty one the same."""
+    return _norm_prompt(a) != _norm_prompt(b)
+
+
 def prompt_in_force(guardrails: PresetGuardrails, live: str | None) -> tuple[str | None, str]:
     """The system prompt a write carries, and whose it is.
 
@@ -1200,6 +1205,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         excluded=inputs.excluded,
         own_tests_preferred=own_tests_preferred(inputs.settings, cfg),
     )
+    # Until the live preset is read, a managed prompt is what the plan would send; the live one is looked at after.
+    plan.prompt, plan.prompt_source = prompt_in_force(cfg.guardrails, None)
     blocked_providers = blocklists(inputs.settings, cfg)[1]
     if cfg.adopted and not is_adopted(inputs.state, cfg.slug):
         # `adopted` in the settings is only a claim. A preset made by hand is written only after the owner adopted it
@@ -1555,6 +1562,42 @@ def _pin_for(
         )
     notes = [f"{name} will be ignored for {c.model_id}: {why}." for name, why in unmet]
     return everyone[:limit], notes, None
+
+
+def _supports(ep: dict[str, Any] | None, param: str) -> str:
+    """Whether one endpoint takes ``param``: yes, no, or unknown when it did not say (or is not known at all)."""
+    params = ep.get("params") if isinstance(ep, dict) else None
+    if not isinstance(params, list):
+        return "unknown"
+    return "yes" if param in params else "no"
+
+
+def capability_rows(plan: Plan) -> list[dict[str, Any]]:
+    """For each model of the plan, whether the endpoint it is pinned to takes the numeric parameters the owner sets.
+
+    A model pinned to several endpoints has a row for each. One that is pinned to none (no provider data, or the preset
+    leaves OpenRouter to route) has a row with no provider, which says ``yes`` or ``no`` only when every endpoint it is
+    known to have agrees, and ``unknown`` when they disagree or none says.
+    """
+    asked = [k for k in NEEDS_SUPPORT if k in plan.settings.guardrails.set_values()]
+    if not asked:
+        return []
+    rows: list[dict[str, Any]] = []
+    for c in plan.picks:
+        known = {ep.get("tag"): ep for ep in c.endpoints if isinstance(ep, dict)}
+        tags = [p["tag"] for p in plan.providers if c.model_id in (p.get("models") or [])]
+        if tags:
+            rows += [
+                {"model_id": c.model_id, "provider": tag, "supports": {k: _supports(known.get(tag), k) for k in asked}}
+                for tag in tags
+            ]
+            continue
+        supports = {}
+        for k in asked:
+            seen = {_supports(ep, k) for ep in known.values()}
+            supports[k] = seen.pop() if len(seen) == 1 else "unknown"
+        rows.append({"model_id": c.model_id, "provider": None, "supports": supports})
+    return rows
 
 
 def _model_change(before: list[str], picks: list[Candidate], candidates: list[Candidate]) -> str:
