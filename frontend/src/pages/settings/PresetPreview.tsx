@@ -34,7 +34,9 @@ export function PresetPreview({
           <Stack gap={0}>
             <Title order={4}>Preview</Title>
             <Text size="sm" c="dimmed">
-              A dry run with the saved settings. It reads your preset from OpenRouter and writes nothing.
+              What the next update would write to OpenRouter, worked out from your saved settings. Previewing changes
+              nothing; the update is sent when you press Apply, when you Save with writing switched on, or on the
+              schedule if you turned that on.
             </Text>
           </Stack>
           <Group gap="xs">

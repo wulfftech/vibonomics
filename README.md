@@ -414,8 +414,10 @@ second row of tabs under Providers, where settings that belong to one provider l
   it back; Vibonomics never touches it again until you adopt it again. A scheduled run on an adopted preset
   writes only while those other keys are still what you reviewed. If someone edits them on OpenRouter, the run
   is recorded as blocked and writes nothing, until you preview the preset and apply it yourself.
-- **Dry run first.** **Preview** reads the preset from OpenRouter, ranks the models and shows the live
-  version number, the version history, what changes and the providers. It previews unsaved changes as they
+- **Preview first.** **Preview** shows what the next update would write: it reads the preset from OpenRouter,
+  ranks the models and shows the live version number, the version history, what changes and the providers.
+  Previewing writes nothing; the changes are sent by **Apply**, by Save with writing switched on, or by the
+  schedule. It previews unsaved changes as they
   stand, so you can try settings before keeping them; such a preview is marked, and cannot be applied. **View API call** opens the exact
   request it would send. **Apply** sends that plan, and only that plan: if anything moved since you looked,
   it refuses and asks you to preview again. After a write it reads the preset back and names any key
