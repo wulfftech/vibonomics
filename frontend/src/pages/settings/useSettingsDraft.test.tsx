@@ -1,12 +1,14 @@
 import { MantineProvider } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/client';
 import { keys } from '../../api/keys';
 import type { SettingsIn, SettingsOut } from '../../api/types';
+import { SettingsPage } from '../SettingsPage';
 import { GeneralSection } from './GeneralSection';
 import { RefreshSection } from './RefreshSection';
 import { ScoringSection } from './ScoringSection';
@@ -85,7 +87,13 @@ beforeEach(() => {
   mocks.put.mockReset();
   vi.mocked(notifications.show).mockReset();
   mocks.get.mockImplementation((path) =>
-    Promise.resolve(path === '/api/settings' ? server : { version: '0.0.0', url_base: '' }),
+    Promise.resolve(
+      path === '/api/settings'
+        ? server
+        : path === '/api/auth/status'
+          ? { enabled: false, authenticated: false, open_read: false }
+          : { version: '0.0.0', url_base: '' },
+    ),
   );
   mocks.put.mockImplementation((_path, { body }) => {
     server = { ...server, settings: body.settings };
@@ -171,5 +179,32 @@ describe('the Scoring section', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Discard changes' }));
     expect(screen.getByLabelText('Profile name')).toHaveValue('Agentic');
+  });
+});
+
+describe('the Settings page', () => {
+  function mountPage() {
+    const router = createMemoryRouter([{ path: '/settings/:section', element: <SettingsPage /> }], {
+      initialEntries: ['/settings/general'],
+    });
+    mount(<RouterProvider router={router} />);
+    return router;
+  }
+
+  it('asks before a section tab throws away an edit, and not before it moves on with nothing to lose', async () => {
+    const user = userEvent.setup();
+    const router = mountPage();
+    await user.type(await screen.findByLabelText('Instance name'), '!');
+
+    await user.click(screen.getByRole('radio', { name: 'Refresh' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Discard unsaved changes?' });
+    expect(router.state.location.pathname).toBe('/settings/general');
+    await user.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
+    expect(screen.getByLabelText('Instance name')).toHaveValue('Vibonomics!');
+
+    await user.click(screen.getByRole('button', { name: 'Discard changes' }));
+    await user.click(screen.getByRole('radio', { name: 'Refresh' }));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/settings/refresh'));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

@@ -35,17 +35,16 @@ export function useLogout() {
     mutationFn: () => api.post('/api/auth/logout'),
     onSuccess: (status) => {
       client.setQueryData(keys.auth, status);
-      // What a visitor may read differs (key hints, the ingest token), so nothing fetched as the user may stay.
-      // The pages that are still mounted refetch as the visitor. The preset list is the exception: it is a POST a
-      // visitor cannot make, and the Settings page that asks for it is replaced by the login card on this very
-      // render, so refetching it only shows "That needs the password". Removing a query that is still observed
-      // would leave its page deaf to later invalidations, which is why only this one is dropped while mounted.
-      const stale = (query: Query) => query.queryKey[0] !== 'auth';
+      // What a visitor may read differs (key hints, the ingest token), so nothing fetched as the user may stay. Pages
+      // that are still mounted refetch as the visitor. Removing a query that is still observed would leave its page
+      // deaf to the event stream's invalidations, so only the preset list is dropped while mounted: it is a POST a
+      // visitor cannot make, and the panel that asks for it is replaced by the login card on this very render.
+      const notAuth = (query: Query) => query.queryKey[0] !== 'auth';
       client.removeQueries({
         predicate: (query) =>
-          stale(query) && (query.getObserversCount() === 0 || partialMatchKey(query.queryKey, keys.presetList)),
+          notAuth(query) && (query.getObserversCount() === 0 || partialMatchKey(query.queryKey, keys.presetList)),
       });
-      void client.invalidateQueries({ predicate: stale });
+      void client.invalidateQueries({ predicate: notAuth });
     },
   });
 }
