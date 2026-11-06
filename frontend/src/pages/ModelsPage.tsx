@@ -24,12 +24,11 @@ import {
   defaultDir,
   effectiveSort,
   enrichModels,
-  filterModels,
-  foldOpenCodeOffers,
   hasOpenCodeKey,
   MODEL_FILTERS_KEY,
   sanitizeFilters,
   sortModels,
+  visibleModels,
   type ModelFilters,
   type SortKey,
 } from '../lib/modelTable';
@@ -114,9 +113,11 @@ export function ModelsPage() {
   const opencodeKey = hasOpenCodeKey(providers.data);
   const { chips, nonBatchOnly, providers: providerFilter, minContext, groupBy } = filters;
   const { hideRestricted } = applicableFilters(filters, opencodeKey);
-  const filtered = useMemo(
+  // Filtered, with the Go copy of a model folded into its Console row while both providers are in view, and
+  // ranked among the rows left: the count below and the value index must not include rows the table hides.
+  const shown = useMemo(
     () =>
-      filterModels(enriched, {
+      visibleModels(enriched, {
         ...DEFAULT_FILTERS,
         search,
         chips,
@@ -127,14 +128,12 @@ export function ModelsPage() {
       }),
     [enriched, search, chips, nonBatchOnly, hideRestricted, providerFilter, minContext],
   );
-  // Fold the Go copy of a model into its Console row while both providers are in view.
-  const folded = useMemo(() => foldOpenCodeOffers(filtered), [filtered]);
   const bestValue = chips.includes('best');
   const sort = useMemo(
     () => effectiveSort({ ...DEFAULT_FILTERS, chips: bestValue ? ['best'] : [], sort: filters.sort }),
     [bestValue, filters.sort],
   );
-  const sorted = useMemo(() => sortModels(folded, sort), [folded, sort]);
+  const sorted = useMemo(() => sortModels(shown, sort), [shown, sort]);
   const displayRows = useMemo(() => buildDisplayRows(sorted, groupBy, collapsed), [sorted, groupBy, collapsed]);
 
   const providerOptions = useMemo(() => {
@@ -150,7 +149,7 @@ export function ModelsPage() {
     return [...seen].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label));
   }, [providers.data, data]);
 
-  const testableVisible = useMemo(() => folded.filter((m) => m.row.testable).map((m) => m.row.id), [folded]);
+  const testableVisible = useMemo(() => shown.filter((m) => m.row.testable).map((m) => m.row.id), [shown]);
   const selectedVisible = testableVisible.filter((id) => selected.has(id)).length;
 
   const onSort = useCallback(
@@ -276,7 +275,7 @@ export function ModelsPage() {
             }
           />
           <Text size="sm" c="dimmed">
-            Showing {filtered.length.toLocaleString()} of {data.models.length.toLocaleString()} models · selected{' '}
+            Showing {shown.length.toLocaleString()} of {data.models.length.toLocaleString()} models · selected{' '}
             {selected.size}
           </Text>
           <Text size="xs" c="dimmed">

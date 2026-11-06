@@ -11,6 +11,7 @@ import {
   hasOpenCodeKey,
   sanitizeFilters,
   sortModels,
+  visibleModels,
   type ModelFilters,
 } from './modelTable';
 
@@ -96,8 +97,28 @@ describe('enrichModels', () => {
   it('prefers measured cost, then reported, then the estimate', () => {
     expect(enriched[0].taskCostSource).toBe('estimated');
     expect(enriched[0].taskCost).toBeCloseTo(0.24);
-    expect(enriched[1].taskCostSource).toBe('measured');
-    expect(enriched[1].taskCost).toBeCloseTo(0.01);
+    const paid = enrichModels(
+      [
+        row({ id: 11, name: 'Measured', test: { ...rows[1].test!, cost_per_task: 0.5 }, reported_cost_per_task: 0.7 }),
+        row({ id: 12, name: 'Reported', reported_cost_per_task: 0.7 }),
+      ],
+      profile,
+    );
+    expect(paid[0].taskCostSource).toBe('measured');
+    expect(paid[0].taskCost).toBeCloseTo(0.5);
+    expect(paid[1].taskCostSource).toBe('reported');
+    expect(paid[1].taskCost).toBeCloseTo(0.7);
+  });
+
+  it('shows a free model as free per task, whatever a benchmark or a test says it cost', () => {
+    // Bravo is free and has a measured $0.01 and a reported $0.02 per task: neither is what you pay.
+    expect(enriched[1].taskCost).toBe(0);
+    expect(enriched[1].taskCostSource).toBe('estimated');
+    const sorted = sortModels(
+      enrichModels([...rows, row({ id: 13, name: 'Echo', reported_cost_per_task: 0.0001 })], profile),
+      { key: 'taskCost', dir: 'asc' },
+    );
+    expect(sorted[0].row.name).toBe('Bravo');
   });
 
   it('keeps the undiscounted blended price for display', () => {
@@ -197,6 +218,58 @@ describe('filterModels', () => {
         ['Alpha', 'Alpha (batch)'],
       );
     });
+  });
+});
+
+describe('visibleModels', () => {
+  const alpha = row({ id: 1, name: 'Alpha', scores: { ...rows[0].scores, composite: 60 } });
+  const beta = row({
+    id: 2,
+    name: 'Beta',
+    price: { input: 6, output: 30, cache_read: null, cache_write: null },
+    scores: { ...rows[0].scores, composite: 60 },
+  });
+  // The batch copy of Alpha costs a tenth as much, so on its own it would take the top value.
+  const batch = row({
+    id: 3,
+    name: 'Alpha (batch)',
+    model_id: 'acme/alpha:batch',
+    price: { input: 0.3, output: 1.5, cache_read: null, cache_write: null },
+    scores: { ...rows[0].scores, composite: 60 },
+  });
+
+  it('ranks only the rows the table shows, so a hidden batch copy takes no rank', () => {
+    const enriched = enrichModels([alpha, beta, batch], profile);
+    // Over all three rows Alpha is second of three: index 28.5, tier "Rest".
+    expect(enriched[0].valueIndex).toBeLessThan(50);
+    const shown = visibleModels(enriched, DEFAULT_FILTERS);
+    expect(shown.map((model) => model.row.name)).toEqual(['Alpha', 'Beta']);
+    expect(shown[0].valueIndex).toBe(100);
+    expect(shown[0].valueTier).toBe('Top 50%');
+    expect(shown[1].valueIndex).toBe(0);
+    expect(shown[1].valueTier).toBe('Rest');
+  });
+
+  it('ranks against the batch copies again once they are shown', () => {
+    const shown = visibleModels(enrichModels([alpha, beta, batch], profile), filters({ nonBatchOnly: false }));
+    expect(shown.find((model) => model.row.name === 'Alpha (batch)')?.valueIndex).toBe(100);
+    expect(shown.find((model) => model.row.name === 'Alpha')?.valueIndex).toBeLessThan(100);
+  });
+
+  it('ranks after folding the OpenCode Go copy of a model into its Console row', () => {
+    const consoleRow = row({ id: 20, name: 'Kimi K3', provider_type: 'opencode', provider_id: 2 });
+    // The Go copy is the same model at a tenth of the price; the fold hides it, so it must not take the top.
+    const goRow = row({
+      id: 21,
+      name: 'Kimi K3',
+      provider_type: 'opencode-go',
+      provider_id: 4,
+      price: { input: 0.3, output: 1.5, cache_read: null, cache_write: null },
+    });
+    const shown = visibleModels(enrichModels([consoleRow, goRow, beta], profile), DEFAULT_FILTERS);
+    expect(shown.map((model) => model.row.id)).toEqual([20, 2]);
+    expect(shown[0].valueIndex).toBe(100);
+    expect(shown[0].alsoOnGo).toBe(true);
   });
 });
 
