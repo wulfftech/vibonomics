@@ -15,7 +15,34 @@ import { blendedColor, profileFormula } from '../../lib/pricing';
 import { providerColor } from '../../lib/providerColors';
 import { tone } from '../../lib/tone';
 
-export function ScoreNumber({ value, bold = false }: { value: number | null | undefined; bold?: boolean }) {
+export const OWN_TEST_NOTE = 'From your own tests, not third-party benchmarks';
+/** The composite still blends in intelligence, so its mark says which parts are the model's own. */
+export const OWN_TEST_COMPOSITE_NOTE = 'Coding and agentic are from your own tests, not third-party benchmarks';
+
+/**
+ * Marks a score that is Vibonomics's own test result rather than a blend with third-party benchmarks (Settings →
+ * Scoring → Prefer my own test scores). An icon, not a column or a coloured number: the figure keeps its score colour.
+ */
+export function OwnTestMark({ label = OWN_TEST_NOTE }: { label?: string }) {
+  return (
+    <Tooltip label={label} withArrow>
+      <span role="img" aria-label={label} style={{ display: 'inline-flex', cursor: 'help', color: tone('grape') }}>
+        <FlaskConical size={12} aria-hidden />
+      </span>
+    </Tooltip>
+  );
+}
+
+export function ScoreNumber({
+  value,
+  bold = false,
+  ownTest = false,
+}: {
+  value: number | null | undefined;
+  bold?: boolean;
+  /** This score is the model's own test result, see `OwnTestMark`. */
+  ownTest?: boolean;
+}) {
   if (value === null || value === undefined) {
     return (
       <Text size="sm" c="dimmed">
@@ -23,10 +50,18 @@ export function ScoreNumber({ value, bold = false }: { value: number | null | un
       </Text>
     );
   }
-  return (
+  const number = (
     <Text size="sm" fw={bold ? 700 : 500} style={{ color: tone(scoreColor(value)) }} span>
       {Math.round(value)}
     </Text>
+  );
+  return ownTest ? (
+    <Group gap={4} wrap="nowrap">
+      {number}
+      <OwnTestMark />
+    </Group>
+  ) : (
+    number
   );
 }
 
@@ -202,7 +237,7 @@ export function TaskCostCell({ model, profile }: { model: EnrichedModel; profile
 }
 
 export function CompositeCell({ row }: { row: ModelRow }) {
-  const { composite, source_count: sources, own_test: ownTest } = row.scores;
+  const { composite, source_count: sources, own_test: ownTest, own_test_preferred: preferred } = row.scores;
   if (composite === null || composite === undefined) {
     return (
       <Text size="sm" c="dimmed">
@@ -220,6 +255,7 @@ export function CompositeCell({ row }: { row: ModelRow }) {
           </Text>
         </Group>
       </Tooltip>
+      {preferred && <OwnTestMark label={OWN_TEST_COMPOSITE_NOTE} />}
       {ownTest !== null && ownTest !== undefined && (
         <Tooltip label="Average score in Vibonomics's own tests" withArrow>
           <Badge size="xs" color="grape" variant="light">
