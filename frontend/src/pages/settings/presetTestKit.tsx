@@ -1,7 +1,7 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render } from '@testing-library/react';
-import { vi } from 'vitest';
+import { vi, type Mock } from 'vitest';
 import {
   PRESET_DEFAULTS,
   type CatalogPreset,
@@ -15,7 +15,8 @@ import { OpenRouterSection } from './OpenRouterSection';
 
 /** Shared by the tests of the OpenRouter settings: fixtures, and a fetch that behaves like the server. */
 
-export const fetchMock = vi.fn();
+// Annotated because an exported inferred vitest type cannot be named from here.
+export const fetchMock: Mock = vi.fn();
 
 // jsdom has no scrollIntoView, which a Select calls to show the option that is chosen when it opens.
 Element.prototype.scrollIntoView = () => undefined;

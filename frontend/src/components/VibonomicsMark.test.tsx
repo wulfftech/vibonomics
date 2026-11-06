@@ -28,6 +28,7 @@ describe('VibonomicsMark', () => {
     const mark = screen.getByRole('img', { name: 'Managed by Vibonomics' });
     expect(mark).toHaveAttribute('width', '20');
     await user.hover(mark);
-    expect(await screen.findByRole('tooltip')).toHaveTextContent('Managed by Vibonomics');
+    // The tooltip opens after a transition, which a loaded full run can push past the default one second.
+    expect(await screen.findByRole('tooltip', {}, { timeout: 5000 })).toHaveTextContent('Managed by Vibonomics');
   });
 });
