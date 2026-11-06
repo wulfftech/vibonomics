@@ -1589,6 +1589,11 @@ export interface components {
             /** @description What the blocklists removed from this run */
             excluded: components["schemas"]["PresetExcludedOut"];
             /**
+             * Own Tests Preferred
+             * @description Whether the ranking took each model's own test score over its computed one: the preset's own choice, or the global Scoring setting when it has none
+             */
+            own_tests_preferred: boolean;
+            /**
              * Passthrough
              * @description The keys Vibonomics does not manage and sends back as it found them, as raw JSON
              */
@@ -1772,6 +1777,11 @@ export interface components {
              * @description What `provider.sort` is when `route` is `sort`; price when not set
              */
             sort?: ("price" | "throughput" | "latency") | null;
+            /**
+             * Prefer Own Tests
+             * @description For this preset, prefer the model's own test scores over the computed ones. None follows the global Scoring setting.
+             */
+            prefer_own_tests?: boolean | null;
         };
         /** PresetSlugStateOut */
         PresetSlugStateOut: {

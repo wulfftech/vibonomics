@@ -4052,6 +4052,11 @@
             "$ref": "#/components/schemas/PresetExcludedOut",
             "description": "What the blocklists removed from this run"
           },
+          "own_tests_preferred": {
+            "type": "boolean",
+            "title": "Own Tests Preferred",
+            "description": "Whether the ranking took each model's own test score over its computed one: the preset's own choice, or the global Scoring setting when it has none"
+          },
           "passthrough": {
             "additionalProperties": true,
             "type": "object",
@@ -4098,6 +4103,7 @@
           "digest",
           "warnings",
           "excluded",
+          "own_tests_preferred",
           "passthrough",
           "managed_keys",
           "state"
@@ -4401,6 +4407,18 @@
             ],
             "title": "Sort",
             "description": "What `provider.sort` is when `route` is `sort`; price when not set"
+          },
+          "prefer_own_tests": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefer Own Tests",
+            "description": "For this preset, prefer the model's own test scores over the computed ones. None follows the global Scoring setting."
           }
         },
         "type": "object",
