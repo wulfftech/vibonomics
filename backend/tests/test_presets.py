@@ -39,6 +39,7 @@ from vibonomics.presets import (
 from vibonomics.pricing import Task
 from vibonomics.settings_store import (
     AppSettings,
+    PresetGuardrails,
     PresetSettings,
     PresetsSettings,
     load_settings,
@@ -3137,3 +3138,335 @@ def test_every_model_of_a_plan_with_several_models_is_checked_against_its_own_li
     ]
     assert plan["valid"] is False
     assert {c["model"] for c in plan["validation"]} == {"acme/best", "acme/steady"}
+
+
+# ---- guardrails: the keys the owner decides besides the models -----------------------------------------------------
+
+
+def _g(**fields: Any) -> PresetGuardrails:
+    return PresetGuardrails(**fields)
+
+
+# (value to set, the value the live preset has) for each guardrail that is a config key
+SAMPLES: dict[str, tuple[Any, Any]] = {
+    "temperature": (0.7, 0.3),
+    "max_tokens": (4_096, 1_024),
+    "repetition_penalty": (1.1, 1.3),
+    "frequency_penalty": (0.5, -0.5),
+    "presence_penalty": (0.2, 0.9),
+    "top_p": (0.8, 0.95),
+    "quantizations": (["fp8"], ["bf16"]),
+    "ignore": (["slow"], ["nobody"]),
+    "require_parameters": (True, False),
+}
+PROVIDER_KEYS = ("quantizations", "ignore", "require_parameters")
+
+
+def _at(config: dict[str, Any], key: str) -> Any:
+    return (config.get("provider") or {}).get(key) if key in PROVIDER_KEYS else config.get(key)
+
+
+def _holding(config: dict[str, Any], key: str, value: Any) -> dict[str, Any]:
+    """``config`` with ``key`` at ``value``, inside the provider block where OpenRouter keeps it."""
+    if key in PROVIDER_KEYS:
+        return {**config, "provider": {**config.get("provider", {}), key: value}}
+    return {**config, key: value}
+
+
+def test_every_set_guardrail_is_written_where_openrouter_keeps_it_and_the_token_cap_is_max_tokens():
+    guard = _g(**{key: new for key, (new, _old) in SAMPLES.items()})
+    config = build_config({"model": "old", "tools": [1]}, ["a/m"], ["x/fp8"], guardrails=guard)
+    assert config == {
+        "model": "a/m",
+        "tools": [1],
+        "temperature": 0.7,
+        "max_tokens": 4_096,
+        "repetition_penalty": 1.1,
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.2,
+        "top_p": 0.8,
+        "provider": {
+            "only": ["x/fp8"],
+            "order": ["x/fp8"],
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "require_parameters": True,
+        },
+    }
+    assert "max_completion_tokens" not in config  # OpenRouter drops that one from a preset
+
+
+def test_a_guardrail_left_unset_keeps_what_the_live_preset_has_and_a_set_one_replaces_it():
+    live = {
+        "model": "old",
+        "temperature": 0.3,
+        "top_p": 0.5,
+        "provider": {"quantizations": ["fp8"], "ignore": ["slow"], "require_parameters": True, "only": ["x"]},
+    }
+    config = build_config(live, ["a/m"], ["y/fp8"], guardrails=_g(temperature=0.8))
+    assert (config["temperature"], config["top_p"]) == (0.8, 0.5)
+    assert config["provider"] == {
+        "quantizations": ["fp8"],
+        "ignore": ["slow"],
+        "require_parameters": True,
+        "only": ["y/fp8"],
+        "order": ["y/fp8"],
+    }
+    assert build_config(live, ["a/m"], ["y/fp8"], guardrails=_g()) == build_config(live, ["a/m"], ["y/fp8"])
+    assert live["temperature"] == 0.3  # the base is not edited in place
+
+
+def test_a_cleared_guardrail_is_taken_off_and_a_provider_block_it_emptied_goes_too():
+    live = {"model": "old", "temperature": 0.3, "top_p": 0.5, "provider": {"quantizations": ["fp8"], "ignore": ["x"]}}
+    config = build_config(live, ["a/m"], [], guardrails=_g(clear=["temperature", "quantizations"]))
+    assert config == {"model": "a/m", "top_p": 0.5, "provider": {"ignore": ["x"]}}
+    only = {"model": "old", "provider": {"quantizations": ["fp8"]}}
+    assert build_config(only, ["a/m"], [], guardrails=_g(clear=["quantizations"])) == {"model": "a/m"}
+    # clearing what is not there changes nothing, and a block that was already empty stays as it was
+    assert build_config({"model": "a/m", "provider": {}}, ["a/m"], [], guardrails=_g(clear=["ignore"])) == {
+        "model": "a/m",
+        "provider": {},
+    }
+
+
+def test_a_guardrail_set_with_nowhere_to_go_makes_the_provider_block():
+    assert build_config(None, ["m"], [], guardrails=_g(ignore=["slow"])) == {
+        "model": "m",
+        "provider": {"ignore": ["slow"]},
+    }
+
+
+def test_the_owned_view_has_a_guardrail_key_only_when_the_owner_sets_or_clears_it():
+    live = {"model": "a", "temperature": 0.3, "top_p": 0.5, "provider": {"quantizations": ["fp8"], "ignore": ["x"]}}
+    plain = owned_view(live)
+    assert set(plain) == {"model", "models", "route", "only", "order", "sort"}
+    view = owned_view(live, _g(temperature=0.7, clear=["quantizations"]), "a prompt")
+    assert (view["temperature"], view["quantizations"]) == (0.3, ["fp8"])  # the live values, to be compared
+    assert not {"top_p", "ignore", "system_prompt"} & set(view)
+    assert owned_view(live, _g(system_prompt="mine"), "live one")["system_prompt"] == "live one"
+    assert owned_view(live, _g(clear=["system_prompt"]), "")["system_prompt"] is None
+    assert owned_view({"model": "a"}, _g(top_p=0.5))["top_p"] is None
+
+
+def test_the_passthrough_leaves_out_what_the_app_manages_and_keeps_what_it_does_not():
+    config = {
+        "model": "a",
+        "temperature": 0.3,
+        "top_p": 0.5,
+        "tools": [1],
+        "provider": {
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "require_parameters": True,
+            "data_collection": "deny",
+        },
+    }
+    assert passthrough_view(config) == {
+        "temperature": 0.3,
+        "top_p": 0.5,
+        "tools": [1],
+        "provider": {
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "require_parameters": True,
+            "data_collection": "deny",
+        },
+    }
+    assert passthrough_view(config, _g(temperature=0.7, clear=["ignore"])) == {
+        "top_p": 0.5,
+        "tools": [1],
+        "provider": {"quantizations": ["fp8"], "require_parameters": True, "data_collection": "deny"},
+    }
+    everything = _g(quantizations=["fp8"], ignore=["x"], require_parameters=True, clear=["top_p"])
+    assert passthrough_view(config, everything) == {
+        "temperature": 0.3,
+        "tools": [1],
+        "provider": {"data_collection": "deny"},
+    }
+    assert passthrough_view({"model": "a", "provider": {"ignore": ["x"]}}, _g(ignore=["y"])) == {}
+
+
+def test_the_passthrough_digest_follows_an_unmanaged_system_prompt_and_ignores_a_managed_one():
+    config = {"model": "a", "tools": [1], "temperature": 0.3}
+    plain = passthrough_digest(config)
+    assert passthrough_digest(config, None, None) == passthrough_digest(config, None, "") == plain
+    assert passthrough_digest(config, None, "Be brief.") != plain
+    assert passthrough_digest(config, None, "Be brief.") != passthrough_digest(config, None, "Be terse.")
+    for owned in (_g(system_prompt="Mine"), _g(clear=["system_prompt"])):
+        assert passthrough_digest(config, owned, "Be brief.") == passthrough_digest(config, owned, "Be terse.") == plain
+    # a guardrail the owner manages is theirs, so the live value of it is not part of what they reviewed
+    managed = _g(temperature=0.9)
+    assert passthrough_digest(config, managed) == passthrough_digest({**config, "temperature": 1.5}, managed)
+    assert passthrough_digest(config) != passthrough_digest({**config, "temperature": 1.5})
+
+
+def test_the_diff_names_a_system_prompt_that_changes_with_its_text_and_not_as_json():
+    config = {"model": "a"}
+    assert [(c.path, c.before, c.after) for c in diff_config(config, config, "Be brief.", "Be terse.")] == [
+        ("system_prompt", "Be brief.", "Be terse.")
+    ]
+    assert [(c.before, c.after) for c in diff_config(config, config, "Be brief.", None)] == [("Be brief.", None)]
+    assert [(c.before, c.after) for c in diff_config(config, config, None, "New.")] == [(None, "New.")]
+    assert diff_config(config, config, "same", "same") == [] and diff_config(config, config, None, "") == []
+
+
+def test_a_cleared_guardrail_shows_in_the_diff_as_a_key_that_goes():
+    before = {"model": "a", "temperature": 0.3, "provider": {"ignore": ["x"], "only": ["y"]}}
+    after = build_config(before, ["a"], ["y"], guardrails=_g(clear=["temperature", "ignore"]))
+    assert {c.path: (c.before, c.after) for c in diff_config(before, after)} == {
+        "temperature": ("0.3", None),
+        "provider.ignore": ('["x"]', None),
+        "provider.order": (None, '["y"]'),
+    }
+
+
+def test_a_key_the_write_took_off_that_is_still_on_the_preset_is_named_among_those_not_kept():
+    sent = {"model": "m", "provider": {"only": ["x"]}}
+    stored = {"model": "m", "temperature": 0.3, "provider": {"only": ["x"], "ignore": ["slow"]}}
+    assert unsaved_keys(sent, stored, ["temperature", "provider.ignore", "top_p"]) == ["temperature", "provider.ignore"]
+    assert unsaved_keys(sent, sent, ["temperature", "provider.ignore"]) == []
+    assert unsaved_keys(sent, stored) == []  # nothing was cleared, so what is extra there is not this write's
+
+
+def _write(router: respx.Router) -> respx.Route:
+    return router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+
+
+def _wrote(post: respx.Route) -> dict[str, Any]:
+    return json.loads(post.calls[0].request.content)
+
+
+def _listed(managed: list[str], key: str) -> bool:
+    return (f"provider.{key}" if key in PROVIDER_KEYS else key) in managed
+
+
+@pytest.mark.parametrize("key", list(SAMPLES))
+def test_a_guardrail_that_is_set_is_written_in_the_request_and_read_back(client, key):
+    new, old = SAMPLES[key]
+    _own_as(KEY)
+    _settings(guardrails={key: new})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, _holding({"model": "acme/best"}, key, old), version=2)
+        post = _write(router)
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        assert _at(plan["request"]["body"], key) == new
+        assert key in {c["path"].removeprefix("provider.") for c in plan["changes"]}
+        applied = _apply(client, plan).json()
+        assert applied["applied"] is True and applied["unsaved"] == []
+    assert _at(_wrote(post), key) == new
+
+
+@pytest.mark.parametrize("key", list(SAMPLES))
+def test_a_guardrail_that_is_cleared_is_left_out_of_the_request_and_read_back_as_gone(client, key):
+    _new, old = SAMPLES[key]
+    _own_as(KEY)
+    _settings(guardrails={"clear": [key]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, _holding({"model": "acme/best"}, key, old), version=2)
+        post = _write(router)
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        assert _at(plan["request"]["body"], key) is None
+        assert key in {c["path"].removeprefix("provider.") for c in plan["changes"]}
+        applied = _apply(client, plan).json()
+        assert applied["applied"] is True and applied["unsaved"] == []
+    assert _at(_wrote(post), key) is None
+
+
+@pytest.mark.parametrize("key", list(SAMPLES))
+def test_a_guardrail_nobody_manages_is_sent_back_untouched_and_shown_as_passthrough(client, key):
+    _new, old = SAMPLES[key]
+    _own_as(KEY)
+    desired = build_config(None, ["acme/best"], TAGS)
+    if key == "quantizations":  # that one narrows which endpoints a plan may pin, which is not what this is about
+        old = ["fp4", "fp8", "bf16"]
+    live = _holding(desired, key, old)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and plan["changes"] == []  # nothing here is the app's to change
+    assert _at(plan["config"], key) == old
+    assert _at(plan["passthrough"], key) == old
+    assert _listed(plan["managed_keys"], key) is False
+
+
+def test_a_plan_says_which_guardrails_it_manages_beside_the_keys_it_always_decides(client):
+    _own_as(KEY)
+    _settings(guardrails={"temperature": 0.7, "ignore": ["slow"], "clear": ["top_p"]})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "temperature": 0.3, "top_p": 0.9, "tools": [1]}, version=2)
+        plan = _plan(client)
+    assert plan["managed_keys"] == [
+        "model",
+        "models",
+        "route",
+        "provider.only",
+        "provider.order",
+        "provider.sort",
+        "temperature",
+        "top_p",
+        "provider.ignore",
+    ]
+    assert plan["passthrough"] == {"tools": [1]}  # what the app sends back as it found it: not what it sets or removes
+    assert {c["path"] for c in plan["changes"]} == {
+        "temperature",
+        "top_p",
+        "provider.ignore",
+        "provider.only",
+        "provider.order",
+    }
+
+
+def test_a_managed_guardrail_that_the_live_preset_already_holds_is_not_an_update(client):
+    _own_as(KEY)
+    _settings(guardrails={"temperature": 0.7, "clear": ["top_p"]})
+    desired = build_config({"temperature": 0.7}, ["acme/best"], TAGS)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, desired, version=2)
+        assert _plan(client)["action"] == "unchanged"
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {**desired, "temperature": 0.2}, version=2)
+        assert _plan(client)["action"] == "update"
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {**desired, "top_p": 0.4}, version=2)
+        assert _plan(client)["action"] == "update"
+
+
+def test_a_guardrail_openrouter_keeps_after_it_was_taken_off_is_reported_not_hidden(client):
+    _own_as(KEY)
+    _settings(guardrails={"clear": ["top_p"]})
+
+    def keeps_top_p(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(SLUG, {**sent, "top_p": 0.9}, version=3))
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "top_p": 0.9}, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=keeps_top_p)
+        body = _apply(client, _plan(client)).json()
+    assert body["unsaved"] == ["top_p"] and "did not keep: top_p" in body["message"]
+
+
+def test_a_guardrail_set_to_a_value_openrouter_stored_differently_is_reported(client):
+    _own_as(KEY)
+    _settings(guardrails={"temperature": 0.7})
+
+    def stores_one(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(SLUG, {**sent, "temperature": 1.0}, version=3))
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=stores_one)
+        assert _apply(client, _plan(client)).json()["unsaved"] == ["temperature"]
+
+
+def test_the_guardrails_of_a_draft_are_what_the_preview_shows(client):
+    draft = PresetSettings(slug="fresh", enabled=True, min_context=100_000, guardrails=_g(top_p=0.4))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "vibonomics-fresh", None)
+        plan = client.post("/api/presets/plan", json={"settings": draft.model_dump(mode="json")}).json()
+    assert plan["draft"] is True and plan["config"]["top_p"] == 0.4

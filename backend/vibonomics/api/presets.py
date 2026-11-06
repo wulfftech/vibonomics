@@ -142,7 +142,10 @@ class PresetPlanOut(BaseModel):
     passthrough: dict[str, Any] = Field(
         description="The keys Vibonomics does not manage and sends back as it found them, as raw JSON"
     )
-    managed_keys: list[str] = Field(description="The keys Vibonomics decides: `provider.*` ones are inside `provider`")
+    managed_keys: list[str] = Field(
+        description="The keys Vibonomics decides: `provider.*` ones are inside `provider`. The guardrails the owner "
+        "sets or removes for this preset follow the always-managed ones."
+    )
     validation: list[PresetCheckOut] = Field(
         description="What the live OpenRouter listing says about what this plan would write; empty when nothing was "
         "checked (a blocked plan)"
@@ -295,7 +298,7 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         excluded=PresetExcludedOut(models=plan.excluded.models, providers=plan.excluded.providers),
         own_tests_preferred=plan.own_tests_preferred,
         passthrough=plan.passthrough,
-        managed_keys=list(presets.MANAGED_KEYS),
+        managed_keys=presets.managed_keys(cfg.guardrails),
         validation=[
             PresetCheckOut(level=c.level, check=c.check, model=c.model, provider=c.provider, message=c.message)
             for c in (plan.validation.items if plan.validation else [])
