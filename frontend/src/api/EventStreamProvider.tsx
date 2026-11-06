@@ -120,7 +120,12 @@ export function EventStreamProvider({ children }: { children: ReactNode }) {
           void client.invalidateQueries({ queryKey: keys.system });
           break;
         case 'presets.changed':
+          // After a catalogue sync, a write and an adopt. Settings too: an adopt adds an item, and removing an adopted
+          // one hands it back, so the list of managed presets may have changed under the page.
           void client.invalidateQueries({ queryKey: keys.presetState });
+          void client.invalidateQueries({ queryKey: keys.presetCatalog });
+          void client.invalidateQueries({ queryKey: keys.presetInspections });
+          void client.invalidateQueries({ queryKey: keys.settings });
           break;
         case 'subscription.updated':
           void client.invalidateQueries({ queryKey: keys.claudeSubscription });

@@ -124,3 +124,20 @@ describe('EventStreamProvider and a lost session', () => {
     expect(stale(keys.auth)).toBe(false);
   });
 });
+
+describe('EventStreamProvider and the presets', () => {
+  it('refreshes the catalogue, the run records, the inspections and the settings when a preset changes', () => {
+    const touched = [keys.presetCatalog, keys.presetState, keys.presetInspect('hand-made'), keys.settings];
+    for (const key of touched) {
+      client.setQueryData(key, { seeded: true });
+    }
+    mount();
+    act(() => latest().onopen?.());
+    expect(touched.map(stale)).toEqual([false, false, false, false]);
+
+    const message = { data: JSON.stringify({ event: 'presets.changed', data: {} }) } as MessageEvent<string>;
+    act(() => latest().onmessage?.(message));
+    expect(touched.map(stale)).toEqual([true, true, true, true]);
+    expect(stale(keys.models)).toBe(false);
+  });
+});

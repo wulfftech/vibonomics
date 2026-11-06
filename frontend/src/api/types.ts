@@ -34,10 +34,15 @@ export type SpendKey = Schemas['SpendKeyOut'];
 export type SpendAccount = Schemas['SpendAccountOut'];
 
 export type PresetSettings = Schemas['PresetSettings'];
+export type PresetsSettings = Schemas['PresetsSettings'];
 export type PresetList = Schemas['PresetListOut'];
 export type PresetSummary = Schemas['PresetSummaryOut'];
+export type PresetCatalog = Schemas['PresetCatalogOut'];
+export type CatalogPreset = Schemas['CatalogPresetOut'];
+export type PresetInspect = Schemas['PresetInspectOut'];
 export type PresetPlan = Schemas['PresetPlanOut'];
 export type PresetState = Schemas['PresetStateOut'];
+export type PresetSlugState = Schemas['PresetSlugStateOut'];
 export type PresetApplyResult = Schemas['PresetApplyOut'];
 export type PresetVersion = Schemas['PresetVersionOut'];
 export type PresetProvider = Schemas['PresetProviderOut'];
@@ -77,8 +82,34 @@ export interface FullSettings {
   scoring: Schemas['ScoringSettings'] & { profiles: UsageProfile[] };
   benchmarks: Schemas['BenchmarkSettings'] & { sources: NonNullable<Schemas['BenchmarkSettings']['sources']> };
   evals: Schemas['EvalSettings'];
-  presets: Schemas['PresetSettings'];
+  presets: PresetsSettings & { items: PresetSettings[]; blocked_models: string[]; blocked_providers: string[] };
 }
+
+/** One preset as the server starts it, every field present so a draft compares equal to what is saved. */
+export const PRESET_DEFAULTS: PresetSettings = {
+  enabled: false,
+  auto_apply: false,
+  interval_hours: 24,
+  adopted: false,
+  slug: 'vibonomics-best-value',
+  template_slug: null,
+  profile: null,
+  dimension: 'composite',
+  min_score: 60,
+  require_tool_call: true,
+  min_context: 0,
+  max_task_cost: null,
+  min_value: null,
+  include_free: false,
+  switch_margin_pct: 10,
+  max_models: 1,
+  max_providers: 3,
+  blocked_models: [],
+  blocked_providers: [],
+  route: 'fallback',
+  sort: null,
+  prefer_own_tests: null,
+};
 
 export type SettingsSectionKey = keyof FullSettings;
 
@@ -117,19 +148,10 @@ export function fullSettings(settings: AppSettings): FullSettings {
       sandbox_mode: 'auto',
     },
     presets: {
-      enabled: false,
-      auto_apply: false,
-      interval_hours: 24,
-      slug: 'vibonomics-best-value',
-      dimension: 'composite',
-      min_score: 60,
-      require_tool_call: true,
-      min_context: 0,
-      include_free: false,
-      switch_margin_pct: 10,
-      max_models: 1,
-      max_providers: 3,
+      blocked_models: [],
+      blocked_providers: [],
       ...settings.presets,
+      items: (settings.presets?.items ?? []).map((item) => ({ ...PRESET_DEFAULTS, ...item })),
     },
   };
 }
