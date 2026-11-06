@@ -3571,6 +3571,62 @@
         ],
         "title": "PresetChangeOut"
       },
+      "PresetCheckOut": {
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warning",
+              "error"
+            ],
+            "title": "Level",
+            "description": "An error refuses the write; a warning does not"
+          },
+          "check": {
+            "type": "string",
+            "title": "Check",
+            "description": "What was checked: listing, provider, pins, health, price, expiry, params or max_tokens"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model",
+            "description": "The model the finding is about, by id; null when it is about none"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider",
+            "description": "The provider tag the finding is about; null when it is about none"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "level",
+          "check",
+          "model",
+          "provider",
+          "message"
+        ],
+        "title": "PresetCheckOut"
+      },
       "PresetExcludedOut": {
         "properties": {
           "models": {
@@ -4071,6 +4127,32 @@
             "title": "Managed Keys",
             "description": "The keys Vibonomics decides: `provider.*` ones are inside `provider`"
           },
+          "validation": {
+            "items": {
+              "$ref": "#/components/schemas/PresetCheckOut"
+            },
+            "type": "array",
+            "title": "Validation",
+            "description": "What the live OpenRouter listing says about what this plan would write; empty when nothing was checked (a blocked plan)"
+          },
+          "validated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validated At",
+            "description": "When the listing was read; null when nothing was checked"
+          },
+          "valid": {
+            "type": "boolean",
+            "title": "Valid",
+            "description": "False when the live check found an error, which refuses an apply; true when it found none, or was not made (see `validated_at`)"
+          },
           "state": {
             "$ref": "#/components/schemas/PresetStateOut"
           }
@@ -4106,6 +4188,9 @@
           "own_tests_preferred",
           "passthrough",
           "managed_keys",
+          "validation",
+          "validated_at",
+          "valid",
           "state"
         ],
         "title": "PresetPlanOut"

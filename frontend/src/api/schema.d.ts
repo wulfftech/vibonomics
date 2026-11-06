@@ -1373,6 +1373,32 @@ export interface components {
              */
             after: string | null;
         };
+        /** PresetCheckOut */
+        PresetCheckOut: {
+            /**
+             * Level
+             * @description An error refuses the write; a warning does not
+             * @enum {string}
+             */
+            level: "ok" | "warning" | "error";
+            /**
+             * Check
+             * @description What was checked: listing, provider, pins, health, price, expiry, params or max_tokens
+             */
+            check: string;
+            /**
+             * Model
+             * @description The model the finding is about, by id; null when it is about none
+             */
+            model: string | null;
+            /**
+             * Provider
+             * @description The provider tag the finding is about; null when it is about none
+             */
+            provider: string | null;
+            /** Message */
+            message: string;
+        };
         /** PresetExcludedOut */
         PresetExcludedOut: {
             /**
@@ -1605,6 +1631,21 @@ export interface components {
              * @description The keys Vibonomics decides: `provider.*` ones are inside `provider`
              */
             managed_keys: string[];
+            /**
+             * Validation
+             * @description What the live OpenRouter listing says about what this plan would write; empty when nothing was checked (a blocked plan)
+             */
+            validation: components["schemas"]["PresetCheckOut"][];
+            /**
+             * Validated At
+             * @description When the listing was read; null when nothing was checked
+             */
+            validated_at: string | null;
+            /**
+             * Valid
+             * @description False when the live check found an error, which refuses an apply; true when it found none, or was not made (see `validated_at`)
+             */
+            valid: boolean;
             state: components["schemas"]["PresetStateOut"];
         };
         /** PresetProviderOut */
