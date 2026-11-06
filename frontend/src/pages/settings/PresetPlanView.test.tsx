@@ -3,6 +3,8 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import type { PresetPlan } from '../../api/types';
+import { dateTime } from '../../lib/format';
+import { tone } from '../../lib/tone';
 import { PresetPlanView } from './PresetPlanView';
 
 const FLASH = { model_id: 'deepseek/flash', name: 'Flash', score: 71.4, task_cost: 0.055, value: 1298, discount: 0.3 };
@@ -53,6 +55,9 @@ function plan(over: Partial<PresetPlan> = {}): PresetPlan {
     own_tests_preferred: false,
     passthrough: {},
     managed_keys: ['model', 'models', 'provider.only'],
+    validation: [],
+    validated_at: null,
+    valid: true,
     state: { owned: ['vibonomics-best-value'], slugs: {} },
     ...over,
   };
@@ -412,5 +417,184 @@ describe('PresetPlanView link to the preset', () => {
     expect(screen.queryByRole('link', { name: /Open on OpenRouter/ })).toBeNull();
     view(plan());
     expect(screen.queryByRole('link', { name: /Open on OpenRouter/ })).toBeNull();
+  });
+});
+
+type Finding = PresetPlan['validation'][number];
+
+const FAILED: Finding = {
+  level: 'error',
+  check: 'provider',
+  model: 'deepseek/flash',
+  provider: 'deepinfra/fp8',
+  message: 'deepinfra/fp8 is no longer listed for deepseek/flash on OpenRouter.',
+};
+const SLOW: Finding = {
+  level: 'warning',
+  check: 'health',
+  model: 'z-ai/glm:free',
+  provider: 'novita/fp4',
+  message: 'novita/fp4 on z-ai/glm:free was up 40% of the last 30 minutes.',
+};
+const PASSED: Finding = {
+  level: 'ok',
+  check: 'listing',
+  model: 'deepseek/flash',
+  provider: null,
+  message: '3 live endpoints, pins verified',
+};
+const PASSED_TOO: Finding = {
+  level: 'ok',
+  check: 'listing',
+  model: 'z-ai/glm:free',
+  provider: null,
+  message: '1 live endpoint, no providers pinned',
+};
+
+/** A plan the live check has been run on, three minutes ago; it is valid unless a finding is an error. */
+function checked(findings: Finding[], over: Partial<PresetPlan> = {}): PresetPlan {
+  return plan({
+    validation: findings,
+    validated_at: new Date(Date.now() - 3 * 60_000).toISOString(),
+    valid: !findings.some((f) => f.level === 'error'),
+    ...over,
+  });
+}
+
+describe('PresetPlanView live check', () => {
+  it('shows nothing for a plan that was not checked', () => {
+    view(plan());
+    expect(screen.queryByText('Checked against live providers')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/Passed checks/)).toBeNull();
+  });
+
+  it('says when the listing was read, with the exact time on hover', () => {
+    const p = checked([PASSED]);
+    view(p);
+    expect(screen.getByText('Checked against live providers')).toBeInTheDocument();
+    expect(screen.getByText('3 min ago')).toHaveAttribute('title', dateTime(p.validated_at));
+  });
+
+  it.each<[Finding[], string]>([
+    [[PASSED, PASSED_TOO, { ...PASSED, model: 'a/b' }], '3 checks passed'],
+    [[PASSED], '1 check passed'],
+    [[SLOW, { ...SLOW, provider: 'other/fp8' }], '2 warnings'],
+    [[FAILED], '1 error'],
+    [[SLOW, PASSED, FAILED, PASSED_TOO], '1 error, 1 warning, 2 checks passed'],
+    [[], 'Nothing needed checking.'],
+  ])('sums up the findings in one line: %j', (findings, line) => {
+    view(checked(findings));
+    expect(screen.getByText(line)).toBeInTheDocument();
+  });
+
+  it('lists the errors before the warnings, each row led by its word', () => {
+    view(checked([PASSED, SLOW, FAILED]));
+    const rows = within(screen.getByRole('list', { name: 'Live check problems' })).getAllByRole('listitem');
+    expect(rows.map((row) => row.textContent)).toEqual([`Error: ${FAILED.message}`, `Warning: ${SLOW.message}`]);
+  });
+
+  it('colours the word and the icon with tone(), so they clear AA in both colour schemes', () => {
+    view(checked([FAILED, SLOW, PASSED]));
+    expect(screen.getByText('Error:').getAttribute('style') ?? '').toContain(tone('red'));
+    expect(screen.getByText('Warning:').getAttribute('style') ?? '').toContain(tone('yellow'));
+    expect(screen.getByText('Passed:').getAttribute('style') ?? '').toContain(tone('green'));
+    const row = screen.getByText('Error:').closest('li');
+    expect(row?.querySelector('svg')?.getAttribute('style') ?? '').toContain(tone('red'));
+  });
+
+  it('names the model and provider only where the message does not', () => {
+    view(
+      checked([
+        { ...SLOW, message: 'Slow.' },
+        FAILED,
+        { ...PASSED, provider: 'deepinfra/fp8' },
+        { ...PASSED_TOO, model: null, provider: null },
+      ]),
+    );
+    const problems = within(screen.getByRole('list', { name: 'Live check problems' })).getAllByRole('listitem');
+    expect(problems.map((row) => row.textContent)).toEqual([
+      `Error: ${FAILED.message}`,
+      'Warning: Slow. (z-ai/glm:free via novita/fp4)',
+    ]);
+    const passed = within(screen.getByLabelText('Passed checks')).getAllByRole('listitem', { hidden: true });
+    expect(passed.map((row) => row.textContent)).toEqual([
+      'Passed: 3 live endpoints, pins verified (deepseek/flash via deepinfra/fp8)',
+      'Passed: 1 live endpoint, no providers pinned',
+    ]);
+  });
+
+  it('keeps the passed checks closed, and counts them', () => {
+    view(checked([FAILED, PASSED, PASSED_TOO]));
+    const toggle = screen.getByRole('button', { name: 'Passed checks (2)' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByLabelText('Passed checks')).not.toBeVisible();
+    // the problems are not behind the toggle
+    expect(screen.getByText(FAILED.message, { exact: false })).toBeVisible();
+  });
+
+  it('has no passed checks section when nothing passed', () => {
+    view(checked([FAILED]));
+    expect(screen.queryByRole('button', { name: /Passed checks/ })).toBeNull();
+    expect(screen.queryByLabelText('Passed checks')).toBeNull();
+  });
+
+  it('opens and closes the passed checks with a click', async () => {
+    const user = userEvent.setup();
+    view(checked([PASSED, PASSED_TOO]));
+    await user.click(screen.getByRole('button', { name: 'Passed checks (2)' }));
+    expect(screen.getByRole('button', { name: 'Passed checks (2)' })).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(screen.getByLabelText('Passed checks')).toBeVisible());
+    expect(screen.getByText('3 live endpoints, pins verified', { exact: false })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Passed checks (2)' }));
+    await waitFor(() => expect(screen.getByLabelText('Passed checks')).not.toBeVisible());
+  });
+
+  it.each([
+    ['Enter', '{Enter}'],
+    ['Space', ' '],
+  ])('opens and closes the passed checks from the keyboard with %s', async (_name, key) => {
+    const user = userEvent.setup();
+    view(checked([SLOW, PASSED]));
+    const toggle = screen.getByRole('button', { name: 'Passed checks (1)' });
+    for (let stops = 0; stops < 10 && document.activeElement !== toggle; stops += 1) {
+      await user.tab();
+    }
+    expect(toggle).toHaveFocus();
+
+    await user.keyboard(key);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(screen.getByLabelText('Passed checks')).toBeVisible());
+
+    await user.keyboard(key);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await waitFor(() => expect(screen.getByLabelText('Passed checks')).not.toBeVisible());
+  });
+
+  it('puts a red alert above the findings when the check found an error, and says the update will not be sent', () => {
+    view(checked([FAILED, SLOW, PASSED]));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'The live check found a problem, so this update will not be sent. Fix it or preview again to re-check.',
+    );
+    const alert = screen.getByRole('alert');
+    const heading = screen.getByText('Checked against live providers');
+    expect(alert.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('has no alert when the check found warnings only, and lists them', () => {
+    view(checked([SLOW, PASSED]));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/will not be sent/)).toBeNull();
+    expect(screen.getByText('Warning:')).toBeInTheDocument();
+  });
+
+  it('words the alert for what is on OpenRouter when nothing would be written', () => {
+    view(checked([FAILED], { action: 'unchanged', digest: null, changes: [], reason: 'Already up to date.' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'The live check found a problem with what is on OpenRouter now.',
+    );
+    expect(screen.queryByText(/will not be sent/)).toBeNull();
+    expect(screen.getByText('Error:')).toBeInTheDocument();
   });
 });
