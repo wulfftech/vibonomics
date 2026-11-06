@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import fnmatch
 import hashlib
 import json
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -111,6 +112,14 @@ class Remote:
 
 
 @dataclass
+class Excluded:
+    """What the blocklists took out of one run's ranking."""
+
+    models: int = 0
+    providers: list[str] = field(default_factory=list)  # display names of the providers whose endpoints were skipped
+
+
+@dataclass
 class Plan:
     slug: str
     action: str  # create | update | unchanged | blocked
@@ -133,6 +142,7 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     draft: bool = False  # made from unsaved settings, so it cannot be applied
+    excluded: Excluded = field(default_factory=Excluded)  # what the blocklists took out of this run
     fingerprint: str | None = None  # which key and host the plan was made for
     # The listed models whose providers the preset names once this plan stands; None when nothing is to be recorded.
     pinned: list[str] | None = None
@@ -158,6 +168,41 @@ class Inputs:
     state: dict[str, Any]
     draft: bool = False  # the settings are unsaved ones, offered for a preview
     ignored_base: str | None = None  # a Base URL override on the provider row, which the preset calls do not use
+    excluded: Excluded = field(default_factory=Excluded)
+
+
+# ---- blocklists ----------------------------------------------------------------------------------------------
+
+
+def _union(*lists: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(entry for entries in lists for entry in entries))
+
+
+def blocklists(settings: AppSettings, preset: PresetSettings) -> tuple[list[str], list[str]]:
+    """The models and the providers ``preset`` never considers: its own entries and those for every preset."""
+    shared = settings.presets
+    return (
+        _union(shared.blocked_models, preset.blocked_models),
+        _union(shared.blocked_providers, preset.blocked_providers),
+    )
+
+
+def _blocked_by(names: Iterable[str | None], patterns: Sequence[str]) -> bool:
+    """Whether any of ``names`` matches any pattern, ignoring case; ``*`` and ``?`` are the wildcards."""
+    lowered = [n.lower() for n in names if isinstance(n, str) and n]
+    return any(fnmatch.fnmatchcase(name, pattern.lower()) for pattern in patterns for name in lowered)
+
+
+def _endpoint_names(ep: dict[str, Any]) -> list[str]:
+    """The ways a provider is named by an endpoint: its tag, the tag's provider part, and its display name."""
+    tag = ep.get("tag")
+    tag = tag if isinstance(tag, str) else ""
+    return [tag, tag.split("/")[0], str(ep.get("provider") or "")]
+
+
+def _provider_label(ep: dict[str, Any]) -> str:
+    tag = ep.get("tag") if isinstance(ep.get("tag"), str) else ""
+    return str(ep.get("provider") or tag.split("/")[0])
 
 
 # ---- ranking -------------------------------------------------------------------------------------------------
@@ -171,13 +216,25 @@ def _task(settings: AppSettings, preset: PresetSettings) -> tuple[Task, str]:
 
 
 def rank(
-    session: Session, settings: AppSettings, provider_ids: list[int], preset: PresetSettings
+    session: Session,
+    settings: AppSettings,
+    provider_ids: list[int],
+    preset: PresetSettings,
+    excluded: Excluded | None = None,
 ) -> tuple[list[Candidate], Task, str]:
-    """The OpenRouter models that pass ``preset``'s filters, best value first."""
+    """The OpenRouter models that pass ``preset``'s filters and blocklists, best value first.
+
+    ``excluded`` collects what the blocklists removed from models that passed everything else, so the plan can say
+    what they cost it. A model with endpoint data whose every endpoint is blocked is out; one with no endpoint data
+    is not, because nothing says its providers are blocked.
+    """
     cfg = preset
     task, profile_id = _task(settings, preset)
     if not provider_ids:
         return [], task, profile_id
+    blocked_models, blocked_providers = blocklists(settings, preset)
+    dropped: set[str] = set()
+    skipped: set[str] = set()
     scores = compute_scores(session, settings, own_test_scores(session))
     free_cost = max(0.0, settings.scoring.free_model_cost)
     best: dict[str, Candidate] = {}
@@ -202,6 +259,17 @@ def rank(
             continue
         if cfg.min_value is not None and value < cfg.min_value:
             continue
+        endpoints = [e for e in (m.extra or {}).get("endpoints") or [] if isinstance(e, dict)]
+        if blocked_models and _blocked_by((m.model_id, m.canonical_id), blocked_models):
+            dropped.add(m.model_id)
+            continue
+        if blocked_providers and endpoints:
+            tagged = [e for e in endpoints if e.get("tag")]  # the only ones a preset could pin
+            hits = [e for e in tagged if _blocked_by(_endpoint_names(e), blocked_providers)]
+            skipped.update(_provider_label(e) for e in hits)
+            if hits and len(hits) == len(tagged):
+                dropped.add(m.model_id)
+                continue
         found = Candidate(
             model_id=m.model_id,
             name=m.name,
@@ -210,10 +278,12 @@ def rank(
             value=value,
             discount=m.discount,
             cache_read=m.price_cache_read,
-            endpoints=list((m.extra or {}).get("endpoints") or []),
+            endpoints=endpoints,
         )
         if m.model_id not in best or found.value > best[m.model_id].value:
             best[m.model_id] = found
+    if excluded is not None:
+        excluded.models, excluded.providers = len(dropped), sorted(skipped)
     return sorted(best.values(), key=lambda c: (-c.value, -c.score, c.task_cost, c.model_id)), task, profile_id
 
 
@@ -225,11 +295,13 @@ def choose_endpoints(
     *,
     current: Sequence[str] = (),
     allow: Sequence[str] = (),
+    blocked: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """The cheapest endpoints for one task that the preset's own provider filters would still let through.
 
     ``allow`` is a template's own ``only`` list: an endpoint whose provider (by slug, full tag or name) is not on it
-    is skipped. An empty one restricts nothing.
+    is skipped. An empty one restricts nothing. ``blocked`` is the blocklist's patterns: an endpoint they match is
+    skipped, and nothing is written to the preset to say so.
 
     Each endpoint is costed with its own cache-read price. One that lists none is costed as uncached: the model's
     listed price is the best endpoint's, and an endpoint without a cache would be ranked ahead on a discount it does
@@ -254,7 +326,11 @@ def choose_endpoints(
         if quantizations and str(ep.get("quantization") or "").lower() not in quantizations:
             continue
         names = {tag.lower(), tag.split("/")[0].lower(), str(ep.get("provider") or "").lower()}
-        if names & ignored or (allowed and not names & allowed):
+        if (
+            names & ignored
+            or (allowed and not names & allowed)
+            or (blocked and _blocked_by(_endpoint_names(ep), blocked))
+        ):
             continue
         cache = ep.get("cache_read")
         cost = task_cost(price_in, price_out, cache if isinstance(cache, int | float) else None, task)
@@ -656,11 +732,22 @@ def load_inputs(slug: str, draft: PresetSettings | None = None) -> Inputs:
             raise PresetNotConfigured(f"{slug} is not one of the presets Vibonomics manages.")
         providers = _openrouter_providers(s)
         resolved = [resolve(p) for p in providers]
-        candidates, task, profile_id = rank(s, settings, [p.id for p in providers], preset)
+        excluded = Excluded()
+        candidates, task, profile_id = rank(s, settings, [p.id for p in providers], preset, excluded)
         state = _load_state(s)
     base, key, ignored = _access(resolved)
     return Inputs(
-        settings, preset, candidates, task, profile_id, base, key, state, draft=draft is not None, ignored_base=ignored
+        settings,
+        preset,
+        candidates,
+        task,
+        profile_id,
+        base,
+        key,
+        state,
+        draft=draft is not None,
+        ignored_base=ignored,
+        excluded=excluded,
     )
 
 
@@ -730,7 +817,9 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         considered=len(inputs.candidates),
         state=inputs.state,
         draft=inputs.draft,
+        excluded=inputs.excluded,
     )
+    blocked_providers = blocklists(inputs.settings, cfg)[1]
     if not inputs.api_key:
         return _blocked(plan, "Add an OpenRouter API key under Settings, Providers first.")
     plan.fingerprint = owner_fingerprint(inputs.base_url, inputs.api_key)
@@ -794,7 +883,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         return _blocked(
             plan,
             "No OpenRouter model passes the filters. Loosen the minimum score, the value floor, the cost limit or the "
-            "other filters.",
+            "other filters."
+            + (" The blocklists took out models that would otherwise pass." if inputs.excluded.models else ""),
         )
 
     before = current_models(remote.config) if remote else []
@@ -843,7 +933,13 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         (
             c.model_id,
             choose_endpoints(
-                c.endpoints, inputs.task, provider_block, cfg.max_providers, current=live_tags, allow=allow
+                c.endpoints,
+                inputs.task,
+                provider_block,
+                cfg.max_providers,
+                current=live_tags,
+                allow=allow,
+                blocked=blocked_providers,
             ),
         )
         for c in plan.picks

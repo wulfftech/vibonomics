@@ -21,6 +21,7 @@ from vibonomics.presets import (
     PLACEHOLDER_MESSAGES,
     STATE_KEY,
     Candidate,
+    Excluded,
     build_config,
     choose_endpoints,
     current_models,
@@ -1715,3 +1716,160 @@ def test_a_preset_switched_off_is_not_written_while_another_is_on(client):
         assert _apply(client, _plan(client)).status_code == 409
         assert _apply(client, _plan(client, SECOND), SECOND).status_code == 200
         assert (off.call_count, on.call_count) == (0, 1)
+
+
+# ---- blocklists -------------------------------------------------------------------------------------------------
+
+
+def _ranked_with(
+    models: list[str] = (),  # type: ignore[assignment]
+    providers: list[str] = (),  # type: ignore[assignment]
+    *,
+    everywhere_models: list[str] = (),  # type: ignore[assignment]
+    everywhere_providers: list[str] = (),  # type: ignore[assignment]
+    **patch: Any,
+) -> tuple[list[str], Excluded]:
+    """The ranking with these blocklists on the preset and (the ``everywhere_`` ones) on every preset."""
+    with session_scope() as session:
+        settings = load_settings(session).model_copy(deep=True)
+        item = settings.presets.items[0]
+        item.blocked_models, item.blocked_providers = list(models), list(providers)
+        settings.presets.blocked_models = list(everywhere_models)
+        settings.presets.blocked_providers = list(everywhere_providers)
+        for key, value in patch.items():
+            setattr(item, key, value)
+        ids = [p.id for p in session.query(ProviderConfig).filter_by(type="openrouter")]
+        excluded = Excluded()
+        ranked = rank(session, settings, ids, item, excluded)[0]
+        return [c.model_id for c in ranked], excluded
+
+
+def test_a_blocked_model_is_never_a_candidate_whichever_way_it_is_written(client):
+    everyone = ["acme/best", "acme/steady", "acme/pricey"]
+    assert _ranked_with()[0] == everyone
+    assert _ranked_with(["acme/best"])[0] == ["acme/steady", "acme/pricey"]  # exact
+    assert _ranked_with(["ACME/Best"])[0] == ["acme/steady", "acme/pricey"]  # in any case
+    assert _ranked_with(["acme/pri*", "*steady"])[0] == ["acme/best"]  # patterns
+    assert _ranked_with(["acme/*"])[0] == []
+    # the id OpenRouter uses is not the only name: the canonical id counts too
+    assert _ranked_with(["preset-test/steady"])[0] == ["acme/best", "acme/pricey"]
+    assert _ranked_with(["*:free"], include_free=True)[0] == everyone  # the free offer goes, the rest stay
+    assert "acme/free:free" in _ranked_with(include_free=True)[0]
+    assert "acme/free:free" not in _ranked_with(["*:free"], include_free=True)[0]
+
+
+def test_the_list_for_every_preset_and_the_list_for_this_one_are_added_together(client):
+    ranked, excluded = _ranked_with(["acme/best"], everywhere_models=["acme/steady"])
+
+    assert ranked == ["acme/pricey"]
+    assert excluded.models == 2
+
+
+def test_the_exclusions_count_only_models_that_would_otherwise_have_been_candidates(client):
+    # acme/low scores 40 and acme/gone is inactive: blocking them removes nothing the run would have considered
+    ranked, excluded = _ranked_with(["acme/low", "acme/gone", "acme/pricey"])
+
+    assert ranked == ["acme/best", "acme/steady"]
+    assert excluded.models == 1
+
+
+def test_a_provider_pattern_matches_the_tag_the_provider_part_or_the_display_name(client):
+    for pattern in ("novita/fp4", "novita", "NOVITA", "nov*", "*/fp4"):
+        assert [e for e in choose_endpoints(ENDPOINTS, TASK, {}, 5, blocked=[pattern]) if "novita" in e["tag"]] == []
+        assert len(choose_endpoints(ENDPOINTS, TASK, {}, 5, blocked=[pattern])) == 3, pattern
+    # the display name is its own name for the provider: a tag that says otherwise still matches it
+    renamed = [{"provider": "Fancy Cloud", "tag": "fc1/fp8", "input": 1, "output": 1}]
+    assert choose_endpoints(renamed, TASK, {}, 5, blocked=["fancy cloud"]) == []
+    assert choose_endpoints(renamed, TASK, {}, 5, blocked=["fancy"]) != []  # no wildcard, no match
+
+
+def test_a_blocked_provider_is_never_pinned_and_nothing_is_written_to_ignore_it(client):
+    _settings(blocked_providers=["novita", "wafer/*"])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+
+    assert [p["tag"] for p in plan["providers"]] == ["deepinfra/fp8", "slow/fp8"]
+    assert plan["config"]["provider"]["only"] == plan["config"]["provider"]["order"] == ["deepinfra/fp8", "slow/fp8"]
+    assert "ignore" not in plan["config"]["provider"]  # blocking is the app's own filter, not the preset's
+    assert plan["excluded"] == {"models": 0, "providers": ["Novita", "Wafer"]}
+
+
+def test_a_blocked_provider_in_the_list_for_every_preset_counts_too(client):
+    _items(_item(), _item(SECOND), blocked_providers=["novita"])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, SECOND, None)
+        first, second = _plan(client), _plan(client, SECOND)
+
+    for plan in (first, second):
+        assert "novita/fp4" not in [p["tag"] for p in plan["providers"]]
+
+
+def test_a_model_whose_every_known_endpoint_is_blocked_is_left_out_but_one_with_no_data_is_not(client):
+    everything = ["deepinfra", "wafer", "novita", "slow", "broken"]
+
+    ranked, excluded = _ranked_with(providers=everything)
+    assert ranked == ["acme/steady", "acme/pricey"]  # acme/best has endpoints and they are all blocked
+    assert excluded.models == 1
+    assert excluded.providers == ["Broken", "DeepInfra", "Novita", "Slow", "Wafer"]
+    # one endpoint left is enough to keep it
+    assert _ranked_with(providers=everything[:-1])[0] == ["acme/best", "acme/steady", "acme/pricey"]
+    # and a block that matches no provider the model has touches nothing
+    ranked, excluded = _ranked_with(providers=["nobody"])
+    assert ranked == ["acme/best", "acme/steady", "acme/pricey"] and excluded == Excluded()
+
+
+def test_a_blocked_incumbent_is_dropped_from_the_live_lineup(client):
+    _own_as(KEY)
+    _settings(max_models=2, blocked_models=["acme/best"])
+    live = {"model": "acme/best", "models": ["acme/best", "acme/steady"]}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        plan = _plan(client)
+
+    assert plan["action"] == "update"
+    assert [c["model_id"] for c in plan["picks"]] == ["acme/steady", "acme/pricey"]
+    assert plan["config"]["model"] == "acme/steady" and plan["config"]["models"] == ["acme/steady", "acme/pricey"]
+    assert plan["reason"].startswith("Model list: adds pricey; drops acme/best.")
+    assert plan["excluded"]["models"] == 1
+
+
+def test_a_blocklist_does_not_give_a_blocked_models_margin_to_anything(client):
+    # steady has been the lead; blocking it hands the lead to the best value without the switch margin's help
+    _own_as(KEY)
+    _settings(blocked_models=["acme/steady"], switch_margin_pct=50)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/steady"}, version=3)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/best" and plan["kept_current"] is False
+
+
+def test_a_plan_whose_blocklists_leave_no_model_says_so(client):
+    _settings(blocked_models=["acme/*"])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+
+    assert plan["action"] == "blocked" and plan["considered"] == 0
+    assert "blocklist" in plan["reason"]
+    assert plan["excluded"]["models"] == 3
+
+
+def test_a_plan_with_no_blocklist_excludes_nothing(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        assert _plan(client)["excluded"] == {"models": 0, "providers": []}
+
+
+def test_blocklists_are_saved_with_the_settings_and_trimmed(client):
+    current = client.get("/api/settings").json()["settings"]
+    doc = _with_item(current, blocked_models=[" openai/* ", "", "*:free"], blocked_providers=["DeepInfra"])
+    doc["presets"]["blocked_models"] = ["x-ai/*"]
+    doc["presets"]["blocked_providers"] = ["slow*", "SLOW*"]
+
+    saved = client.put("/api/settings", json={"settings": doc}).json()["settings"]["presets"]
+
+    assert saved["items"][0]["blocked_models"] == ["openai/*", "*:free"]
+    assert saved["items"][0]["blocked_providers"] == ["DeepInfra"]
+    assert (saved["blocked_models"], saved["blocked_providers"]) == (["x-ai/*"], ["slow*"])

@@ -85,6 +85,11 @@ class PresetStateOut(BaseModel):
     slugs: dict[str, PresetSlugStateOut] = Field(description="What was last written and run, for each of them")
 
 
+class PresetExcludedOut(BaseModel):
+    models: int = Field(description="Models that passed the filters and were left out by a blocklist")
+    providers: list[str] = Field(description="Providers whose endpoints a blocklist kept from being chosen")
+
+
 class PresetPlanOut(BaseModel):
     action: Literal["create", "update", "unchanged", "blocked"]
     reason: str
@@ -111,6 +116,7 @@ class PresetPlanOut(BaseModel):
     request: PresetRequestOut | None
     digest: str | None = Field(description="Names this plan; `apply` refuses a plan that has changed since")
     warnings: list[str]
+    excluded: PresetExcludedOut = Field(description="What the blocklists removed from this run")
     state: PresetStateOut
 
 
@@ -216,6 +222,7 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         request=PresetRequestOut(url=plan.url, body=plan.body) if plan.url and plan.body else None,
         digest=plan.digest,
         warnings=plan.warnings,
+        excluded=PresetExcludedOut(models=plan.excluded.models, providers=plan.excluded.providers),
         state=_state_out(plan.state),
     )
 
