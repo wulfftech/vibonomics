@@ -5,9 +5,17 @@ from __future__ import annotations
 import copy
 import logging
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy.orm import Session
 
 from . import crypto
@@ -157,7 +165,13 @@ PRESET_SLUG_MAX = 64
 # OpenRouter answers HTTP 400 "A preset can have at most 3 models" to a longer list.
 PRESET_MAX_MODELS = 3
 PRESET_MIN_INTERVAL_HOURS = 0.5
+PRESET_MAX_ITEMS = 20
+PRESET_ADOPTED_SLUG_MAX = 100
+BLOCK_ENTRY_MAX = 100
+BLOCK_LIST_MAX = 200
 _TEMPLATE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A blocklist entry is an fnmatch pattern, matched case-insensitively: `openai/*`, `*:free`, `deepinfra`.
+BlockEntry = Annotated[str, StringConstraints(strip_whitespace=True, max_length=BLOCK_ENTRY_MAX)]
 
 
 def preset_slug(name: str) -> str:
@@ -177,12 +191,32 @@ def preset_slug(name: str) -> str:
     return slug
 
 
+def adopted_slug(value: str) -> str:
+    """The slug of a preset the operator made by hand and chose to hand over, kept exactly as OpenRouter has it."""
+    slug = value.strip()
+    if not _TEMPLATE_SLUG.match(slug):
+        raise ValueError("A preset slug has letters, digits, dots, hyphens and underscores only")
+    if len(slug) > PRESET_ADOPTED_SLUG_MAX:
+        raise ValueError(f"A preset slug is at most {PRESET_ADOPTED_SLUG_MAX} long")
+    return slug
+
+
+def _clean_patterns(value: list[str]) -> list[str]:
+    """Blank entries go, and so does a repeat that differs only in case."""
+    seen: dict[str, str] = {}
+    for entry in value:
+        if entry:
+            seen.setdefault(entry.lower(), entry)
+    return list(seen.values())
+
+
 class PresetSettings(BaseModel):
-    """The OpenRouter preset Vibonomics keeps pointed at the best-value models, and how it picks them.
+    """One OpenRouter preset Vibonomics keeps pointed at the best-value models, and how it picks them.
 
     Off by default: nothing is written to the OpenRouter account until ``enabled`` is set. The slug always starts
     with ``vibonomics-`` (it is added to whatever name is typed), so a preset the operator made by hand can never be
-    the one that is rewritten.
+    the one that is rewritten, unless the operator adopted it: ``adopted`` keeps the slug as typed, and grants
+    nothing by itself, because the engine also wants the adoption to be on record.
     """
 
     enabled: bool = Field(False, description="Let Vibonomics create and update the preset below on OpenRouter")
@@ -192,6 +226,12 @@ class PresetSettings(BaseModel):
         ge=PRESET_MIN_INTERVAL_HOURS,
         le=168,
         description="Hours between scheduled updates; 0.5 is every thirty minutes",
+    )
+    # Before `slug`, which reads it: a field validator only sees the fields declared above it.
+    adopted: bool = Field(
+        False,
+        description="A preset made by hand that Vibonomics now manages. Its name is kept as it is, and it counts "
+        "only if the adoption was recorded when it was adopted.",
     )
     slug: str = Field(
         f"{PRESET_SLUG_PREFIX}best-value",
@@ -240,10 +280,36 @@ class PresetSettings(BaseModel):
         "keeps at least one of its own, so the list can run past this when there are more models than providers.",
     )
 
+    blocked_models: list[BlockEntry] = Field(
+        default_factory=list,
+        max_length=BLOCK_LIST_MAX,
+        description="Models this preset never considers, as patterns: `openai/*`, `*:free`, an exact id. Added to "
+        "the list that applies to every preset.",
+    )
+    blocked_providers: list[BlockEntry] = Field(
+        default_factory=list,
+        max_length=BLOCK_LIST_MAX,
+        description="Providers this preset never pins, as patterns matched against the endpoint tag, its provider "
+        "part and the display name. Added to the list that applies to every preset.",
+    )
+    route: Literal["fallback", "sort"] = Field(
+        "fallback",
+        description="`fallback` writes no `route` and takes the models in order; `sort` writes `route: sort` and "
+        "`provider.sort`. OpenRouter does not document `route`, so the page reports it when it is not kept.",
+    )
+    sort: Literal["price", "throughput", "latency"] | None = Field(
+        None, description="What `provider.sort` is when `route` is `sort`; price when not set"
+    )
+
     @field_validator("slug")
     @classmethod
-    def _own_slug(cls, value: str) -> str:
-        return preset_slug(value)
+    def _own_slug(cls, value: str, info: ValidationInfo) -> str:
+        return adopted_slug(value) if info.data.get("adopted") else preset_slug(value)
+
+    @field_validator("blocked_models", "blocked_providers")
+    @classmethod
+    def _patterns(cls, value: list[str]) -> list[str]:
+        return _clean_patterns(value)
 
     @field_validator("template_slug")
     @classmethod
@@ -256,6 +322,39 @@ class PresetSettings(BaseModel):
         return value
 
 
+class PresetsSettings(BaseModel):
+    """Every OpenRouter preset Vibonomics manages, and the blocklists that apply to all of them."""
+
+    items: list[PresetSettings] = Field(default_factory=list, max_length=PRESET_MAX_ITEMS)
+    blocked_models: list[BlockEntry] = Field(
+        default_factory=list,
+        max_length=BLOCK_LIST_MAX,
+        description="Models no preset considers, as patterns: `openai/*`, `*:free`, an exact id",
+    )
+    blocked_providers: list[BlockEntry] = Field(
+        default_factory=list,
+        max_length=BLOCK_LIST_MAX,
+        description="Providers no preset pins, as patterns matched against the endpoint tag, its provider part and "
+        "the display name",
+    )
+
+    @field_validator("blocked_models", "blocked_providers")
+    @classmethod
+    def _patterns(cls, value: list[str]) -> list[str]:
+        return _clean_patterns(value)
+
+    @model_validator(mode="after")
+    def _unique_slugs(self) -> PresetsSettings:
+        slugs = [item.slug for item in self.items]
+        repeated = sorted({s for s in slugs if slugs.count(s) > 1})
+        if repeated:
+            raise ValueError(f"Two presets share the slug {repeated[0]}")
+        return self
+
+    def item(self, slug: str) -> PresetSettings | None:
+        return next((i for i in self.items if i.slug == slug), None)
+
+
 class AppSettings(BaseModel):
     general: GeneralSettings = Field(default_factory=GeneralSettings)
     refresh: RefreshSettings = Field(default_factory=RefreshSettings)
@@ -264,7 +363,7 @@ class AppSettings(BaseModel):
     benchmarks: BenchmarkSettings = Field(default_factory=BenchmarkSettings)
     evals: EvalSettings = Field(default_factory=EvalSettings)
     subscriptions: SubscriptionSettings = Field(default_factory=SubscriptionSettings)
-    presets: PresetSettings = Field(default_factory=PresetSettings)
+    presets: PresetsSettings = Field(default_factory=PresetsSettings)
 
     def benchmark_source(self, source_id: str, default_enabled: bool) -> BenchmarkSourceSettings:
         existing = self.benchmarks.sources.get(source_id)
@@ -277,11 +376,22 @@ class AppSettings(BaseModel):
         return crypto.decrypt(src.api_key_enc) if src else None
 
 
+# What names a preset: an item whose slug or adoption is invalid cannot be kept with a default in its place.
+_ITEM_IDENTITY = ("slug", "adopted")
+
+
 def _drop(data: Any, loc: tuple[int | str, ...]) -> bool:
-    """Remove what ``loc`` points at, so its field falls back to the default, or the whole list item it sits in."""
+    """Remove what ``loc`` points at, so its field falls back to the default, or the whole list item it sits in.
+
+    A preset keeps its other fields when one of them is bad: the item is a whole configuration, and losing it for a
+    single value would be a bigger reset than the value deserves.
+    """
     node = data
     for i, part in enumerate(loc):
         if isinstance(node, list) and isinstance(part, int) and part < len(node):
+            rest = loc[i + 1 :]
+            if loc[:2] == ("presets", "items") and i == 2 and rest and rest[0] not in _ITEM_IDENTITY:
+                return _drop(node[part], rest)
             del node[part]
             return True
         if not isinstance(node, dict) or part not in node:
@@ -293,13 +403,70 @@ def _drop(data: Any, loc: tuple[int | str, ...]) -> bool:
     return False
 
 
+# What a stored document held before several presets: the section was one preset's own fields.
+_SINGLE_PRESET_FIELDS = frozenset(PresetSettings.model_fields) - {"blocked_models", "blocked_providers", "adopted"}
+
+
+def _slug_of(item: Any) -> str | None:
+    """The slug an item will have once validated, or None when it has none worth comparing."""
+    if not isinstance(item, dict):
+        return None
+    raw = item.get("slug", PresetSettings.model_fields["slug"].default)
+    if not isinstance(raw, str):
+        return None
+    try:
+        return adopted_slug(raw) if item.get("adopted") is True else preset_slug(raw)
+    except ValueError:
+        return None
+
+
+def _untouched(old: dict[str, Any]) -> bool:
+    """Whether a single stored preset is only what a new instance starts with, so it is not worth keeping."""
+    defaults = PresetSettings().model_dump(mode="json")
+    return all(old.get(name, default) == default for name, default in defaults.items() if name in _SINGLE_PRESET_FIELDS)
+
+
+def _migrate_presets(data: Any) -> None:
+    """Bring the ``presets`` section to the shape with a list of items, without resetting any of it.
+
+    A document written for one preset becomes a list of that one, unless it never left the defaults. A list that
+    this release would refuse as a whole (a repeated slug, more than the limit) is cut down instead, because a
+    failure in the section would reset every preset in it.
+    """
+    section = data.get("presets") if isinstance(data, dict) else None
+    if not isinstance(section, dict):
+        return
+    if "items" not in section and _SINGLE_PRESET_FIELDS & section.keys():
+        log.warning("Stored presets are in the single-preset shape; moving them into the list of presets")
+        section = data["presets"] = {"items": [] if _untouched(section) else [section]}
+    items = section.get("items")
+    if not isinstance(items, list):
+        return
+    kept: list[Any] = []
+    seen: set[str] = set()
+    for item in items:
+        slug = _slug_of(item)
+        if slug is not None and slug in seen:
+            log.error("Stored presets name %s twice; keeping the first", slug)
+            continue
+        if slug is not None:
+            seen.add(slug)
+        kept.append(item)
+    if len(kept) > PRESET_MAX_ITEMS:
+        log.error("Stored presets hold %s items; keeping the first %s", len(kept), PRESET_MAX_ITEMS)
+        kept = kept[:PRESET_MAX_ITEMS]
+    section["items"] = kept
+
+
 def _clamp_preset_models(data: Any) -> None:
     """A lineup saved when the limit was ten becomes three, not the default of one a rejected value would get."""
-    presets = data.get("presets") if isinstance(data, dict) else None
-    listed = presets.get("max_models") if isinstance(presets, dict) else None
-    if isinstance(listed, int) and not isinstance(listed, bool) and listed > PRESET_MAX_MODELS:
-        log.warning("Stored presets.max_models is %s; OpenRouter allows %s, using that", listed, PRESET_MAX_MODELS)
-        presets["max_models"] = PRESET_MAX_MODELS
+    section = data.get("presets") if isinstance(data, dict) else None
+    items = section.get("items") if isinstance(section, dict) else None
+    for item in items if isinstance(items, list) else []:
+        listed = item.get("max_models") if isinstance(item, dict) else None
+        if isinstance(listed, int) and not isinstance(listed, bool) and listed > PRESET_MAX_MODELS:
+            log.warning("Stored max_models is %s; OpenRouter allows %s, using that", listed, PRESET_MAX_MODELS)
+            item["max_models"] = PRESET_MAX_MODELS
 
 
 def _validate_stored(raw: Any) -> AppSettings:
@@ -309,6 +476,7 @@ def _validate_stored(raw: Any) -> AppSettings:
     starting, nor take the keys and token stored beside it down with it. Each one is logged and reset to its default.
     """
     data = copy.deepcopy(raw)
+    _migrate_presets(data)
     _clamp_preset_models(data)
     for _ in range(100):
         try:

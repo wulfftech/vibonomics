@@ -1,9 +1,10 @@
-"""The OpenRouter preset Vibonomics keeps pointed at the best-value model: preview it, then apply it.
+"""The OpenRouter presets Vibonomics keeps pointed at the best-value model: preview one, then apply it.
 
-``POST /api/presets/plan`` is the dry run: it reads from OpenRouter, ranks the models, and returns the exact request
-an update would send, writing nothing. ``POST /api/presets/apply`` sends it, and only the plan whose digest the caller
-names. Both are POSTs because they call OpenRouter with the operator's key, so a visitor to an instance that is open to
-read cannot trigger them. The settings that steer the ranking live in ``settings.presets``.
+``POST /api/presets/plan`` is the dry run for one preset: it reads from OpenRouter, ranks the models, and returns the
+exact request an update would send, writing nothing. ``POST /api/presets/apply`` sends it, and only the plan whose
+digest the caller names. All of them are POSTs because they call OpenRouter with the operator's key, so a visitor to
+an instance that is open to read cannot trigger them. The settings that steer the ranking live in
+``settings.presets.items``, one item per preset.
 """
 
 from __future__ import annotations
@@ -69,9 +70,7 @@ class PresetRequestOut(BaseModel):
     body: dict[str, Any] = Field(description="Sent exactly as shown; the API requires `messages` and then ignores it")
 
 
-class PresetStateOut(BaseModel):
-    owned: list[str] = Field(description="Slugs Vibonomics created, the only ones it will ever write")
-    slug: str | None = Field(None, description="The preset last written")
+class PresetSlugStateOut(BaseModel):
     model_id: str | None = None
     version: int | None = None
     applied_at: datetime | None = None
@@ -79,6 +78,11 @@ class PresetStateOut(BaseModel):
     last_status: str | None = Field(None, description="applied, unchanged, blocked or failed")
     last_message: str | None = None
     last_trigger: str | None = None
+
+
+class PresetStateOut(BaseModel):
+    owned: list[str] = Field(description="Slugs Vibonomics created or adopted, the only ones it will ever write")
+    slugs: dict[str, PresetSlugStateOut] = Field(description="What was last written and run, for each of them")
 
 
 class PresetPlanOut(BaseModel):
@@ -125,14 +129,16 @@ class PresetListOut(BaseModel):
 
 
 class PresetPlanIn(BaseModel):
+    slug: str | None = Field(None, description="A saved preset to plan")
     settings: PresetSettings | None = Field(
         None,
-        description="Preset settings to preview in place of the saved ones, to try them out. Nothing is saved, "
-        "and a plan made from them cannot be applied.",
+        description="Settings for one preset to preview in place of the saved ones, to try them out; its own slug "
+        "names the preset. Nothing is saved, and a plan made from them cannot be applied.",
     )
 
 
 class PresetApplyIn(BaseModel):
+    slug: str = Field(min_length=1, description="The saved preset to write")
     digest: str = Field(min_length=1, description="The digest of the plan that was reviewed")
 
 
@@ -155,24 +161,26 @@ def _candidate(c: Candidate) -> PresetCandidateOut:
     )
 
 
+def _when(raw: object) -> datetime | None:
+    return datetime.fromisoformat(raw) if isinstance(raw, str) and raw else None
+
+
 def _state_out(state: dict[str, Any]) -> PresetStateOut:
-    applied = state.get("applied") or {}
-    last = state.get("last") or {}
-
-    def when(raw: object) -> datetime | None:
-        return datetime.fromisoformat(raw) if isinstance(raw, str) and raw else None
-
-    return PresetStateOut(
-        owned=list(state.get("owned") or []),
-        slug=applied.get("slug"),
-        model_id=applied.get("model_id"),
-        version=applied.get("version"),
-        applied_at=when(applied.get("at")),
-        last_run_at=when(last.get("at")),
-        last_status=last.get("status"),
-        last_message=last.get("message"),
-        last_trigger=last.get("trigger"),
-    )
+    owned = list(state.get("owned") or [])
+    all_applied, all_last = state.get("applied") or {}, state.get("last") or {}
+    slugs: dict[str, PresetSlugStateOut] = {}
+    for slug in dict.fromkeys([*owned, *all_applied, *all_last]):
+        applied, last = all_applied.get(slug) or {}, all_last.get(slug) or {}
+        slugs[slug] = PresetSlugStateOut(
+            model_id=applied.get("model_id"),
+            version=applied.get("version"),
+            applied_at=_when(applied.get("at")),
+            last_run_at=_when(last.get("at")),
+            last_status=last.get("status"),
+            last_message=last.get("message"),
+            last_trigger=last.get("trigger"),
+        )
+    return PresetStateOut(owned=owned, slugs=slugs)
 
 
 def _plan_out(plan: Plan) -> PresetPlanOut:
@@ -235,16 +243,27 @@ async def preset_list() -> PresetListOut:
 async def preset_plan(body: PresetPlanIn | None = None) -> PresetPlanOut:
     """The dry run: rank the models, read the preset, and show the exact request an update would send.
 
-    With ``settings`` it previews those, unsaved, so a change can be tried before it is kept.
+    ``slug`` plans a saved preset. ``settings`` previews those settings, unsaved, so a change can be tried before it is
+    kept, or a preset that is not saved yet.
     """
-    return _plan_out(await presets.make_plan(draft=body.settings if body else None))
+    if body is None or (body.slug is None and body.settings is None):
+        raise HTTPException(422, "Name the preset to plan with `slug`, or send its `settings` to preview.")
+    draft = body.settings
+    slug = draft.slug if draft is not None else str(body.slug)
+    try:
+        plan = await presets.make_plan(slug, draft=draft)
+    except presets.PresetNotConfigured as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return _plan_out(plan)
 
 
 @router.post("/apply", response_model=PresetApplyOut)
 async def preset_apply(body: PresetApplyIn) -> PresetApplyOut:
     """Write the plan the caller reviewed, if it is still the plan and there is something to write."""
     try:
-        plan, applied = await presets.apply(body.digest, "manual")
+        plan, applied = await presets.apply(body.slug, body.digest, "manual")
+    except presets.PresetNotConfigured as exc:
+        raise HTTPException(404, str(exc)) from exc
     except presets.PresetDisabled as exc:
         raise HTTPException(409, str(exc)) from exc
     except presets.PlanChanged as exc:

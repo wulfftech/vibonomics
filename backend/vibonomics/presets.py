@@ -59,6 +59,10 @@ UNSEEN_FILTERS = ("zdr", "data_collection", "max_price", "require_parameters")
 _lock = asyncio.Lock()
 
 
+class PresetNotConfigured(Exception):
+    """A slug that is not among the presets Vibonomics manages was asked for."""
+
+
 class PresetDisabled(Exception):
     """Applying was asked for while the operator has not allowed Vibonomics to write the preset."""
 
@@ -145,6 +149,7 @@ class Applied:
 @dataclass
 class Inputs:
     settings: AppSettings
+    preset: PresetSettings  # the item this plan is for: the saved one, or the draft standing in for it
     candidates: list[Candidate]
     task: Task
     profile_id: str
@@ -158,17 +163,19 @@ class Inputs:
 # ---- ranking -------------------------------------------------------------------------------------------------
 
 
-def _task(settings: AppSettings) -> tuple[Task, str]:
+def _task(settings: AppSettings, preset: PresetSettings) -> tuple[Task, str]:
     profiles = settings.scoring.profiles or DEFAULT_PROFILES
-    wanted = settings.presets.profile or settings.scoring.default_profile
+    wanted = preset.profile or settings.scoring.default_profile
     profile = next((p for p in profiles if p.id == wanted), profiles[0])
     return Task(profile.task_input_tokens, profile.task_output_tokens, profile.cache_hit_rate), profile.id
 
 
-def rank(session: Session, settings: AppSettings, provider_ids: list[int]) -> tuple[list[Candidate], Task, str]:
-    """The OpenRouter models that pass the operator's filters, best value first."""
-    cfg = settings.presets
-    task, profile_id = _task(settings)
+def rank(
+    session: Session, settings: AppSettings, provider_ids: list[int], preset: PresetSettings
+) -> tuple[list[Candidate], Task, str]:
+    """The OpenRouter models that pass ``preset``'s filters, best value first."""
+    cfg = preset
+    task, profile_id = _task(settings, preset)
     if not provider_ids:
         return [], task, profile_id
     scores = compute_scores(session, settings, own_test_scores(session))
@@ -427,9 +434,27 @@ def owner_fingerprint(base_url: str, api_key: str) -> str:
 # ---- state ---------------------------------------------------------------------------------------------------
 
 
+# Kept per slug, so a write to one preset leaves what another's record says alone.
+_PER_SLUG = ("owners", "pins", "applied", "last", "reviewed")
+
+
+def _normalise_state(raw: dict[str, Any]) -> dict[str, Any]:
+    """The stored record in today's shape.
+
+    Before several presets, ``applied`` and ``last`` each held the one preset's dict, with its slug inside it. They
+    are read as ``{slug: that}``, and the record is rewritten that way by the next write.
+    """
+    state = dict(raw)
+    for key in ("applied", "last"):
+        value = state.get(key)
+        if isinstance(value, dict) and isinstance(value.get("slug"), str):
+            state[key] = {value["slug"]: value} if value["slug"] else {}
+    return state
+
+
 def _load_state(session: Session) -> dict[str, Any]:
     row = session.get(Setting, STATE_KEY)
-    return dict(row.value) if row is not None and row.value else {}
+    return _normalise_state(row.value) if row is not None and row.value else {}
 
 
 def read_state() -> dict[str, Any]:
@@ -441,15 +466,13 @@ def read_state() -> dict[str, Any]:
 def _update_state(
     patch: dict[str, Any], own: str | None = None, owner: dict[str, Any] | None = None, keep_owner: bool = False
 ) -> None:
-    """Merge ``patch`` into the stored state. ``own`` adds a slug to ``owned`` and ``owner`` is its account record;
-    ``keep_owner`` leaves a record that is already there alone."""
+    """Merge ``patch`` into the stored state, slug by slug. ``own`` adds a slug to ``owned`` and ``owner`` is its
+    account record; ``keep_owner`` leaves a record that is already there alone."""
     with session_scope() as s:
         row = s.get(Setting, STATE_KEY)
-        state = dict(row.value) if row is not None and row.value else {}
-        pins = {**(state.get("pins") or {}), **(patch.get("pins") or {})}
-        state.update(patch)
-        if pins:
-            state["pins"] = pins
+        state = _load_state(s)
+        for key, value in patch.items():
+            state[key] = {**(state.get(key) or {}), **value} if key in _PER_SLUG else value
         if own and own not in state.get("owned", []):
             state["owned"] = [*state.get("owned", []), own]
         if own and owner is not None and not (keep_owner and own in (state.get("owners") or {})):
@@ -462,7 +485,7 @@ def _update_state(
 
 def _record_run(slug: str, status: str, message: str, trigger: str, patch: dict[str, Any] | None = None) -> None:
     last = {"at": utcnow().isoformat(), "status": status, "message": message[:500], "trigger": trigger, "slug": slug}
-    _update_state({**(patch or {}), "last": last})
+    _update_state({**(patch or {}), "last": {slug: last}})
     events.publish("presets.changed", {"status": status})
 
 
@@ -621,19 +644,23 @@ def load_access() -> tuple[str, str | None, dict[str, Any]]:
         return base, key, _load_state(s)
 
 
-def load_inputs(draft: PresetSettings | None = None) -> Inputs:
-    """What a plan needs from this instance. ``draft`` stands in for the saved preset settings, to try them out."""
+def load_inputs(slug: str, draft: PresetSettings | None = None) -> Inputs:
+    """What a plan for ``slug`` needs from this instance.
+
+    ``draft`` stands in for the saved item, to try settings out; it is the only way to plan a preset that is not saved.
+    """
     with session_scope() as s:
         settings = load_settings(s)
-        if draft is not None:
-            settings = settings.model_copy(update={"presets": draft})
+        preset = draft if draft is not None else settings.presets.item(slug)
+        if preset is None:
+            raise PresetNotConfigured(f"{slug} is not one of the presets Vibonomics manages.")
         providers = _openrouter_providers(s)
         resolved = [resolve(p) for p in providers]
-        candidates, task, profile_id = rank(s, settings, [p.id for p in providers])
+        candidates, task, profile_id = rank(s, settings, [p.id for p in providers], preset)
         state = _load_state(s)
     base, key, ignored = _access(resolved)
     return Inputs(
-        settings, candidates, task, profile_id, base, key, state, draft=draft is not None, ignored_base=ignored
+        settings, preset, candidates, task, profile_id, base, key, state, draft=draft is not None, ignored_base=ignored
     )
 
 
@@ -686,13 +713,13 @@ def _percent(better: float, worse: float) -> int:
     return round((better / worse - 1) * 100) if worse > 0 else 0
 
 
-async def make_plan(inputs: Inputs | None = None, draft: PresetSettings | None = None) -> Plan:
-    """What the next update would do. Reads from OpenRouter, writes nothing.
+async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettings | None = None) -> Plan:
+    """What the next update of ``slug`` would do. Reads from OpenRouter, writes nothing.
 
     ``draft`` previews settings that are not saved. Applying never uses one: it always plans from what is saved.
     """
-    inputs = inputs or await asyncio.to_thread(load_inputs, draft)
-    cfg = inputs.settings.presets
+    inputs = inputs or await asyncio.to_thread(load_inputs, slug, draft)
+    cfg = inputs.preset
     plan = Plan(
         slug=cfg.slug,
         action="blocked",
@@ -973,7 +1000,7 @@ async def _settle(
     # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
     owner = _claim_record(plan, inputs.state, version, preset_id, created_at)
     pins = {"pins": {slug: plan.pinned or []}}
-    await asyncio.to_thread(_update_state, {"applied": applied, **pins}, slug, owner)
+    await asyncio.to_thread(_update_state, {"applied": {slug: applied}, **pins}, slug, owner)
     await asyncio.to_thread(_record_run, slug, "applied", message, trigger)
     return Applied(version=version, unsaved=unsaved, message=message)
 
@@ -1014,14 +1041,18 @@ async def _read_back(plan: Plan, inputs: Inputs, trigger: str) -> Applied | None
     )
 
 
-async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]:
-    """Write the plan if there is something to write. ``digest`` pins it to a plan the operator reviewed."""
+async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Applied | None]:
+    """Write the plan for ``slug`` if there is something to write.
+
+    ``digest`` pins it to a plan the operator reviewed. The plan is made from the saved item, never from a draft, and
+    one lock covers every preset, so two writes never overlap.
+    """
     async with _lock:
-        inputs = await asyncio.to_thread(load_inputs)
-        cfg = inputs.settings.presets
+        inputs = await asyncio.to_thread(load_inputs, slug)
+        cfg = inputs.preset
         if not cfg.enabled:
             raise PresetDisabled("Turn on 'Let Vibonomics write the preset' first.")
-        plan = await make_plan(inputs)
+        plan = await make_plan(slug, inputs)
         if digest is not None and plan.digest != digest:
             raise PlanChanged("The plan changed since you looked at it. Preview it again.")
         if plan.action not in ("create", "update") or plan.body is None or plan.url is None or plan.config is None:
@@ -1063,17 +1094,17 @@ async def apply(digest: str | None, trigger: str) -> tuple[Plan, Applied | None]
         return plan, await _settle(plan, inputs, trigger, version, stored, *ident)
 
 
-async def sync(trigger: str = "schedule") -> None:
-    """The scheduled run: apply, and keep going whatever happens."""
+async def sync(slug: str, trigger: str = "schedule") -> None:
+    """The scheduled run for one preset: apply, and keep going whatever happens."""
     try:
-        plan, applied = await apply(None, trigger)
-    except PresetDisabled:
+        plan, applied = await apply(slug, None, trigger)
+    except (PresetDisabled, PresetNotConfigured):
         return
     except PresetWriteError as exc:
-        log.warning("Preset update failed: %s", exc)
+        log.warning("Preset %s update failed: %s", slug, exc)
         return
     except Exception as exc:  # the scheduler must survive any single failure
-        log.exception("Preset sync failed")
-        await asyncio.to_thread(_record_run, "", "failed", f"{type(exc).__name__}: {failure_text(exc)}", trigger)
+        log.exception("Preset sync of %s failed", slug)
+        await asyncio.to_thread(_record_run, slug, "failed", f"{type(exc).__name__}: {failure_text(exc)}", trigger)
         return
     log.info("Preset %s: %s", plan.slug, applied.message if applied else plan.reason)
