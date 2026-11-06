@@ -47,7 +47,13 @@ function plan(over: Partial<PresetPlan> = {}): PresetPlan {
     request: null,
     digest: 'abc123',
     warnings: [],
-    state: { owned: ['vibonomics-best-value'] },
+    route: 'fallback',
+    sort: null,
+    excluded: { models: 0, providers: [] },
+    own_tests_preferred: false,
+    passthrough: {},
+    managed_keys: ['model', 'models', 'provider.only'],
+    state: { owned: ['vibonomics-best-value'], slugs: {} },
     ...over,
   };
 }
@@ -236,5 +242,175 @@ describe('PresetPlanView versions', () => {
     expect(screen.queryByRole('button', { name: /Versions on OpenRouter/ })).toBeNull();
     expect(screen.queryByLabelText('Preset versions')).toBeNull();
     expect(screen.queryByText(/Versions on OpenRouter/)).toBeNull();
+  });
+});
+
+describe('PresetPlanView summary', () => {
+  it('shows what would happen, the live version and the changed keys', () => {
+    view(
+      plan({
+        warnings: ['No provider data for one runner-up.'],
+        changes: [{ path: 'model', before: '"deepseek/old"', after: '"deepseek/flash"' }],
+      }),
+    );
+    expect(screen.getByText('Update')).toBeInTheDocument();
+    expect(screen.getByText('Switches deepseek/old to Flash, 31% more value.')).toBeInTheDocument();
+    expect(screen.getByText('Live version').parentElement).toHaveTextContent('v4');
+    expect(screen.getByText('@preset/vibonomics-best-value')).toBeInTheDocument();
+    expect(screen.getByText('No provider data for one runner-up.')).toBeInTheDocument();
+    expect(within(screen.getByRole('table', { name: 'Changes' })).getByText('"deepseek/flash"')).toBeInTheDocument();
+  });
+
+  it('keeps the API call out of the way until it is asked for', async () => {
+    const user = userEvent.setup();
+    view(
+      plan({
+        request: {
+          method: 'POST',
+          url: 'https://openrouter.ai/api/v1/presets/vibonomics-best-value/chat/completions',
+          body: { model: 'deepseek/flash', messages: [{ role: 'user', content: 'Vibonomics preset update' }] },
+        },
+      }),
+    );
+    const toggle = screen.getByRole('button', { name: 'View API call' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByLabelText('Request body')).not.toBeVisible();
+
+    await user.click(toggle);
+    expect(screen.getByRole('button', { name: 'Hide API call' })).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(screen.getByLabelText('Request body')).toBeVisible());
+    expect(screen.getByLabelText('Request body')).toHaveTextContent('"model": "deepseek/flash"');
+    expect(screen.getByLabelText('Request body')).toHaveTextContent('"messages"');
+
+    await user.click(screen.getByRole('button', { name: 'Hide API call' }));
+    await waitFor(() => expect(screen.getByLabelText('Request body')).not.toBeVisible());
+  });
+
+  it('says a preset that does not exist yet is not created, and offers no API call when blocked', () => {
+    view(
+      plan({
+        action: 'blocked',
+        reason: 'A preset called vibonomics-best-value already exists.',
+        current_version: null,
+        versions: [],
+        request: null,
+        changes: [],
+        digest: null,
+      }),
+    );
+    expect(screen.getByText('Blocked')).toBeInTheDocument();
+    expect(screen.getByText('Not created yet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'View API call' })).toBeNull();
+    expect(screen.queryByRole('table', { name: 'Preset versions' })).toBeNull();
+  });
+
+  it('lists several models in order, and the models each provider is there for', () => {
+    view(
+      plan({
+        picks: [FLASH, GLM],
+        providers: [
+          { ...plan().providers[0], models: ['deepseek/flash', 'z-ai/glm:free'] },
+          {
+            ...plan().providers[0],
+            tag: 'novita/fp4',
+            provider: 'Novita',
+            task_cost: 0.055,
+            models: ['z-ai/glm:free'],
+          },
+        ],
+      }),
+    );
+    const models = within(screen.getByRole('table', { name: 'Models' }));
+    expect(models.getAllByRole('row').map((r) => r.textContent)).toEqual([
+      '#ModelScorePer taskValue',
+      '1Flash deepseek/flash71.4$0.0551,298',
+      '2GLM z-ai/glm:free66$0.07940',
+    ]);
+  });
+});
+
+describe('PresetPlanView routing, blocklists and scores', () => {
+  it('says the models are tried in order on the fallback route', () => {
+    view(plan());
+    expect(screen.getByText('Routing: fallback, OpenRouter tries the models in the order listed.')).toBeInTheDocument();
+  });
+
+  it('says what the sort route orders by, and price when none is named', () => {
+    const { unmount } = view(plan({ route: 'sort', sort: 'latency' }));
+    expect(screen.getByText('Routing: sort, OpenRouter orders the models by latency.')).toBeInTheDocument();
+    unmount();
+    view(plan({ route: 'sort', sort: null }));
+    expect(screen.getByText('Routing: sort, OpenRouter orders the models by price.')).toBeInTheDocument();
+  });
+
+  it('says nothing about the blocklists when they left nothing out', () => {
+    view(plan());
+    expect(screen.queryByText(/Left out by your blocklists/)).toBeNull();
+  });
+
+  it.each([
+    [
+      { models: 3, providers: ['deepinfra', 'novita'] },
+      'Left out by your blocklists: 3 models, providers: deepinfra, novita',
+    ],
+    [{ models: 1, providers: [] }, 'Left out by your blocklists: 1 model'],
+    [{ models: 0, providers: ['novita'] }, 'Left out by your blocklists: providers: novita'],
+  ])('says what the blocklists left out: %j', (excluded, line) => {
+    view(plan({ excluded }));
+    expect(screen.getByText(line)).toBeInTheDocument();
+  });
+
+  it('says when the scores are the owner own tests, and only then', () => {
+    const { unmount } = view(plan({ own_tests_preferred: true }));
+    expect(screen.getByText('Scores used: your own tests where a model has enough of them.')).toBeInTheDocument();
+    unmount();
+    view(plan({ own_tests_preferred: false }));
+    expect(screen.queryByText(/Scores used/)).toBeNull();
+  });
+});
+
+describe('PresetPlanView kept as it is', () => {
+  it('shows the keys Vibonomics sends back unchanged as raw JSON, with the promise', () => {
+    view(plan({ passthrough: { temperature: 0.2, provider: { data_collection: 'deny' } } }));
+    expect(screen.getByText('Kept as it is')).toBeInTheDocument();
+    expect(
+      screen.getByText('Vibonomics has no integration for these keys and will send them back unchanged.'),
+    ).toBeInTheDocument();
+    const raw = screen.getByLabelText('Kept as it is, raw JSON');
+    expect(raw.tagName).toBe('PRE');
+    expect(JSON.parse(raw.textContent ?? '')).toEqual({ temperature: 0.2, provider: { data_collection: 'deny' } });
+    expect(raw).toHaveTextContent('"data_collection": "deny"');
+  });
+
+  it('says nothing is kept when there are no such keys, but still shows the block', () => {
+    view(plan({ passthrough: {} }));
+    expect(screen.getByText('Kept as it is')).toBeInTheDocument();
+    expect(screen.getByText('nothing')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Kept as it is, raw JSON')).toBeNull();
+  });
+});
+
+describe('PresetPlanView link to the preset', () => {
+  it('links the preset to its page on OpenRouter once it has an id, in the workspace OpenRouter names', () => {
+    view(plan({ preset_id: 'pre_9', workspace: 'team-a' }));
+    expectOpensOpenRouter(
+      screen.getByRole('link', { name: /Open on OpenRouter/ }),
+      'https://openrouter.ai/workspaces/team-a/presets/pre_9/edit',
+    );
+  });
+
+  it('assumes the default workspace when none is named', () => {
+    view(plan({ preset_id: 'pre_9', workspace: null }));
+    expect(screen.getByRole('link', { name: /Open on OpenRouter/ })).toHaveAttribute(
+      'href',
+      'https://openrouter.ai/workspaces/default/presets/pre_9/edit',
+    );
+  });
+
+  it('has no link for a preset that is not on OpenRouter yet', () => {
+    view(plan({ preset_id: null, workspace: null, current_version: null, versions: [] }));
+    expect(screen.queryByRole('link', { name: /Open on OpenRouter/ })).toBeNull();
+    view(plan());
+    expect(screen.queryByRole('link', { name: /Open on OpenRouter/ })).toBeNull();
   });
 });
