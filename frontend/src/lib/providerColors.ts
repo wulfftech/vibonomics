@@ -1,3 +1,5 @@
+import { tone } from './tone';
+
 /** Deterministic colours for providers: known brands first, a stable hash for anything else. */
 
 const KNOWN: Record<string, string> = {
@@ -54,6 +56,5 @@ export function providerColor(type: string | null | undefined): string {
 
 /** Readable provider text colour in both schemes; the dot uses the filled shade. */
 export function providerTextColor(type: string | null | undefined): string {
-  const color = providerColor(type);
-  return `light-dark(var(--mantine-color-${color}-8), var(--mantine-color-${color}-4))`;
+  return tone(providerColor(type));
 }
