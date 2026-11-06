@@ -167,6 +167,7 @@ class Plan:
     state: dict[str, Any] = field(default_factory=dict)
     draft: bool = False  # made from unsaved settings, so it cannot be applied
     excluded: Excluded = field(default_factory=Excluded)  # what the blocklists took out of this run
+    own_tests_preferred: bool = False  # the scores the ranking used: the model's own tests over the computed ones
     passthrough: dict[str, Any] = field(default_factory=dict)  # the keys that are sent back as they were found
     reviewed: str | None = None  # the passthrough digest to record as seen, once an apply the owner watched is done
     fingerprint: str | None = None  # which key and host the plan was made for
@@ -241,6 +242,12 @@ def _task(settings: AppSettings, preset: PresetSettings) -> tuple[Task, str]:
     return Task(profile.task_input_tokens, profile.task_output_tokens, profile.cache_hit_rate), profile.id
 
 
+def own_tests_preferred(settings: AppSettings, preset: PresetSettings) -> bool:
+    """Whether ``preset``'s ranking takes a model's own test score over the computed one: its own choice, else the
+    global Scoring switch."""
+    return settings.scoring.prefer_own_tests if preset.prefer_own_tests is None else preset.prefer_own_tests
+
+
 def rank(
     session: Session,
     settings: AppSettings,
@@ -261,7 +268,7 @@ def rank(
     blocked_models, blocked_providers = blocklists(settings, preset)
     dropped: set[str] = set()
     skipped: set[str] = set()
-    scores = compute_scores(session, settings, own_test_scores(session))
+    scores = compute_scores(session, settings, own_test_scores(session), own_tests_preferred(settings, preset))
     free_cost = max(0.0, settings.scoring.free_model_cost)
     best: dict[str, Candidate] = {}
     query = select(Model).where(Model.provider_config_id.in_(provider_ids), Model.active.is_(True))
@@ -944,6 +951,7 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         state=inputs.state,
         draft=inputs.draft,
         excluded=inputs.excluded,
+        own_tests_preferred=own_tests_preferred(inputs.settings, cfg),
     )
     blocked_providers = blocklists(inputs.settings, cfg)[1]
     if cfg.adopted and not is_adopted(inputs.state, cfg.slug):

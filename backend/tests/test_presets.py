@@ -10,13 +10,13 @@ import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from vibonomics import crypto
 from vibonomics.app import create_app
 from vibonomics.config import get_config
 from vibonomics.db import init_db, session_scope
-from vibonomics.orm import BenchmarkScore, Model, ProviderConfig, Setting
+from vibonomics.orm import BenchmarkScore, EvalResult, EvalRun, Model, ProviderConfig, Setting
 from vibonomics.presets import (
     PLACEHOLDER_MESSAGES,
     STATE_KEY,
@@ -118,6 +118,10 @@ def _settings(**patch: Any) -> None:
 
 
 def _clean(session) -> None:
+    # SQLite hands a deleted provider's id to the next one, which would inherit its test results.
+    runs = select(EvalRun.id).where(EvalRun.suite == "preset-test")
+    session.execute(delete(EvalResult).where(EvalResult.run_id.in_(runs)))
+    session.execute(delete(EvalRun).where(EvalRun.suite == "preset-test"))
     session.execute(delete(ProviderConfig).where(ProviderConfig.type == "openrouter"))
     session.execute(delete(BenchmarkScore).where(BenchmarkScore.canonical_id.like("preset-test/%")))
     session.execute(delete(Setting).where(Setting.key.in_(["app", STATE_KEY])))
@@ -1007,6 +1011,124 @@ def test_a_plan_with_nothing_left_after_the_limits_names_them(client):
         plan = _plan(client)
     assert plan["action"] == "blocked" and plan["considered"] == 0
     assert "value floor" in plan["reason"] and "cost limit" in plan["reason"]
+
+
+# ---- preferring the model's own test scores, for one preset ---------------------------------------------------
+
+
+def _tested_well(model_id: str = "acme/steady", tasks: int = 5) -> None:
+    """Give a model weak third-party coding and agentic scores and a perfect run of its own tests.
+
+    Blended with the benchmarks that earns it a composite near 65, below acme/best's 80; taken as it stands it
+    is 94, which puts it ahead of acme/best despite costing 5% more.
+    """
+    canonical = _canonical(model_id)
+    with session_scope() as session:
+        provider = session.scalars(select(ProviderConfig).where(ProviderConfig.name == PROVIDER)).one()
+        for source, metric, dimension in (
+            ("epoch", "swe_bench_verified", "coding"),
+            ("terminal-bench", "accuracy", "agentic"),
+        ):
+            session.add(
+                BenchmarkScore(
+                    source=source,
+                    metric=metric,
+                    dimension=dimension,
+                    source_model=f"preset-test-{model_id}-{metric}",
+                    canonical_id=canonical,
+                    value=20,
+                    percentile=20,
+                )
+            )
+        run = EvalRun(status="done", suite="preset-test")
+        session.add(run)
+        session.flush()
+        for n in range(tasks):
+            session.add(
+                EvalResult(
+                    run_id=run.id,
+                    provider_config_id=provider.id,
+                    model_id=model_id,
+                    canonical_id=canonical,
+                    task_id=f"t{n}",
+                    category="chat",
+                    status="passed",
+                    score=100.0,
+                )
+            )
+
+
+def _prefer_globally(on: bool) -> None:
+    with session_scope() as session:
+        settings = load_settings(session).model_copy(deep=True)
+        settings.scoring.prefer_own_tests = on
+        save_settings(session, settings)
+
+
+def _ranked_preferring(override: bool | None, globally: bool) -> list[str]:
+    _prefer_globally(globally)
+    return _ranked(prefer_own_tests=override)
+
+
+def test_a_preset_can_prefer_the_models_own_tests_while_the_global_setting_does_not(client):
+    _tested_well()
+    assert _ranked_preferring(None, False) == ["acme/best", "acme/steady", "acme/pricey"]
+    assert _ranked_preferring(True, False) == ["acme/steady", "acme/best", "acme/pricey"]
+
+
+def test_a_preset_can_ignore_the_models_own_tests_while_the_global_setting_prefers_them(client):
+    _tested_well()
+    assert _ranked_preferring(None, True) == ["acme/steady", "acme/best", "acme/pricey"]
+    assert _ranked_preferring(False, True) == ["acme/best", "acme/steady", "acme/pricey"]
+
+
+def test_a_preset_with_no_choice_of_its_own_follows_the_global_setting(client):
+    _tested_well()
+    assert PresetSettings().prefer_own_tests is None
+    assert _ranked_preferring(None, True) == _ranked_preferring(True, True)
+    assert _ranked_preferring(None, False) == _ranked_preferring(False, False)
+
+
+def test_the_preference_still_waits_for_the_minimum_number_of_graded_tasks(client):
+    _tested_well(tasks=4)  # one short of the default five
+    assert _ranked_preferring(True, False) == ["acme/best", "acme/steady", "acme/pricey"]
+
+
+def test_the_choice_changes_which_model_the_plan_leads_with_and_the_plan_says_which_scores_it_used(client):
+    _tested_well()
+    _settings(prefer_own_tests=True)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/steady"
+    assert plan["own_tests_preferred"] is True
+    assert plan["config"]["model"] == "acme/steady"
+
+
+@pytest.mark.parametrize(
+    ("override", "globally", "effective"),
+    [(None, False, False), (None, True, True), (True, False, True), (False, True, False)],
+)
+def test_the_plan_reports_the_value_that_was_in_force_not_the_presets_own_field(client, override, globally, effective):
+    _settings(prefer_own_tests=override)
+    _prefer_globally(globally)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        assert _plan(client)["own_tests_preferred"] is effective
+
+
+def test_a_draft_is_ranked_with_its_own_choice(client):
+    _tested_well()
+    saved = _saved_presets(client)
+    assert saved["prefer_own_tests"] is None
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        saved_plan = _plan(client)
+        draft = client.post("/api/presets/plan", json={"settings": {**saved, "prefer_own_tests": True}}).json()
+    assert (saved_plan["pick"]["model_id"], saved_plan["own_tests_preferred"]) == ("acme/best", False)
+    assert (draft["pick"]["model_id"], draft["own_tests_preferred"]) == ("acme/steady", True)
+    assert draft["draft"] is True
+    assert _saved_presets(client)["prefer_own_tests"] is None  # previewing kept nothing
 
 
 # ---- previewing settings that are not saved -------------------------------------------------------------------

@@ -212,7 +212,7 @@ def test_a_stored_value_that_no_longer_validates_falls_back_without_losing_the_r
 
 def _single_preset(**changes: object) -> dict:
     """The section as a release with one preset stored it: that preset's own fields, and nothing around them."""
-    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort"}
+    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort", "prefer_own_tests"}
     return PresetSettings(**changes).model_dump(mode="json", exclude=new)
 
 
@@ -255,9 +255,8 @@ def test_the_one_preset_an_older_release_stored_becomes_the_first_item_with_ever
     loaded = _stored_presets(old).presets
 
     (item,) = loaded.items
-    assert (
-        item.model_dump(mode="json", exclude={"blocked_models", "blocked_providers", "adopted", "route", "sort"}) == old
-    )
+    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort", "prefer_own_tests"}
+    assert item.model_dump(mode="json", exclude=new) == old
     assert (item.route, item.sort, item.adopted, item.blocked_models, item.blocked_providers) == (
         "fallback",
         None,
@@ -265,7 +264,35 @@ def test_the_one_preset_an_older_release_stored_becomes_the_first_item_with_ever
         [],
         [],
     )
+    assert item.prefer_own_tests is None, "an older release had no such choice, so it follows the global setting"
     assert (loaded.blocked_models, loaded.blocked_providers) == ([], [])
+
+
+def test_a_preset_stored_before_the_own_test_choice_existed_follows_the_global_setting():
+    stored = PresetSettings(slug="vibonomics-kept", min_score=70).model_dump(mode="json")
+    del stored["prefer_own_tests"]
+
+    (item,) = _stored_presets({"items": [stored]}).presets.items
+
+    assert (item.slug, item.min_score, item.prefer_own_tests) == ("vibonomics-kept", 70, None)
+
+
+def test_a_presets_own_test_choice_is_saved_and_can_be_cleared(client):
+    assert PresetSettings().prefer_own_tests is None
+    current = client.get("/api/settings").json()["settings"]
+    item = PresetSettings(slug="vibonomics-mine").model_dump(mode="json")
+
+    for value in (True, False, None):
+        body = {**current, "presets": {"items": [{**item, "prefer_own_tests": value}]}}
+        saved = client.put("/api/settings", json={"settings": body})
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["settings"]["presets"]["items"][0]["prefer_own_tests"] is value
+        assert client.get("/api/settings").json()["settings"]["presets"]["items"][0]["prefer_own_tests"] is value
+        with session_scope() as s:
+            assert load_settings(s).presets.items[0].prefer_own_tests is value
+
+    body = {**current, "presets": {"items": [{**item, "prefer_own_tests": "sometimes"}]}}
+    assert client.put("/api/settings", json={"settings": body}).status_code == 422
 
 
 def test_a_stored_preset_nobody_ever_set_up_becomes_no_item():

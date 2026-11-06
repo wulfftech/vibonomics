@@ -125,6 +125,10 @@ class PresetPlanOut(BaseModel):
     digest: str | None = Field(description="Names this plan; `apply` refuses a plan that has changed since")
     warnings: list[str]
     excluded: PresetExcludedOut = Field(description="What the blocklists removed from this run")
+    own_tests_preferred: bool = Field(
+        description="Whether the ranking took each model's own test score over its computed one: the preset's own "
+        "choice, or the global Scoring setting when it has none"
+    )
     passthrough: dict[str, Any] = Field(
         description="The keys Vibonomics does not manage and sends back as it found them, as raw JSON"
     )
@@ -270,6 +274,7 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         digest=plan.digest,
         warnings=plan.warnings,
         excluded=PresetExcludedOut(models=plan.excluded.models, providers=plan.excluded.providers),
+        own_tests_preferred=plan.own_tests_preferred,
         passthrough=plan.passthrough,
         managed_keys=list(presets.MANAGED_KEYS),
         state=_state_out(plan.state),

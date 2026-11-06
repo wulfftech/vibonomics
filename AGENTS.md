@@ -78,7 +78,9 @@ docker compose logs -f vibonomics
   match the OpenRouter and canonical ids and never become candidates or incumbents; providers match an endpoint's
   tag, its part before `/` and its name, are never pinned, and take out a model whose every known endpoint they
   match (not one with no endpoint data). They narrow the search and never write `provider.ignore`; the plan
-  reports `excluded`. A model already in the preset is favoured by the switch margin (`select_models`), so near
+  reports `excluded`. `PresetSettings.prefer_own_tests` (None follows `scoring.prefer_own_tests`) is resolved by
+  `own_tests_preferred()`, which `rank` hands to `compute_scores` and the plan reports as `own_tests_preferred`.
+  A model already in the preset is favoured by the switch margin (`select_models`), so near
   ties do not rewrite it daily. The dry run and the apply build the plan with the same function, and apply takes
   the plan's digest and refuses a plan that has changed. `plan` may be given unsaved settings to preview
   (`draft`, which is also how a preset not saved yet is planned); apply never is, and only plans a saved item, so a
