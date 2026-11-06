@@ -49,29 +49,53 @@ docker compose logs -f vibonomics
   every snippet but the allowed client's; that is advice only, and nothing here may add client headers, a proxy or
   a pass-through to get round it. The per-model data-use text (`FREE_DATA_USE` in `providers/opencode.py`) is
   transcribed from OpenCode's docs: re-check it against them before editing.
-- **Best-value preset** (`presets.py`, `api/presets.py`): the only code that writes to an OpenRouter account.
-  It writes a slug that starts with `vibonomics-` and that it created itself (`owned` in the `preset_state`
-  setting), never a preset made by hand, and never deletes (the API cannot). Ownership is tied to the key and
-  host that created it (`owners` in the same setting: a fingerprint of both, never the key) and to the preset's
-  id and creation time when the response carries them; a different key, or a preset deleted and made again, blocks
-  the plan, and a legacy `owned` slug with no record is trusted once. Every preset call goes to
-  `OpenRouterAdapter.spec.default_base_url`, never to the provider row's Base URL override. OpenRouter allows at
-  most 3 models in a preset (`PRESET_MAX_MODELS`). `allow_fallbacks` is not written, and unchanged-or-update is
-  decided on the owned keys alone, so a key OpenRouter does not keep cannot write a new version every sync. A
-  write counts only when the answer carries a version and a config, and a lost answer is read back before it is
-  called a failure. Saving the settings in the UI with writing allowed also plans from the saved settings and
-  applies that plan. The prefix is added to the name
-  the operator types (`preset_slug()`), never asked for, so it can't be left off. An archived preset takes no new
-  versions and blocks the plan. OpenRouter keeps no partial update, so every write is the whole config: read the
-  live one, change only `model`, `models` and `provider.only`/`order`, send the rest back, then read the
-  response and report the keys it dropped. A model already in the preset is favoured by the switch margin
-  (`select_models`), so near ties do not rewrite it daily. The dry run and the apply build the plan with
-  the same function, and apply takes the plan's digest and refuses a plan that has changed. `plan` may be given
-  unsaved settings to preview (`draft`); apply never is, so a draft plan's digest applies only if it equals the
-  saved plan, and the UI does not offer it. The create call
-  is never retried: a retry would leave a second version. The routes (`plan`, `apply`, and `list`, which
-  fills the template picker) are POSTs, so a visitor to an open-read instance cannot make them call out with the
-  operator's key.
+- **Best-value presets** (`presets.py`, `api/presets.py`): the only code that writes to an OpenRouter account.
+  `settings.presets` is `{items: [PresetSettings], blocked_models, blocked_providers}`: at most 20 items, unique
+  slugs, each with its own filters, schedule and write switch; a document stored for the single-preset release
+  is migrated in `settings_store._migrate_presets` (the old preset becomes `items[0]`, an untouched default
+  becomes `[]`) and a bad value in one item drops that value, not the item or its neighbours. `make_plan`,
+  `apply` and `sync` take a slug; one global lock covers every write. `preset_state` is per slug:
+  `owned`, `owners`, `pins`, `applied`, `last` and `reviewed` are each `{slug: ...}` (the old single `applied` /
+  `last` dict is read as the record of the slug it names, in `_normalise_state`). A write goes only to a slug
+  that starts with `vibonomics-` and that it created itself (`owned`), or to one the owner adopted (below),
+  never to any other preset, and never deletes (the API cannot). Ownership is tied to the key and host that
+  created it (`owners`: a fingerprint of both, never the key) and to the preset's id and creation time when the
+  response carries them; a different key, or a preset deleted and made again, blocks the plan, and a legacy
+  `owned` slug with no record is trusted once. Every preset call goes to `OpenRouterAdapter.spec.default_base_url`,
+  never to the provider row's Base URL override. OpenRouter allows at most 3 models in a preset
+  (`PRESET_MAX_MODELS`). `allow_fallbacks` is not written, and unchanged-or-update is decided on the owned keys
+  alone (`owned_view`: model, models, route, provider only/order/sort), so a key OpenRouter does not keep cannot
+  write a new version every sync; one it did not keep last time (`applied[slug].unsaved`, for `route` and
+  `provider.sort`) is left out of that comparison. A write counts only when the answer carries a version and a
+  config, and a lost answer is read back before it is called a failure. Saving the settings in the UI with writing
+  allowed also plans from the saved settings and applies that plan. The prefix is added to the name the operator
+  types (`preset_slug()`), never asked for, so it can't be left off. An archived preset takes no new versions and
+  blocks the plan. OpenRouter keeps no partial update, so every write is the whole config: read the live one,
+  change only the owned keys, send the rest (the passthrough: `passthrough_view`) back, then read the response
+  and report the keys it dropped. `route` is `fallback` (no `route` key, and one found live is removed) or `sort`
+  (`route: "sort"` and `provider.sort`); OpenRouter does not document `route`, which is why the read-back matters.
+  Blocklists are case-insensitive `fnmatch` patterns, the global list and the preset's added together: models
+  match the OpenRouter and canonical ids and never become candidates or incumbents; providers match an endpoint's
+  tag, its part before `/` and its name, are never pinned, and take out a model whose every known endpoint they
+  match (not one with no endpoint data). They narrow the search and never write `provider.ignore`; the plan
+  reports `excluded`. A model already in the preset is favoured by the switch margin (`select_models`), so near
+  ties do not rewrite it daily. The dry run and the apply build the plan with the same function, and apply takes
+  the plan's digest and refuses a plan that has changed. `plan` may be given unsaved settings to preview
+  (`draft`, which is also how a preset not saved yet is planned); apply never is, and only plans a saved item, so a
+  draft's digest applies only if it equals the saved plan, and the UI does not offer it. The create call is never
+  retried: a retry would leave a second version.
+  **Adopting** a preset made by hand: `inspect` reads any preset on the account (config, passthrough, blockers,
+  a digest of slug, version and config); `adopt` refuses a changed digest, an archived preset, a system prompt, a
+  preset already managed or recorded under another key, and otherwise records `owners[slug].adopted`, puts the
+  slug in `owned`, stores `reviewed[slug]` (a digest of the passthrough the owner was shown) and appends an item
+  with `adopted: true`, switched off, in one transaction. `adopted` in the settings grants nothing without that
+  record (`is_adopted`): the plan is blocked. An adopted slug keeps its name as typed, is never created, and a
+  scheduled or startup run on it writes only while the live passthrough digest equals `reviewed[slug]` (else it
+  records `blocked`); a manual apply updates `reviewed`. Removing an adopted item from the settings releases it
+  (`release_adopted`, called from the settings PUT). One `preset-sync:<slug>` job runs per item that is on and
+  automatic, and the startup catch-up runs each item that is overdue by its own last run. The routes (`plan`,
+  `apply`, `inspect`, `adopt` and `list`, which fills the template picker) are POSTs, so a visitor to an
+  open-read instance cannot make them call out with the operator's key.
 - **Usage history** (`usage.py`, `api/usage.py`, the `usage` refresh kind): OpenRouter's activity API needs a
   management key and returns 30 finished UTC days, so every day it returns is stored in `usage_days` and the
   history outgrows that. `key_hash` is empty for whole-account rows and a key's hash for that key's rows: sum one

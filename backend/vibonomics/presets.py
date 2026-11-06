@@ -1,16 +1,19 @@
-"""Keeps one OpenRouter preset pointed at the best-value model, and shows what it would write before it writes.
+"""Keeps OpenRouter presets pointed at the best-value models, and shows what it would write before it writes.
 
 A preset is a named bundle of model and routing settings that a client selects with ``model: "@preset/<slug>"``.
 Each write creates a new version and makes it the live one, so a harness that cannot pin a provider can still follow
-whichever model is the best value today.
+whichever model is the best value today. Every preset in ``settings.presets.items`` is planned, applied and recorded
+by its slug.
 
 What this module touches, and what it leaves alone:
 
-* It owns the ``model`` and the ``provider.only`` / ``provider.order`` lists. Everything else in the preset
-  (tools, reasoning, caching, other provider filters) is read from the preset as it stands and sent back as it was, so
-  an edit made in the OpenRouter UI survives. OpenRouter keeps no partial update: each write is the whole config.
-* It only ever writes a slug that starts with ``vibonomics-`` and that it created itself. A preset with that name made
-  by hand is refused, never overwritten. The ``template_slug`` preset is read and never written.
+* It owns ``model``, ``models``, ``route`` and the ``provider.only`` / ``provider.order`` / ``provider.sort`` keys.
+  Everything else in the preset (tools, reasoning, caching, other provider filters: the passthrough) is read from the
+  preset as it stands and sent back as it was, so an edit made in the OpenRouter UI survives. OpenRouter keeps no
+  partial update: each write is the whole config.
+* It only ever writes a slug that starts with ``vibonomics-`` and that it created itself, or one the operator adopted
+  through ``adopt`` after being shown the passthrough. A preset with that name made by hand is refused, never
+  overwritten. The ``template_slug`` preset is read and never written.
 * Every plan carries the exact request, so the dry run is the same body the apply sends. Apply takes the digest of the
   plan the operator looked at and refuses if the plan has changed since.
 
