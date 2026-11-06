@@ -112,6 +112,10 @@ class PresetPlanOut(BaseModel):
     )
     providers: list[PresetProviderOut]
     runners_up: list[PresetCandidateOut]
+    preset_id: str | None = Field(None, description="The id OpenRouter gave the preset; null when it names none")
+    workspace: str | None = Field(
+        None, description="The workspace OpenRouter names for the preset (slug or id); null when it names none"
+    )
     current_version: int | None = Field(description="The version of the preset that is live on OpenRouter now")
     current_config: dict[str, Any] | None
     versions: list[PresetVersionOut]
@@ -220,6 +224,8 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         kept_current=plan.kept_current,
         providers=[PresetProviderOut(**p) for p in plan.providers],
         runners_up=[_candidate(c) for c in plan.runners_up],
+        preset_id=current.preset_id if current else None,
+        workspace=current.workspace if current else None,
         current_version=current.version if current else None,
         current_config=current.config if current else None,
         versions=[PresetVersionOut(**v) for v in (current.versions if current else [])],

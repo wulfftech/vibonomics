@@ -109,6 +109,7 @@ class Remote:
     preset_id: str | None = None  # whatever stable id the account gave it; None when the response names none
     created_at: str | None = None
     readable: bool = True  # False when the response held no live config to plan from, which is not an empty config
+    workspace: str | None = None  # the workspace the response names (slug or id), for linking to the preset's page
 
 
 @dataclass
@@ -675,6 +676,20 @@ def _stable_id(data: dict[str, Any]) -> tuple[str | None, str | None]:
     )
 
 
+def _workspace(data: dict[str, Any]) -> str | None:
+    """The workspace a preset response names, by slug, then name, then id; None when it names none.
+
+    OpenRouter's docs do not say which key carries it, so each is tried, and a nested object is read for its slug or id.
+    """
+    for key in ("workspace_slug", "workspace", "workspace_id"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            value = value.get("slug") or value.get("id")
+        if isinstance(value, str | int) and not isinstance(value, bool) and str(value):
+            return str(value)
+    return None
+
+
 # ---- OpenRouter ----------------------------------------------------------------------------------------------
 
 
@@ -704,6 +719,7 @@ async def fetch_remote(base: str, key: str, slug: str) -> Remote | None:
         readable=isinstance(live.get("config"), dict),
         preset_id=preset_id,
         created_at=created_at,
+        workspace=_workspace(data),
     )
     try:
         listing = (await get_json(f"{path}/versions", headers=_auth(key), timeout=20, retries=1)).get("data") or []

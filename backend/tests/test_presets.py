@@ -2045,6 +2045,44 @@ def test_a_changed_sort_is_written_even_while_the_route_is_one_openrouter_does_n
     assert plan["action"] == "update" and "provider.sort" in {c["path"] for c in plan["changes"]}
 
 
+def test_the_plan_carries_the_id_and_the_workspace_the_account_names_for_the_preset(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2, id="p-1", workspace_slug="team-a")
+        plan = _plan(client)
+    assert (plan["preset_id"], plan["workspace"]) == ("p-1", "team-a")
+
+
+def test_the_workspace_may_be_named_by_a_slug_an_id_or_an_object_and_a_slug_wins(client):
+    _own_as(KEY)
+    for extra, want in (
+        ({"workspace": "ws-1"}, "ws-1"),
+        ({"workspace_id": 42}, "42"),
+        ({"workspace": {"slug": "team-b", "id": "w-9"}}, "team-b"),
+        ({"workspace": {"id": "w-9"}}, "w-9"),
+        ({"workspace_id": "w-9", "workspace_slug": "team-c"}, "team-c"),
+        ({"workspace": ""}, None),
+        ({"workspace": True}, None),
+        ({"workspace": ["x"]}, None),
+    ):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, {"model": "acme/best"}, version=2, **extra)
+            assert _plan(client)["workspace"] == want, extra
+
+
+def test_the_id_and_the_workspace_are_null_when_the_response_names_neither(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        plan = _plan(client)
+    assert plan["preset_id"] is None and plan["workspace"] is None
+    with respx.mock(assert_all_called=False) as router:  # and a preset that does not exist yet has neither
+        _remote(router, "vibonomics-fresh", None)
+        draft = PresetSettings(slug="fresh", enabled=True).model_dump(mode="json")
+        planned = client.post("/api/presets/plan", json={"settings": draft}).json()
+    assert planned["preset_id"] is None and planned["workspace"] is None
+
+
 def test_the_route_choice_is_saved_with_the_settings(client):
     current = client.get("/api/settings").json()["settings"]
     saved = client.put("/api/settings", json={"settings": _with_item(current, route="sort", sort="latency")})
