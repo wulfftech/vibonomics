@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import crypto, events
+from .. import crypto, events, presets
 from ..benchmarks.registry import SOURCES
 from ..config import get_config
 from ..db import get_session
@@ -174,5 +174,7 @@ def put_settings(body: SettingsIn, session: Session = Depends(get_session)) -> S
     events.publish("settings.changed", {})
     from ..scheduler import reschedule
 
+    # A preset taken out of the list is no longer handed over; the app made the others, and keeps them.
+    presets.release_adopted(item.slug for item in new.presets.items)
     reschedule(new)
     return _out(session, new)

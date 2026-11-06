@@ -14,6 +14,7 @@ from vibonomics.db import init_db, session_scope
 from vibonomics.orm import Setting
 from vibonomics.settings_store import (
     AppSettings,
+    PresetSettings,
     RefreshSettings,
     ScoringSettings,
     UsageProfile,
@@ -209,15 +210,139 @@ def test_a_stored_value_that_no_longer_validates_falls_back_without_losing_the_r
     assert loaded.subscriptions.claude_ingest_token_enc == "encrypted-token"
 
 
-def test_a_preset_lineup_saved_under_the_old_limit_of_ten_loads_as_three_not_one():
+def _single_preset(**changes: object) -> dict:
+    """The section as a release with one preset stored it: that preset's own fields, and nothing around them."""
+    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort"}
+    return PresetSettings(**changes).model_dump(mode="json", exclude=new)
+
+
+def _stored_presets(section: object) -> AppSettings:
     stored = AppSettings().model_dump(mode="json")
-    stored["presets"].update({"max_models": 7, "slug": "vibonomics-keep", "max_providers": 2})
+    stored["presets"] = section
     _store(stored)
-
     with session_scope() as s:
-        loaded = load_settings(s)
+        return load_settings(s)
 
-    assert (loaded.presets.max_models, loaded.presets.slug, loaded.presets.max_providers) == (3, "vibonomics-keep", 2)
+
+def test_a_preset_lineup_saved_under_the_old_limit_of_ten_loads_as_three_not_one():
+    old = _single_preset(slug="vibonomics-keep", max_providers=2) | {"max_models": 7}
+
+    (item,) = _stored_presets(old).presets.items
+
+    assert (item.max_models, item.slug, item.max_providers) == (3, "vibonomics-keep", 2)
+
+
+def test_the_one_preset_an_older_release_stored_becomes_the_first_item_with_every_field_kept():
+    old = _single_preset(
+        enabled=True,
+        auto_apply=True,
+        interval_hours=6,
+        slug="vibonomics-mine",
+        template_slug="my-tools",
+        profile="balanced",
+        dimension="coding",
+        min_score=72,
+        require_tool_call=False,
+        min_context=64_000,
+        max_task_cost=0.5,
+        min_value=900,
+        include_free=True,
+        switch_margin_pct=4,
+        max_models=2,
+        max_providers=5,
+    )
+
+    loaded = _stored_presets(old).presets
+
+    (item,) = loaded.items
+    assert (
+        item.model_dump(mode="json", exclude={"blocked_models", "blocked_providers", "adopted", "route", "sort"}) == old
+    )
+    assert (item.route, item.sort, item.adopted, item.blocked_models, item.blocked_providers) == (
+        "fallback",
+        None,
+        False,
+        [],
+        [],
+    )
+    assert (loaded.blocked_models, loaded.blocked_providers) == ([], [])
+
+
+def test_a_stored_preset_nobody_ever_set_up_becomes_no_item():
+    assert _stored_presets(_single_preset()).presets.items == []
+    # but one that was only tuned, not yet switched on, is the operator's work and is kept
+    (item,) = _stored_presets(_single_preset(min_score=80)).presets.items
+    assert item.min_score == 80 and item.enabled is False
+
+
+def test_one_bad_value_in_one_preset_leaves_the_rest_of_it_and_the_other_presets_alone():
+    good = PresetSettings(slug="vibonomics-good", min_score=70).model_dump(mode="json")
+    bad = PresetSettings(slug="vibonomics-bad", max_providers=4).model_dump(mode="json") | {"min_score": 500}
+    lost = PresetSettings(slug="vibonomics-lost").model_dump(mode="json") | {"interval_hours": "soon"}
+    shared = {"blocked_models": ["openai/*"], "blocked_providers": ["deepinfra"]}
+
+    loaded = _stored_presets({"items": [good, bad, lost], **shared}).presets
+
+    by_slug = {i.slug: i for i in loaded.items}
+    assert list(by_slug) == ["vibonomics-good", "vibonomics-bad", "vibonomics-lost"]
+    assert by_slug["vibonomics-good"].min_score == 70
+    assert (by_slug["vibonomics-bad"].min_score, by_slug["vibonomics-bad"].max_providers) == (60, 4)
+    assert by_slug["vibonomics-lost"].interval_hours == 24
+    assert (loaded.blocked_models, loaded.blocked_providers) == (["openai/*"], ["deepinfra"])
+
+
+def test_an_item_whose_slug_is_no_good_is_dropped_not_given_the_default_name():
+    good = PresetSettings(slug="vibonomics-good").model_dump(mode="json")
+    bad = good | {"slug": 7}
+
+    assert [i.slug for i in _stored_presets({"items": [good, bad]}).presets.items] == ["vibonomics-good"]
+
+
+def test_two_presets_with_the_same_slug_are_refused_in_a_save_and_trimmed_when_loaded(client):
+    current = client.get("/api/settings").json()["settings"]
+    twice = [PresetSettings(slug="Same name").model_dump(mode="json")] * 2
+    response = client.put("/api/settings", json={"settings": {**current, "presets": {"items": twice}}})
+    assert response.status_code == 422
+    assert "share the slug" in response.text
+
+    # the same stored by an older bug, or by hand, must not reset the section: the first one is kept
+    other = PresetSettings(slug="Other").model_dump(mode="json")
+    loaded = _stored_presets({"items": [twice[0], other, PresetSettings(slug="vibonomics-same-name").model_dump()]})
+    assert [i.slug for i in loaded.presets.items] == ["vibonomics-same-name", "vibonomics-other"]
+
+
+def test_at_most_twenty_presets_can_be_managed(client):
+    current = client.get("/api/settings").json()["settings"]
+
+    def items(count: int) -> list[dict]:
+        return [PresetSettings(slug=f"p{n}").model_dump(mode="json") for n in range(count)]
+
+    assert (
+        client.put("/api/settings", json={"settings": {**current, "presets": {"items": items(20)}}}).status_code == 200
+    )
+    over = client.put("/api/settings", json={"settings": {**current, "presets": {"items": items(21)}}})
+    assert over.status_code == 422
+    # stored beyond the limit, the first twenty load
+    assert len(_stored_presets({"items": items(25)}).presets.items) == 20
+
+
+def test_an_adopted_preset_keeps_its_name_as_typed_and_an_ordinary_one_gets_the_prefix():
+    assert PresetSettings(slug="Team-Fast_1.0", adopted=True).slug == "Team-Fast_1.0"
+    assert PresetSettings(slug="Team Fast").slug == "vibonomics-team-fast"
+    for bad in ("", "has space", "-leading", "x" * 101):
+        with pytest.raises(ValidationError):
+            PresetSettings(slug=bad, adopted=True)
+
+
+def test_blocklist_entries_are_trimmed_and_a_repeat_in_another_case_is_one_entry():
+    item = PresetSettings(
+        blocked_models=[" OpenAI/* ", "", "openai/*", "*:free"], blocked_providers=["DeepInfra", "deepinfra"]
+    )
+
+    assert item.blocked_models == ["OpenAI/*", "*:free"]
+    assert item.blocked_providers == ["DeepInfra"]
+    with pytest.raises(ValidationError):
+        PresetSettings(blocked_models=["x" * 101])
 
 
 def test_a_stored_document_that_is_not_settings_at_all_loads_as_the_defaults():

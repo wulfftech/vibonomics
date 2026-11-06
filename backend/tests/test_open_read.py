@@ -74,6 +74,8 @@ CHANGES = [
     ("POST", "/api/presets/plan"),
     ("POST", "/api/presets/apply"),
     ("POST", "/api/presets/sync"),
+    ("POST", "/api/presets/inspect"),
+    ("POST", "/api/presets/adopt"),
     ("POST", "/api/evals/runs"),
     ("POST", "/api/evals/runs/1/cancel"),
     ("DELETE", "/api/evals/runs/1"),

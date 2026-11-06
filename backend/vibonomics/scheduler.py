@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from . import preset_catalog, presets
 from .jobs import run_job
-from .settings_store import AppSettings
+from .settings_store import AppSettings, PresetSettings
 
 log = logging.getLogger(__name__)
 
@@ -26,8 +26,11 @@ async def _scheduled(kind: str) -> None:
     await run_job(kind, "schedule")
 
 
-async def _sync_preset() -> None:
-    await presets.sync("schedule")
+PRESET_JOB_PREFIX = "preset-sync:"
+
+
+async def _sync_preset(slug: str) -> None:
+    await presets.sync(slug, "schedule")
 
 
 def start(settings: AppSettings) -> None:
@@ -75,21 +78,26 @@ def reschedule(settings: AppSettings) -> None:
     _schedule_preset(settings)
 
 
+def _unattended(settings: AppSettings) -> list[PresetSettings]:
+    """The presets that update on a schedule: the operator allowed writes and asked for them to run unattended."""
+    return [item for item in settings.presets.items if item.enabled and item.auto_apply]
+
+
 def _schedule_preset(settings: AppSettings) -> None:
-    """The preset updates only when the operator allowed writes and asked for them to run unattended."""
+    """One timer per preset that updates unattended, gone with the preset or the switch."""
     assert _scheduler is not None
-    existing = _scheduler.get_job("preset-sync")
-    cfg = settings.presets
-    if not (cfg.enabled and cfg.auto_apply):
-        if existing:
-            existing.remove()
-        return
-    if _set_interval("preset-sync", cfg.interval_hours * 3600, _sync_preset, []):
-        log.info("Scheduled the preset update every %sh", cfg.interval_hours)
+    wanted = {f"{PRESET_JOB_PREFIX}{item.slug}": item for item in _unattended(settings)}
+    for job in _scheduler.get_jobs():
+        if job.id.startswith(PRESET_JOB_PREFIX) and job.id not in wanted:
+            job.remove()
+    for job_id, item in wanted.items():
+        if _set_interval(job_id, item.interval_hours * 3600, _sync_preset, [item.slug]):
+            log.info("Scheduled the update of preset %s every %sh", item.slug, item.interval_hours)
 
 
-def _preset_is_due(state: dict[str, Any], interval_hours: float) -> bool:
-    last = (state.get("last") or {}).get("at")
+def _preset_is_due(state: dict[str, Any], interval_hours: float, slug: str) -> bool:
+    """Whether the last run of ``slug`` is further back than its interval, or there is none that can be read."""
+    last = ((state.get("last") or {}).get(slug) or {}).get("at")
     try:
         when = datetime.fromisoformat(last)
     except (TypeError, ValueError):
@@ -100,21 +108,23 @@ def _preset_is_due(state: dict[str, Any], interval_hours: float) -> bool:
 
 
 async def catch_up_preset(settings: AppSettings) -> None:
-    """Run the preset update once at startup if it is overdue.
+    """Run each preset update that is overdue once at startup.
 
-    Its timer starts again at every restart, so on an instance that restarts more often than the interval it would
-    never fire. It takes the same lock as the scheduled run, through ``presets.sync``.
+    A timer starts again at every restart, so on an instance that restarts more often than the interval it would
+    never fire. Each takes the same lock as the scheduled run, through ``presets.sync``.
     """
-    cfg = settings.presets
-    if not (cfg.enabled and cfg.auto_apply):
-        return
     try:
         state = await asyncio.to_thread(presets.read_state)
-        if _preset_is_due(state, cfg.interval_hours):
-            log.info("The preset update is overdue; running it now")
-            await presets.sync("startup")
     except Exception:  # a failed catch-up must not stop the startup work after it
-        log.exception("Could not catch up the preset update")
+        log.exception("Could not catch up the preset updates")
+        return
+    for item in _unattended(settings):
+        try:
+            if _preset_is_due(state, item.interval_hours, item.slug):
+                log.info("The update of preset %s is overdue; running it now", item.slug)
+                await presets.sync(item.slug, "startup")
+        except Exception:  # one preset failing must not keep the others from catching up
+            log.exception("Could not catch up the update of preset %s", item.slug)
 
 
 async def sync_catalogue() -> None:

@@ -21,19 +21,30 @@ from vibonomics.presets import (
     PLACEHOLDER_MESSAGES,
     STATE_KEY,
     Candidate,
+    Excluded,
     build_config,
     choose_endpoints,
     current_models,
     diff_config,
     digest_of,
     merge_endpoints,
+    owned_view,
     owner_fingerprint,
+    passthrough_digest,
+    passthrough_view,
     rank,
     select_models,
     unsaved_keys,
 )
 from vibonomics.pricing import Task
-from vibonomics.settings_store import AppSettings, PresetSettings, load_settings, preset_slug, save_settings
+from vibonomics.settings_store import (
+    AppSettings,
+    PresetSettings,
+    PresetsSettings,
+    load_settings,
+    preset_slug,
+    save_settings,
+)
 
 BASE = "https://openrouter.ai/api/v1"
 SLUG = "vibonomics-best-value"
@@ -103,7 +114,7 @@ def _settings(**patch: Any) -> None:
     # acme/small is the best value of all and has a small context window: most tests screen it out.
     fields = {"enabled": True, "min_context": 100_000, **patch}
     with session_scope() as session:
-        save_settings(session, AppSettings(presets=PresetSettings(**fields)))
+        save_settings(session, AppSettings(presets=PresetsSettings(items=[PresetSettings(**fields)])))
 
 
 def _clean(session) -> None:
@@ -176,11 +187,20 @@ def _remote(router: respx.Router, slug: str, config: dict[str, Any] | None, **kw
     router.get(f"{url}/versions").mock(return_value=httpx.Response(200, json={"data": history, "total_count": 2}))
 
 
-def _plan(client: TestClient) -> dict[str, Any]:
-    response = client.post("/api/presets/plan")
+def _plan(client: TestClient, slug: str = SLUG) -> dict[str, Any]:
+    response = client.post("/api/presets/plan", json={"slug": slug})
     assert response.status_code == 200, response.text
     assert KEY not in response.text
     return response.json()
+
+
+def _apply(client: TestClient, plan: dict[str, Any] | str, slug: str = SLUG) -> httpx.Response:
+    digest = plan if isinstance(plan, str) else plan["digest"]
+    return client.post("/api/presets/apply", json={"slug": slug, "digest": digest})
+
+
+def _slug_state(client: TestClient, slug: str = SLUG) -> dict[str, Any]:
+    return client.get("/api/presets/state").json()["slugs"].get(slug, {})
 
 
 # ---- the pieces ----------------------------------------------------------------------------------------------
@@ -297,16 +317,21 @@ def test_keys_openrouter_did_not_keep_are_named():
 def test_ranking_applies_every_filter_and_puts_the_best_value_first(client):
     with session_scope() as session:
         settings = load_settings(session).model_copy(deep=True)
+        item = settings.presets.items[0]
         ids = [p.id for p in session.query(ProviderConfig).filter_by(type="openrouter")]
-        settings.presets.min_context = 0
-        ranked, _task, profile = rank(session, settings, ids)
+        item.min_context = 0
+        ranked, _task, profile = rank(session, settings, ids, item)
         assert profile == "agentic"
         assert [c.model_id for c in ranked] == ["acme/small", "acme/best", "acme/steady", "acme/pricey"]
-        settings.presets.min_context = 100_000
-        assert [c.model_id for c in rank(session, settings, ids)[0]] == ["acme/best", "acme/steady", "acme/pricey"]
-        settings.presets.require_tool_call = False
-        settings.presets.include_free = True
-        names = [c.model_id for c in rank(session, settings, ids)[0]]
+        item.min_context = 100_000
+        assert [c.model_id for c in rank(session, settings, ids, item)[0]] == [
+            "acme/best",
+            "acme/steady",
+            "acme/pricey",
+        ]
+        item.require_tool_call = False
+        item.include_free = True
+        names = [c.model_id for c in rank(session, settings, ids, item)[0]]
         assert "acme/notools" in names and "acme/free:free" in names
         assert not {"acme/slab:batch", "acme/gone", "acme/low"} & set(names)
 
@@ -518,7 +543,7 @@ def test_apply_writes_exactly_the_reviewed_plan_and_the_slug_becomes_ours(client
         _remote(router, SLUG, None)
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
         plan = _plan(client)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
     assert response.status_code == 200, response.text
     assert KEY not in response.text
     body = response.json()
@@ -527,9 +552,9 @@ def test_apply_writes_exactly_the_reviewed_plan_and_the_slug_becomes_ours(client
     request = post.calls[0].request
     assert request.headers["authorization"] == f"Bearer {KEY}"
     assert json.loads(request.content) == plan["request"]["body"]
-    state = client.get("/api/presets/state").json()
-    assert state["owned"] == [SLUG]
-    assert (state["slug"], state["model_id"], state["version"]) == (SLUG, "acme/best", 1)
+    assert client.get("/api/presets/state").json()["owned"] == [SLUG]
+    state = _slug_state(client)
+    assert (state["model_id"], state["version"]) == ("acme/best", 1)
     assert state["last_status"] == "applied" and state["last_trigger"] == "manual"
 
 
@@ -548,7 +573,7 @@ def test_apply_says_which_keys_openrouter_did_not_keep(client):
         router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=drop_cache)
         plan = _plan(client)
         assert plan["config"]["cache_enabled"] is True
-        body = client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()
+        body = _apply(client, plan).json()
     assert body["unsaved"] == ["cache_enabled"]
     assert "did not keep: cache_enabled" in body["message"]
 
@@ -557,7 +582,7 @@ def test_apply_refuses_a_plan_that_has_changed_since_it_was_reviewed(client):
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, None)
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
-        response = client.post("/api/presets/apply", json={"digest": "stale"})
+        response = _apply(client, "stale")
         assert post.call_count == 0
     assert response.status_code == 409
     assert "changed" in response.json()["detail"]
@@ -569,7 +594,7 @@ def test_apply_does_nothing_until_the_operator_allows_writes(client):
         _remote(router, SLUG, None)
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
         plan = _plan(client)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
         assert post.call_count == 0
     assert response.status_code == 409
     assert "Turn on" in response.json()["detail"]
@@ -582,12 +607,12 @@ def test_apply_writes_nothing_when_the_preset_is_already_right(client):
         _remote(router, SLUG, desired, version=2)
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
         plan = _plan(client)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
         assert post.call_count == 0
     assert response.status_code == 200
     assert response.json()["applied"] is False
     assert response.json()["message"] == "Already up to date."
-    assert client.get("/api/presets/state").json()["last_status"] == "unchanged"
+    assert _slug_state(client)["last_status"] == "unchanged"
 
 
 def test_a_failed_write_is_reported_recorded_and_not_retried(client):
@@ -597,13 +622,12 @@ def test_a_failed_write_is_reported_recorded_and_not_retried(client):
             return_value=httpx.Response(500, json={"error": f"boom {KEY}"})
         )
         plan = _plan(client)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
         assert post.call_count == 1
     assert response.status_code == 502
     assert KEY not in response.text
-    state = client.get("/api/presets/state").json()
-    assert state["last_status"] == "failed"
-    assert state["owned"] == []  # nothing was created, so nothing is ours
+    assert _slug_state(client)["last_status"] == "failed"
+    assert client.get("/api/presets/state").json()["owned"] == []  # nothing was created, so nothing is ours
 
 
 # ---- settings and schedule -----------------------------------------------------------------------------------
@@ -619,34 +643,43 @@ def test_a_name_gets_the_prefix_and_is_made_into_a_slug():
             preset_slug(bad)
 
 
+def _with_item(current: dict[str, Any], **patch: Any) -> dict[str, Any]:
+    """The settings document with the first preset changed."""
+    presets = current["presets"]
+    return {**current, "presets": {**presets, "items": [{**presets["items"][0], **patch}, *presets["items"][1:]]}}
+
+
 def test_the_name_the_operator_types_is_saved_with_the_prefix(client):
     current = client.get("/api/settings").json()["settings"]
     for typed in ("", "!!!"):
-        bad = {**current, "presets": {**current["presets"], "slug": typed}}
-        assert client.put("/api/settings", json={"settings": bad}).status_code == 422, typed
-    good = {**current, "presets": {**current["presets"], "slug": "Fast coding"}}
-    saved = client.put("/api/settings", json={"settings": good})
+        assert client.put("/api/settings", json={"settings": _with_item(current, slug=typed)}).status_code == 422, typed
+    saved = client.put("/api/settings", json={"settings": _with_item(current, slug="Fast coding")})
     assert saved.status_code == 200
-    assert saved.json()["settings"]["presets"]["slug"] == "vibonomics-fast-coding"
+    assert saved.json()["settings"]["presets"]["items"][0]["slug"] == "vibonomics-fast-coding"
 
 
 def test_up_to_three_models_and_ten_providers_are_allowed_and_no_more(client):
     # OpenRouter refuses a preset that lists a fourth model: HTTP 400 "A preset can have at most 3 models".
     current = client.get("/api/settings").json()["settings"]
-    ok = {**current, "presets": {**current["presets"], "max_models": 3, "max_providers": 10}}
+    ok = _with_item(current, max_models=3, max_providers=10)
     assert client.put("/api/settings", json={"settings": ok}).status_code == 200
     for field, over in (("max_models", 4), ("max_providers", 11)):
         for value in (0, over):
-            bad = {**current, "presets": {**current["presets"], field: value}}
+            bad = _with_item(current, **{field: value})
             assert client.put("/api/settings", json={"settings": bad}).status_code == 422, (field, value)
 
 
 def test_the_scheduled_update_can_run_every_thirty_minutes_and_no_more_often(client):
     current = client.get("/api/settings").json()["settings"]
     for hours, status in ((0.5, 200), (0.25, 422)):
-        body = {**current, "presets": {**current["presets"], "interval_hours": hours}}
+        body = _with_item(current, interval_hours=hours)
         assert client.put("/api/settings", json={"settings": body}).status_code == status, hours
     assert PresetSettings(enabled=True, auto_apply=True, interval_hours=0.5).interval_hours == 0.5
+
+
+def _auto(**patch: Any) -> AppSettings:
+    fields = {"enabled": True, "auto_apply": True, **patch}
+    return AppSettings(presets=PresetsSettings(items=[PresetSettings(**fields)]))
 
 
 @pytest.mark.asyncio
@@ -655,16 +688,17 @@ async def test_the_scheduler_runs_the_preset_every_thirty_minutes():
 
     try:
         scheduler.start(AppSettings())
-        scheduler.reschedule(AppSettings(presets=PresetSettings(enabled=True, auto_apply=True, interval_hours=0.5)))
-        job = scheduler._scheduler.get_job("preset-sync")
+        scheduler.reschedule(_auto(interval_hours=0.5))
+        job = scheduler._scheduler.get_job(f"preset-sync:{SLUG}")
         assert job is not None and job.trigger.interval.total_seconds() == 30 * 60
     finally:
         scheduler.shutdown()
 
 
 def test_it_is_off_until_the_operator_turns_it_on():
-    assert AppSettings().presets.enabled is False
-    assert AppSettings().presets.auto_apply is False
+    assert AppSettings().presets.items == []  # a new instance manages no preset
+    assert PresetSettings().enabled is False
+    assert PresetSettings().auto_apply is False
 
 
 @pytest.mark.asyncio
@@ -672,15 +706,16 @@ async def test_the_scheduler_adds_and_removes_the_preset_job():
     from vibonomics import scheduler
 
     try:
+        job_id = f"preset-sync:{SLUG}"
         scheduler.start(AppSettings())
-        assert scheduler._scheduler.get_job("preset-sync") is None
-        scheduler.reschedule(AppSettings(presets=PresetSettings(enabled=True, auto_apply=False)))
-        assert scheduler._scheduler.get_job("preset-sync") is None
-        scheduler.reschedule(AppSettings(presets=PresetSettings(enabled=True, auto_apply=True, interval_hours=12)))
-        job = scheduler._scheduler.get_job("preset-sync")
+        assert scheduler._scheduler.get_job(job_id) is None
+        scheduler.reschedule(_auto(auto_apply=False))
+        assert scheduler._scheduler.get_job(job_id) is None
+        scheduler.reschedule(_auto(interval_hours=12))
+        job = scheduler._scheduler.get_job(job_id)
         assert job is not None and job.trigger.interval.total_seconds() == 12 * 3600
-        scheduler.reschedule(AppSettings(presets=PresetSettings(enabled=False, auto_apply=True)))
-        assert scheduler._scheduler.get_job("preset-sync") is None
+        scheduler.reschedule(_auto(enabled=False))
+        assert scheduler._scheduler.get_job(job_id) is None
     finally:
         scheduler.shutdown()
 
@@ -918,10 +953,11 @@ def test_the_list_says_why_it_is_empty(client):
 def _ranked(**patch) -> list[str]:
     with session_scope() as session:
         settings = load_settings(session).model_copy(deep=True)
+        item = settings.presets.items[0]
         for key, value in patch.items():
-            setattr(settings.presets, key, value)
+            setattr(item, key, value)
         ids = [p.id for p in session.query(ProviderConfig).filter_by(type="openrouter")]
-        return [c.model_id for c in rank(session, settings, ids)[0]]
+        return [c.model_id for c in rank(session, settings, ids, item)[0]]
 
 
 def test_there_is_no_cost_or_value_limit_until_one_is_set(client):
@@ -953,14 +989,14 @@ def test_the_two_limits_apply_together(client):
 
 def test_the_limits_are_saved_and_can_be_cleared(client):
     current = client.get("/api/settings").json()["settings"]
-    on = {**current, "presets": {**current["presets"], "max_task_cost": 0.05, "min_value": 2000}}
-    saved = client.put("/api/settings", json={"settings": on}).json()["settings"]["presets"]
+    on = _with_item(current, max_task_cost=0.05, min_value=2000)
+    saved = client.put("/api/settings", json={"settings": on}).json()["settings"]["presets"]["items"][0]
     assert (saved["max_task_cost"], saved["min_value"]) == (0.05, 2000)
-    off = {**current, "presets": {**current["presets"], "max_task_cost": None, "min_value": None}}
-    cleared = client.put("/api/settings", json={"settings": off}).json()["settings"]["presets"]
+    off = _with_item(current, max_task_cost=None, min_value=None)
+    cleared = client.put("/api/settings", json={"settings": off}).json()["settings"]["presets"]["items"][0]
     assert cleared["max_task_cost"] is None and cleared["min_value"] is None
     for field in ("max_task_cost", "min_value"):
-        bad = {**current, "presets": {**current["presets"], field: -1}}
+        bad = _with_item(current, **{field: -1})
         assert client.put("/api/settings", json={"settings": bad}).status_code == 422, field
 
 
@@ -977,7 +1013,8 @@ def test_a_plan_with_nothing_left_after_the_limits_names_them(client):
 
 
 def _saved_presets(client: TestClient) -> dict:
-    return client.get("/api/settings").json()["settings"]["presets"]
+    """The first saved preset, which is what the dry-run tests preview."""
+    return client.get("/api/settings").json()["settings"]["presets"]["items"][0]
 
 
 def test_a_plan_from_the_saved_settings_says_it_is_not_a_draft(client):
@@ -1028,7 +1065,7 @@ def test_a_draft_plan_cannot_be_applied_because_apply_plans_from_what_is_saved(c
         _remote(router, SLUG, None)
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
         draft = client.post("/api/presets/plan", json={"settings": {**saved, "max_models": 3}}).json()
-        response = client.post("/api/presets/apply", json={"digest": draft["digest"]})
+        response = _apply(client, draft)
         assert post.call_count == 0
     assert response.status_code == 409
     assert "changed" in response.json()["detail"]
@@ -1063,7 +1100,7 @@ def test_a_preset_made_under_another_key_is_left_alone(client):
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, {"model": "someone/elses"}, version=3)
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
-        plan = client.post("/api/presets/plan").json()
+        plan = _plan(client)
         assert post.call_count == 0
     assert plan["action"] == "blocked"
     assert "different OpenRouter key or account" in plan["reason"]
@@ -1130,7 +1167,7 @@ def test_a_create_records_the_account_and_what_openrouter_called_the_preset(clie
         _remote(router, SLUG, None)
         router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=create)
         plan = _plan(client)
-        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+        assert _apply(client, plan).status_code == 200
     state = _state()
     assert state["owned"] == [SLUG]
     owner = state["owners"][SLUG]
@@ -1148,7 +1185,7 @@ def test_a_create_records_the_id_and_time_a_later_read_will_report_not_the_answe
         account = _Account(router, None, id="get-1", created_at="2026-11-05T00:00:01Z")
         router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=create)
         plan = _plan(client)
-        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+        assert _apply(client, plan).status_code == 200
         owner = _state()["owners"][SLUG]
         assert (owner["preset_id"], owner["created_at"]) == ("get-1", "2026-11-05T00:00:01Z")
         assert _plan(client)["action"] == "unchanged"  # and our own preset is not blocked as replaced
@@ -1225,13 +1262,13 @@ def test_a_create_whose_answer_carries_no_version_is_a_failed_write_and_claims_n
             _remote(router, SLUG, None)
             post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_answers(body))
             plan = _plan(client)
-            response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+            response = _apply(client, plan)
             assert post.call_count == 1  # and never retried
         assert response.status_code == 502, body
         assert KEY not in response.text
-        state = client.get("/api/presets/state").json()
+        state = _slug_state(client)
         assert state["last_status"] == "failed", body
-        assert state["owned"] == [] and state["version"] is None, body
+        assert client.get("/api/presets/state").json()["owned"] == [] and state["version"] is None, body
         assert "owners" not in _state()
 
 
@@ -1241,9 +1278,9 @@ def test_an_update_whose_answer_carries_no_version_does_not_count_as_written(cli
         _remote(router, SLUG, {"model": "acme/best"}, version=2)
         router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_answers({"data": {}}))
         plan = _plan(client)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
     assert response.status_code == 502
-    state = client.get("/api/presets/state").json()
+    state = _slug_state(client)
     assert state["last_status"] == "failed" and state["version"] is None
 
 
@@ -1290,7 +1327,7 @@ def test_a_create_whose_answer_never_arrived_is_found_by_reading_it_back_and_cla
             side_effect=_lost_after_taking(account, _timeout)
         )
         plan = _plan(client)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
         assert post.call_count == 1  # never retried
     assert response.status_code == 200, response.text
     body = response.json()
@@ -1300,7 +1337,7 @@ def test_a_create_whose_answer_never_arrived_is_found_by_reading_it_back_and_cla
     assert state["owned"] == [SLUG]
     assert state["owners"][SLUG]["fingerprint"] == owner_fingerprint(BASE, KEY)
     assert state["owners"][SLUG]["preset_id"] == "p-1"
-    assert client.get("/api/presets/state").json()["last_status"] == "applied"
+    assert _slug_state(client)["last_status"] == "applied"
     # the next plan is a normal one, not a block on a preset that "Vibonomics did not create"
     with respx.mock(assert_all_called=False) as router:
         _Account(router, account.written, version=1, id="p-1", created_at="2026-11-05T00:00:00Z")
@@ -1314,7 +1351,7 @@ def test_a_body_that_is_not_json_is_read_back_the_same_way(client):
             side_effect=_lost_after_taking(account, lambda request: httpx.Response(200, text="<html>gateway</html>"))
         )
         plan = _plan(client)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
     assert response.status_code == 200 and response.json()["applied"] is True
     assert _state()["owned"] == [SLUG]
 
@@ -1327,10 +1364,10 @@ def test_an_update_whose_answer_was_lost_is_reported_as_applied_when_the_preset_
             side_effect=_lost_after_taking(account, lambda request: httpx.Response(504, text="gateway timeout"))
         )
         plan = _plan(client)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
     assert response.status_code == 200, response.text
     assert response.json()["applied"] is True and response.json()["version"] == 3
-    assert client.get("/api/presets/state").json()["last_status"] == "applied"
+    assert _slug_state(client)["last_status"] == "applied"
 
 
 def test_a_lost_answer_is_a_failure_when_the_preset_is_not_what_the_plan_wrote(client):
@@ -1349,11 +1386,11 @@ def test_a_lost_answer_is_a_failure_when_the_preset_is_not_what_the_plan_wrote(c
         router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=get)
         router.get(f"{BASE}/presets/{SLUG}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
         router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_timeout)
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
     assert response.status_code == 502
     assert "did not take the update" in response.json()["detail"]
     assert client.get("/api/presets/state").json()["owned"] == []
-    assert client.get("/api/presets/state").json()["last_status"] == "failed"
+    assert _slug_state(client)["last_status"] == "failed"
 
 
 def test_a_refusal_is_not_read_back(client):
@@ -1364,7 +1401,7 @@ def test_a_refusal_is_not_read_back(client):
         )
         plan = _plan(client)
         reads = account.reads.call_count
-        response = client.post("/api/presets/apply", json={"digest": plan["digest"]})
+        response = _apply(client, plan)
         assert account.reads.call_count == reads + 1  # the apply's own plan, and no read after the 400
     assert response.status_code == 502
 
@@ -1382,11 +1419,11 @@ async def test_a_write_that_is_cancelled_is_still_claimed_when_it_went_through(c
             account = _Account(router, None, id="p-1")
             monkeypatch.setattr(presets, "request", cancelled)
             with pytest.raises(asyncio.CancelledError):
-                await presets.apply(None, "schedule")
+                await presets.apply(SLUG, None, "schedule")
     finally:
         await http.close_client()
     assert _state()["owned"] == [SLUG]
-    assert _state()["last"]["status"] == "applied"
+    assert _state()["last"][SLUG]["status"] == "applied"
 
 
 # ---- keys Vibonomics does not own -------------------------------------------------------------------------------
@@ -1406,11 +1443,11 @@ def test_a_store_that_drops_a_default_does_not_make_every_sync_write_a_new_versi
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=stores_less)
         plan = _plan(client)
         assert "allow_fallbacks" not in json.dumps(plan["config"])  # OpenRouter's own default stands
-        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()["applied"] is True
+        assert _apply(client, plan).json()["applied"] is True
         for _ in range(2):
             again = _plan(client)
             assert again["action"] == "unchanged" and again["changes"] == []
-            assert client.post("/api/presets/apply", json={"digest": again["digest"]}).json()["applied"] is False
+            assert _apply(client, again).json()["applied"] is False
         assert post.call_count == 1
 
 
@@ -1447,7 +1484,7 @@ def test_a_base_url_override_on_the_provider_row_never_receives_the_key(client):
         write = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
         router.get(f"{BASE}/presets").mock(return_value=httpx.Response(200, json={"data": [], "total_count": 0}))
         plan = _plan(client)
-        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).status_code == 200
+        assert _apply(client, plan).status_code == 200
         assert client.post("/api/presets/list").status_code == 200
         assert gateway.call_count == 0
         assert {call.request.url.host for call in router.calls} == {"openrouter.ai"}
@@ -1497,7 +1534,7 @@ def test_a_failed_endpoint_lookup_does_not_unpin_the_preset(client):
         account = _Account(router, None, id="p-1")
         router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_stores(account))
         plan = _plan(client)
-        assert client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()["applied"] is True
+        assert _apply(client, plan).json()["applied"] is True
     pinned = account.written["provider"]
     assert pinned["only"] and _state()["pins"] == {SLUG: ["acme/best"]}
 
@@ -1511,10 +1548,10 @@ def test_a_failed_endpoint_lookup_does_not_unpin_the_preset(client):
         assert any(
             "best" in w and "provider data" in w and "keeps its current providers" in w for w in plan["warnings"]
         )
-        body = client.post("/api/presets/apply", json={"digest": plan["digest"]}).json()
+        body = _apply(client, plan).json()
         assert body["applied"] is False and "provider data" in body["message"]
         assert write.call_count == 0
-    assert client.get("/api/presets/state").json()["last_status"] == "unchanged"
+    assert _slug_state(client)["last_status"] == "unchanged"
     assert _state()["pins"] == {SLUG: ["acme/best"]}  # still remembered, for when the data is back
 
     _set_extra("acme/best", {"endpoints": ENDPOINTS})  # and the next good refresh puts it back
@@ -1540,3 +1577,1079 @@ def test_a_model_that_never_had_provider_data_does_not_hold_the_preset_pinned(cl
             plan = _plan(client)
         assert plan["action"] == "update", pins  # `only` would keep steady from being served: unpin it
         assert "provider" not in plan["config"] or "only" not in plan["config"]["provider"]
+
+
+# ---- several presets: state and the engine by slug --------------------------------------------------------------
+
+SECOND = "vibonomics-second"
+
+
+def _items(*items: PresetSettings, **shared: Any) -> None:
+    """Save these presets as the managed ones, with the settings that apply to all of them."""
+    with session_scope() as session:
+        save_settings(session, AppSettings(presets=PresetsSettings(items=list(items), **shared)))
+
+
+def _item(slug: str = SLUG, **fields: Any) -> PresetSettings:
+    return PresetSettings(**{"enabled": True, "min_context": 100_000, "slug": slug, **fields})
+
+
+def _creates(router: respx.Router, slug: str, **ids: Any) -> respx.Route:
+    """A write to ``slug`` that the account takes, answering the way OpenRouter does."""
+
+    def create(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(slug, sent, version=1, **ids))
+
+    return router.post(f"{BASE}/presets/{slug}/chat/completions").mock(side_effect=create)
+
+
+def test_state_an_older_release_kept_as_one_record_is_read_as_the_record_of_the_preset_it_names(client):
+    old = {
+        "owned": [SLUG],
+        "applied": {"slug": SLUG, "model_id": "acme/best", "version": 3, "at": "2026-11-01T00:00:00+00:00"},
+        "last": {
+            "slug": SLUG,
+            "at": "2026-11-02T00:00:00+00:00",
+            "status": "unchanged",
+            "message": "Already up to date.",
+            "trigger": "schedule",
+        },
+    }
+    with session_scope() as session:
+        session.merge(Setting(key=STATE_KEY, value=old))
+
+    body = client.get("/api/presets/state").json()
+
+    assert body["owned"] == [SLUG]
+    assert set(body["slugs"]) == {SLUG}
+    assert body["slugs"][SLUG]["version"] == 3 and body["slugs"][SLUG]["model_id"] == "acme/best"
+    assert (body["slugs"][SLUG]["last_status"], body["slugs"][SLUG]["last_trigger"]) == ("unchanged", "schedule")
+    # and the first write rewrites it in the new shape
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=3)
+        _creates(router, SLUG)
+        assert _apply(client, _plan(client)).status_code == 200
+    stored = _state()
+    assert stored["last"][SLUG]["status"] == "applied" and stored["applied"][SLUG]["model_id"] == "acme/best"
+
+
+def test_applying_one_preset_leaves_the_record_of_another_alone(client):
+    _items(_item(), _item(SECOND, max_models=2))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, SECOND, None)
+        _creates(router, SLUG)
+        second = _creates(router, SECOND)
+        assert _apply(client, _plan(client)).status_code == 200
+        before = _slug_state(client)
+        stored = _state()
+
+        plan = _plan(client, SECOND)
+        assert plan["slug"] == SECOND and [c["model_id"] for c in plan["picks"]] == ["acme/best", "acme/steady"]
+        assert _apply(client, plan, SECOND).status_code == 200
+        assert second.call_count == 1
+
+    assert _slug_state(client) == before
+    after = _state()
+    assert after["owned"] == [SLUG, SECOND]
+    assert after["applied"][SLUG] == stored["applied"][SLUG] and after["last"][SLUG] == stored["last"][SLUG]
+    assert after["owners"][SLUG] == stored["owners"][SLUG] and after["pins"][SLUG] == stored["pins"][SLUG]
+    assert after["applied"][SECOND]["model_id"] == "acme/best"
+    slugs = client.get("/api/presets/state").json()["slugs"]
+    assert slugs[SECOND]["last_status"] == "applied" and slugs[SECOND]["last_trigger"] == "manual"
+
+
+def test_a_failed_write_to_one_preset_is_recorded_for_that_preset_only(client):
+    _items(_item(), _item(SECOND))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, SECOND, None)
+        _creates(router, SLUG)
+        router.post(f"{BASE}/presets/{SECOND}/chat/completions").mock(return_value=httpx.Response(400, json={}))
+        assert _apply(client, _plan(client)).status_code == 200
+        assert _apply(client, _plan(client, SECOND), SECOND).status_code == 502
+
+    assert _slug_state(client)["last_status"] == "applied"
+    assert _slug_state(client, SECOND)["last_status"] == "failed"
+    assert client.get("/api/presets/state").json()["owned"] == [SLUG]
+
+
+def test_each_preset_is_planned_with_its_own_settings(client):
+    _items(_item(max_models=1), _item(SECOND, max_models=3))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, SECOND, None)
+        first, second = _plan(client), _plan(client, SECOND)
+
+    assert [c["model_id"] for c in first["picks"]] == ["acme/best"]
+    assert [c["model_id"] for c in second["picks"]] == ["acme/best", "acme/steady", "acme/pricey"]
+    assert first["slug"] == SLUG and second["slug"] == SECOND
+
+
+def test_a_plan_needs_a_preset_named_either_by_slug_or_by_settings(client):
+    assert client.post("/api/presets/plan", json={}).status_code == 422
+    assert client.post("/api/presets/plan").status_code == 422
+    assert client.post("/api/presets/plan", json={"slug": "vibonomics-nobody"}).status_code == 404
+    assert client.post("/api/presets/apply", json={"slug": "vibonomics-nobody", "digest": "x"}).status_code == 404
+
+
+def test_a_draft_for_a_preset_that_is_not_saved_previews_and_can_never_be_applied(client):
+    draft = PresetSettings(slug="Brand new", enabled=True, min_context=100_000).model_dump(mode="json")
+    new_slug = "vibonomics-brand-new"
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, new_slug, None)
+        post = _creates(router, new_slug)
+        plan = client.post("/api/presets/plan", json={"settings": draft}).json()
+        assert plan["slug"] == new_slug and plan["draft"] is True and plan["action"] == "create"
+        assert plan["digest"]
+        assert _apply(client, plan, new_slug).status_code == 404
+        assert post.call_count == 0
+    assert client.get("/api/presets/state").json()["owned"] == []
+
+
+def test_a_preset_switched_off_is_not_written_while_another_is_on(client):
+    _items(_item(enabled=False), _item(SECOND))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, SECOND, None)
+        off = _creates(router, SLUG)
+        on = _creates(router, SECOND)
+        assert _apply(client, _plan(client)).status_code == 409
+        assert _apply(client, _plan(client, SECOND), SECOND).status_code == 200
+        assert (off.call_count, on.call_count) == (0, 1)
+
+
+# ---- blocklists -------------------------------------------------------------------------------------------------
+
+
+def _ranked_with(
+    models: list[str] = (),  # type: ignore[assignment]
+    providers: list[str] = (),  # type: ignore[assignment]
+    *,
+    everywhere_models: list[str] = (),  # type: ignore[assignment]
+    everywhere_providers: list[str] = (),  # type: ignore[assignment]
+    **patch: Any,
+) -> tuple[list[str], Excluded]:
+    """The ranking with these blocklists on the preset and (the ``everywhere_`` ones) on every preset."""
+    with session_scope() as session:
+        settings = load_settings(session).model_copy(deep=True)
+        item = settings.presets.items[0]
+        item.blocked_models, item.blocked_providers = list(models), list(providers)
+        settings.presets.blocked_models = list(everywhere_models)
+        settings.presets.blocked_providers = list(everywhere_providers)
+        for key, value in patch.items():
+            setattr(item, key, value)
+        ids = [p.id for p in session.query(ProviderConfig).filter_by(type="openrouter")]
+        excluded = Excluded()
+        ranked = rank(session, settings, ids, item, excluded)[0]
+        return [c.model_id for c in ranked], excluded
+
+
+def test_a_blocked_model_is_never_a_candidate_whichever_way_it_is_written(client):
+    everyone = ["acme/best", "acme/steady", "acme/pricey"]
+    assert _ranked_with()[0] == everyone
+    assert _ranked_with(["acme/best"])[0] == ["acme/steady", "acme/pricey"]  # exact
+    assert _ranked_with(["ACME/Best"])[0] == ["acme/steady", "acme/pricey"]  # in any case
+    assert _ranked_with(["acme/pri*", "*steady"])[0] == ["acme/best"]  # patterns
+    assert _ranked_with(["acme/*"])[0] == []
+    # the id OpenRouter uses is not the only name: the canonical id counts too
+    assert _ranked_with(["preset-test/steady"])[0] == ["acme/best", "acme/pricey"]
+    assert _ranked_with(["*:free"], include_free=True)[0] == everyone  # the free offer goes, the rest stay
+    assert "acme/free:free" in _ranked_with(include_free=True)[0]
+    assert "acme/free:free" not in _ranked_with(["*:free"], include_free=True)[0]
+
+
+def test_the_list_for_every_preset_and_the_list_for_this_one_are_added_together(client):
+    ranked, excluded = _ranked_with(["acme/best"], everywhere_models=["acme/steady"])
+
+    assert ranked == ["acme/pricey"]
+    assert excluded.models == 2
+
+
+def test_the_exclusions_count_only_models_that_would_otherwise_have_been_candidates(client):
+    # acme/low scores 40 and acme/gone is inactive: blocking them removes nothing the run would have considered
+    ranked, excluded = _ranked_with(["acme/low", "acme/gone", "acme/pricey"])
+
+    assert ranked == ["acme/best", "acme/steady"]
+    assert excluded.models == 1
+
+
+def test_a_provider_pattern_matches_the_tag_the_provider_part_or_the_display_name(client):
+    for pattern in ("novita/fp4", "novita", "NOVITA", "nov*", "*/fp4"):
+        assert [e for e in choose_endpoints(ENDPOINTS, TASK, {}, 5, blocked=[pattern]) if "novita" in e["tag"]] == []
+        assert len(choose_endpoints(ENDPOINTS, TASK, {}, 5, blocked=[pattern])) == 3, pattern
+    # the display name is its own name for the provider: a tag that says otherwise still matches it
+    renamed = [{"provider": "Fancy Cloud", "tag": "fc1/fp8", "input": 1, "output": 1}]
+    assert choose_endpoints(renamed, TASK, {}, 5, blocked=["fancy cloud"]) == []
+    assert choose_endpoints(renamed, TASK, {}, 5, blocked=["fancy"]) != []  # no wildcard, no match
+
+
+def test_a_blocked_provider_is_never_pinned_and_nothing_is_written_to_ignore_it(client):
+    _settings(blocked_providers=["novita", "wafer/*"])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+
+    assert [p["tag"] for p in plan["providers"]] == ["deepinfra/fp8", "slow/fp8"]
+    assert plan["config"]["provider"]["only"] == plan["config"]["provider"]["order"] == ["deepinfra/fp8", "slow/fp8"]
+    assert "ignore" not in plan["config"]["provider"]  # blocking is the app's own filter, not the preset's
+    assert plan["excluded"] == {"models": 0, "providers": ["Novita", "Wafer"]}
+
+
+def test_a_blocked_provider_in_the_list_for_every_preset_counts_too(client):
+    _items(_item(), _item(SECOND), blocked_providers=["novita"])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, SECOND, None)
+        first, second = _plan(client), _plan(client, SECOND)
+
+    for plan in (first, second):
+        assert "novita/fp4" not in [p["tag"] for p in plan["providers"]]
+
+
+def test_a_model_whose_every_known_endpoint_is_blocked_is_left_out_but_one_with_no_data_is_not(client):
+    everything = ["deepinfra", "wafer", "novita", "slow", "broken"]
+
+    ranked, excluded = _ranked_with(providers=everything)
+    assert ranked == ["acme/steady", "acme/pricey"]  # acme/best has endpoints and they are all blocked
+    assert excluded.models == 1
+    assert excluded.providers == ["Broken", "DeepInfra", "Novita", "Slow", "Wafer"]
+    # one endpoint left is enough to keep it
+    assert _ranked_with(providers=everything[:-1])[0] == ["acme/best", "acme/steady", "acme/pricey"]
+    # and a block that matches no provider the model has touches nothing
+    ranked, excluded = _ranked_with(providers=["nobody"])
+    assert ranked == ["acme/best", "acme/steady", "acme/pricey"] and excluded == Excluded()
+
+
+def test_a_blocked_incumbent_is_dropped_from_the_live_lineup(client):
+    _own_as(KEY)
+    _settings(max_models=2, blocked_models=["acme/best"])
+    live = {"model": "acme/best", "models": ["acme/best", "acme/steady"]}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        plan = _plan(client)
+
+    assert plan["action"] == "update"
+    assert [c["model_id"] for c in plan["picks"]] == ["acme/steady", "acme/pricey"]
+    assert plan["config"]["model"] == "acme/steady" and plan["config"]["models"] == ["acme/steady", "acme/pricey"]
+    assert plan["reason"].startswith("Model list: adds pricey; drops acme/best.")
+    assert plan["excluded"]["models"] == 1
+
+
+def test_a_blocklist_does_not_give_a_blocked_models_margin_to_anything(client):
+    # steady has been the lead; blocking it hands the lead to the best value without the switch margin's help
+    _own_as(KEY)
+    _settings(blocked_models=["acme/steady"], switch_margin_pct=50)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/steady"}, version=3)
+        plan = _plan(client)
+    assert plan["pick"]["model_id"] == "acme/best" and plan["kept_current"] is False
+
+
+def test_a_plan_whose_blocklists_leave_no_model_says_so(client):
+    _settings(blocked_models=["acme/*"])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+
+    assert plan["action"] == "blocked" and plan["considered"] == 0
+    assert "blocklist" in plan["reason"]
+    assert plan["excluded"]["models"] == 3
+
+
+def test_a_plan_with_no_blocklist_excludes_nothing(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        assert _plan(client)["excluded"] == {"models": 0, "providers": []}
+
+
+def test_blocklists_are_saved_with_the_settings_and_trimmed(client):
+    current = client.get("/api/settings").json()["settings"]
+    doc = _with_item(current, blocked_models=[" openai/* ", "", "*:free"], blocked_providers=["DeepInfra"])
+    doc["presets"]["blocked_models"] = ["x-ai/*"]
+    doc["presets"]["blocked_providers"] = ["slow*", "SLOW*"]
+
+    saved = client.put("/api/settings", json={"settings": doc}).json()["settings"]["presets"]
+
+    assert saved["items"][0]["blocked_models"] == ["openai/*", "*:free"]
+    assert saved["items"][0]["blocked_providers"] == ["DeepInfra"]
+    assert (saved["blocked_models"], saved["blocked_providers"]) == (["x-ai/*"], ["slow*"])
+
+
+# ---- route ------------------------------------------------------------------------------------------------------
+
+TAGS = ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
+
+
+def test_sort_writes_the_route_and_the_provider_sort_and_price_is_the_default():
+    config = build_config({"model": "old", "tools": [1]}, ["a/m"], ["x/fp8"], route="sort", sort="latency")
+    assert config == {
+        "model": "a/m",
+        "tools": [1],
+        "route": "sort",
+        "provider": {"only": ["x/fp8"], "order": ["x/fp8"], "sort": "latency"},
+    }
+    assert build_config(None, ["m"], [], route="sort") == {"model": "m", "route": "sort", "provider": {"sort": "price"}}
+    assert build_config(None, ["m"], ["x"], route="sort", sort=None)["provider"]["sort"] == "price"
+
+
+def test_fallback_writes_no_route_and_takes_away_one_a_live_preset_has():
+    live = {"model": "old", "route": "sort", "provider": {"sort": "price", "only": ["x"], "quantizations": ["fp8"]}}
+
+    config = build_config(live, ["a/m"], ["x/fp8"])
+
+    assert "route" not in config
+    assert config["provider"] == {"only": ["x/fp8"], "order": ["x/fp8"], "quantizations": ["fp8"]}
+    assert "route" not in build_config(None, ["m"], [])
+    assert live["route"] == "sort"  # the base is not edited in place
+
+
+def test_the_route_and_the_sort_are_among_the_keys_the_app_decides():
+    live = {"model": "a", "route": "sort", "provider": {"sort": "price", "only": ["x"], "data_collection": "deny"}}
+    assert owned_view(live) == {
+        "model": "a",
+        "models": None,
+        "route": "sort",
+        "only": ["x"],
+        "order": None,
+        "sort": "price",
+    }
+    assert owned_view({"model": "a"})["route"] is None and owned_view({"model": "a"})["sort"] is None
+    # a key that is not the app's does not show
+    assert "data_collection" not in str(owned_view(live))
+
+
+def test_the_diff_names_a_route_that_goes_and_a_sort_that_changes():
+    before = {"model": "a", "route": "sort", "provider": {"sort": "price"}}
+    fallback = build_config(before, ["a"], [])
+    assert {c.path: (c.before, c.after) for c in diff_config(before, fallback)} == {
+        "route": ('"sort"', None),
+        "provider.sort": ('"price"', None),
+    }
+    after = {"model": "a", "route": "sort", "provider": {"sort": "latency"}}
+    assert {c.path: (c.before, c.after) for c in diff_config(before, after)} == {
+        "provider.sort": ('"price"', '"latency"')
+    }
+
+
+def test_a_route_openrouter_dropped_is_named_among_the_keys_it_did_not_keep():
+    sent = {"model": "m", "route": "sort", "provider": {"sort": "price", "only": ["x"]}}
+    assert unsaved_keys(sent, {"model": "m", "provider": {"sort": "price", "only": ["x"]}}) == ["route"]
+    assert unsaved_keys(sent, {"model": "m", "route": "sort", "provider": {"only": ["x"]}}) == ["provider.sort"]
+    assert unsaved_keys(sent, sent) == []
+
+
+def _live_sorted(sort: str = "price", **extra: Any) -> dict[str, Any]:
+    return {
+        "model": "acme/best",
+        "route": "sort",
+        "provider": {"only": TAGS, "order": TAGS, "sort": sort, **extra},
+    }
+
+
+def test_a_plan_for_the_sort_route_writes_both_keys_and_says_which_route_it_is(client):
+    _settings(route="sort", sort="throughput")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+
+    assert plan["config"]["route"] == "sort" and plan["config"]["provider"]["sort"] == "throughput"
+    assert (plan["route"], plan["sort"]) == ("sort", "throughput")
+    assert plan["request"]["body"]["route"] == "sort"
+
+
+def test_sort_without_a_choice_means_price(client):
+    _settings(route="sort")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+
+    assert plan["config"]["provider"]["sort"] == "price" and plan["sort"] is None
+
+
+def test_a_preset_already_on_the_sort_route_is_unchanged_and_a_new_sort_is_an_update(client):
+    _own_as(KEY)
+    _settings(route="sort")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, _live_sorted(), version=2)
+        assert _plan(client)["action"] == "unchanged"
+    _settings(route="sort", sort="latency")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, _live_sorted(), version=2)
+        plan = _plan(client)
+    assert plan["action"] == "update" and [c["path"] for c in plan["changes"]] == ["provider.sort"]
+
+
+def test_switching_to_fallback_takes_the_route_and_the_sort_off_the_live_preset(client):
+    _own_as(KEY)
+    live = _live_sorted(data_collection="deny")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+
+    assert plan["action"] == "update"
+    assert {c["path"] for c in plan["changes"]} == {"route", "provider.sort"}
+    assert "route" not in plan["config"] and "sort" not in plan["config"]["provider"]
+    assert plan["config"]["provider"]["data_collection"] == "deny"  # the rest of the provider block is not touched
+    assert any("route" in w and "sort" in w for w in plan["warnings"])
+
+
+def test_a_preset_that_never_had_a_route_stays_unchanged_on_fallback(client):
+    _own_as(KEY)
+    desired = build_config(None, ["acme/best"], TAGS)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, desired, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and plan["warnings"] == []
+
+
+def test_a_store_that_drops_the_route_is_reported_and_does_not_write_a_new_version_every_sync(client):
+    _settings(route="sort")
+    account: _Account
+
+    def stores_less(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        assert account.written is not None
+        account.written.pop("route", None)  # whatever it does not keep
+        return httpx.Response(200, json=_preset(SLUG, account.written, version=1, id="p-1"))
+
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="p-1")
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=stores_less)
+        plan = _plan(client)
+        assert plan["config"]["route"] == "sort"
+        body = _apply(client, plan).json()
+        assert body["applied"] is True and body["unsaved"] == ["route"]
+        assert "OpenRouter did not keep: route" in body["message"]
+        assert _state()["applied"][SLUG]["unsaved"] == ["route"]
+
+        for _ in range(2):  # and every later sync leaves it be, instead of sending the same route again
+            again = _plan(client)
+            assert again["action"] == "unchanged" and again["changes"] == []
+            assert any("did not keep" in w and "route" in w for w in again["warnings"])
+            assert _apply(client, again).json()["applied"] is False
+        assert post.call_count == 1
+
+
+def test_a_changed_sort_is_written_even_while_the_route_is_one_openrouter_does_not_keep(client):
+    _own_as(KEY)
+    with session_scope() as session:
+        session.merge(
+            Setting(key=STATE_KEY, value={**_state(), "applied": {SLUG: {"slug": SLUG, "unsaved": ["route"]}}})
+        )
+    _settings(route="sort", sort="latency")
+    live = {"model": "acme/best", "provider": {"only": TAGS, "order": TAGS, "sort": "price"}}  # no route kept
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "update" and "provider.sort" in {c["path"] for c in plan["changes"]}
+
+
+# ---- the passthrough: what the app sends back as it found it -------------------------------------------------------
+
+
+def test_the_passthrough_is_every_key_the_app_does_not_decide_with_the_provider_block_opened_up():
+    config = {
+        "model": "a",
+        "models": ["a", "b"],
+        "route": "sort",
+        "tools": [{"type": "openrouter:web_search"}],
+        "reasoning": {"enabled": True},
+        "provider": {
+            "only": ["x"],
+            "order": ["x"],
+            "sort": "price",
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "data_collection": "deny",
+            "allow_fallbacks": False,
+        },
+    }
+
+    assert passthrough_view(config) == {
+        "tools": [{"type": "openrouter:web_search"}],
+        "reasoning": {"enabled": True},
+        "provider": {
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "data_collection": "deny",
+            "allow_fallbacks": False,
+        },
+    }
+    for managed in ("model", "models", "route"):
+        assert managed not in passthrough_view(config)
+    for managed in ("only", "order", "sort"):
+        assert managed not in passthrough_view(config)["provider"]
+
+
+def test_a_provider_block_holding_only_what_the_app_decides_leaves_no_provider_in_the_passthrough():
+    assert passthrough_view({"model": "a", "provider": {"only": ["x"], "order": ["x"], "sort": "price"}}) == {}
+    assert passthrough_view({"model": "a", "provider": {}}) == {}
+    assert passthrough_view({"model": "a"}) == {}
+    assert passthrough_view({}) == {}
+    # something that is not a block is not the app's to hide
+    assert passthrough_view({"model": "a", "provider": "odd"}) == {"provider": "odd"}
+
+
+def test_the_passthrough_is_a_copy_and_its_digest_ignores_the_order_of_keys_and_the_managed_ones():
+    config = {"model": "a", "tools": [1], "provider": {"only": ["x"], "quantizations": ["fp8"]}}
+    view = passthrough_view(config)
+    view["tools"].append(2)
+    assert config["tools"] == [1]
+    same = {"provider": {"quantizations": ["fp8"], "only": ["y", "z"]}, "tools": [1], "model": "other"}
+    assert passthrough_digest(config) == passthrough_digest(same)
+    assert passthrough_digest(config) != passthrough_digest({**config, "tools": [1, 2]})
+    assert passthrough_digest(config) != passthrough_digest({**config, "provider": {"quantizations": ["fp4"]}})
+
+
+def test_a_plan_shows_the_passthrough_it_will_send_back_and_the_keys_it_manages(client):
+    _own_as(KEY)
+    live = {
+        "model": "acme/best",
+        "tools": [{"type": "openrouter:web_search"}],
+        "provider": {"quantizations": ["fp8", "bf16"], "data_collection": "deny", "ignore": ["slow"]},
+    }
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        plan = _plan(client)
+
+    assert plan["passthrough"] == {
+        "tools": [{"type": "openrouter:web_search"}],
+        "provider": {"quantizations": ["fp8", "bf16"], "data_collection": "deny", "ignore": ["slow"]},
+    }
+    assert plan["managed_keys"] == ["model", "models", "route", "provider.only", "provider.order", "provider.sort"]
+    # it is what the request carries, apart from the keys the app decides
+    body = {key: value for key, value in plan["request"]["body"].items() if key != "messages"}
+    assert passthrough_view(body) == plan["passthrough"]
+
+
+def test_a_new_preset_shows_the_passthrough_it_takes_from_its_template(client):
+    _settings(template_slug="my-tools")
+    template = {
+        "model": "other/model",
+        "tools": [{"type": "openrouter:datetime"}],
+        "provider": {"quantizations": ["fp8"]},
+    }
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", template, version=3)
+        plan = _plan(client)
+
+    assert plan["passthrough"] == {"tools": [{"type": "openrouter:datetime"}], "provider": {"quantizations": ["fp8"]}}
+
+
+def test_a_plan_that_is_blocked_still_shows_what_the_live_preset_holds(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "tools": [1]}, version=3, system_prompt="Be brief.")
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and plan["passthrough"] == {"tools": [1]}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _settings(min_score=99)
+        assert _plan(client)["passthrough"] == {}
+
+
+def test_the_plan_carries_the_id_and_the_workspace_the_account_names_for_the_preset(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2, id="p-1", workspace_slug="team-a")
+        plan = _plan(client)
+    assert (plan["preset_id"], plan["workspace"]) == ("p-1", "team-a")
+
+
+def test_the_workspace_may_be_named_by_a_slug_an_id_or_an_object_and_a_slug_wins(client):
+    _own_as(KEY)
+    for extra, want in (
+        ({"workspace": "ws-1"}, "ws-1"),
+        ({"workspace_id": 42}, "42"),
+        ({"workspace": {"slug": "team-b", "id": "w-9"}}, "team-b"),
+        ({"workspace": {"id": "w-9"}}, "w-9"),
+        ({"workspace_id": "w-9", "workspace_slug": "team-c"}, "team-c"),
+        ({"workspace": ""}, None),
+        ({"workspace": True}, None),
+        ({"workspace": ["x"]}, None),
+    ):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, {"model": "acme/best"}, version=2, **extra)
+            assert _plan(client)["workspace"] == want, extra
+
+
+def test_the_id_and_the_workspace_are_null_when_the_response_names_neither(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        plan = _plan(client)
+    assert plan["preset_id"] is None and plan["workspace"] is None
+    with respx.mock(assert_all_called=False) as router:  # and a preset that does not exist yet has neither
+        _remote(router, "vibonomics-fresh", None)
+        draft = PresetSettings(slug="fresh", enabled=True).model_dump(mode="json")
+        planned = client.post("/api/presets/plan", json={"settings": draft}).json()
+    assert planned["preset_id"] is None and planned["workspace"] is None
+
+
+def test_the_route_choice_is_saved_with_the_settings(client):
+    current = client.get("/api/settings").json()["settings"]
+    saved = client.put("/api/settings", json={"settings": _with_item(current, route="sort", sort="latency")})
+    assert saved.status_code == 200
+    item = saved.json()["settings"]["presets"]["items"][0]
+    assert (item["route"], item["sort"]) == ("sort", "latency")
+    for bad in ({"route": "fastest"}, {"sort": "cheap"}):
+        assert client.put("/api/settings", json={"settings": _with_item(current, **bad)}).status_code == 422
+
+
+# ---- looking at a preset made by hand, and adopting it -----------------------------------------------------------
+
+HAND = "my-tools"  # a preset the owner made in the OpenRouter UI: no prefix, nothing of ours about it
+HAND_CONFIG = {
+    "model": "other/model",
+    "models": ["other/model", "third/model"],
+    "tools": [{"type": "openrouter:web_search"}],
+    "reasoning": {"enabled": True},
+    "provider": {
+        "only": ["deepinfra/fp8"],
+        "order": ["deepinfra/fp8"],
+        "quantizations": ["fp8"],
+        "ignore": ["slow"],
+        "data_collection": "deny",
+    },
+}
+
+
+def _inspect(client: TestClient, slug: str = HAND) -> httpx.Response:
+    return client.post("/api/presets/inspect", json={"slug": slug})
+
+
+def _adopt(client: TestClient, digest: str, slug: str = HAND) -> httpx.Response:
+    return client.post("/api/presets/adopt", json={"slug": slug, "digest": digest})
+
+
+def _adopted_item(slug: str = HAND, **fields: Any) -> PresetSettings:
+    return PresetSettings(**{"adopted": True, "slug": slug, "min_context": 100_000, **fields})
+
+
+def _adopt_hand_made(client: TestClient, config: dict[str, Any] | None = None, version: int = 3, **extra: Any) -> dict:
+    """Inspect and adopt ``HAND`` against an account that holds it; returns what the inspect said."""
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, config or HAND_CONFIG, version=version, **extra)
+        seen = _inspect(client).json()
+        assert _adopt(client, seen["digest"]).status_code == 200
+    return seen
+
+
+def test_inspect_shows_a_preset_made_by_hand_with_everything_the_app_would_send_back(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, id="p-7", workspace_slug="team-a")
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        response = _inspect(client)
+        assert post.call_count == 0
+    assert response.status_code == 200, response.text
+    assert KEY not in response.text
+    body = response.json()
+    assert (body["slug"], body["status"], body["version"]) == (HAND, "active", 3)
+    assert body["config"] == HAND_CONFIG
+    assert body["models"] == ["other/model", "third/model"] and body["providers"] == ["deepinfra/fp8"]
+    assert body["has_system_prompt"] is False
+    assert body["managed_keys"] == ["model", "models", "route", "provider.only", "provider.order", "provider.sort"]
+    assert body["passthrough"] == {
+        "tools": [{"type": "openrouter:web_search"}],
+        "reasoning": {"enabled": True},
+        "provider": {"quantizations": ["fp8"], "ignore": ["slow"], "data_collection": "deny"},
+    }
+    assert (body["managed"], body["adoptable"], body["blockers"]) == (False, True, [])
+    assert (body["preset_id"], body["workspace"]) == ("p-7", "team-a")
+    assert [v["version"] for v in body["versions"]] == [3, 1] and body["versions"][0]["live"] is True
+    assert body["digest"] == digest_of(HAND, HAND_CONFIG, None, 3)
+    assert body["updated_at"] == "2026-11-04T07:36:33Z"
+
+
+def test_inspect_gives_a_null_id_and_workspace_when_the_response_names_neither(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        body = _inspect(client).json()
+    assert body["preset_id"] is None and body["workspace"] is None
+
+
+def test_the_inspect_digest_names_the_slug_the_version_and_the_config(client):
+    digests = []
+    for config, version in ((HAND_CONFIG, 3), (HAND_CONFIG, 4), ({**HAND_CONFIG, "tools": []}, 3)):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, HAND, config, version=version)
+            digests.append(_inspect(client).json()["digest"])
+    assert len(set(digests)) == 3
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "other-tools", HAND_CONFIG, version=3)
+        assert _inspect(client, "other-tools").json()["digest"] != digests[0]
+
+
+def test_inspect_says_why_a_preset_cannot_be_adopted(client):
+    for word, extra in (("system prompt", {"system_prompt": "Be brief."}), ("archived", {"status": "archived"})):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, HAND, HAND_CONFIG, version=3, **extra)
+            body = _inspect(client).json()
+        assert body["adoptable"] is False, word
+        assert any(word in blocker for blocker in body["blockers"]), (word, body["blockers"])
+        assert body["has_system_prompt"] is (word == "system prompt")
+
+
+def test_inspect_reads_a_preset_the_app_manages_too_and_says_it_is_managed(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        body = _inspect(client, SLUG).json()
+    assert body["managed"] is True and body["adoptable"] is False
+    assert any("already" in blocker for blocker in body["blockers"])
+
+
+def test_inspect_has_an_answer_for_every_way_the_account_can_fail(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "nowhere", None)
+        assert _inspect(client, "nowhere").status_code == 404
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BASE}/presets/{HAND}").mock(return_value=httpx.Response(401, json={"error": "bad key"}))
+        failed = _inspect(client)
+    assert failed.status_code == 502 and "HTTP 401" in failed.json()["detail"]
+    with respx.mock(assert_all_called=False) as router:
+        _raw(router, HAND, {"slug": HAND, "status": "active"})  # no live version at all
+        body = _inspect(client).json()
+    assert body["adoptable"] is False and body["config"] == {} and body["version"] is None
+    with session_scope() as session:
+        session.query(ProviderConfig).filter_by(type="openrouter").update({"api_key_enc": None})
+    assert _inspect(client).status_code == 409
+
+
+def test_adopting_records_the_preset_as_ours_and_adds_it_to_the_list_without_writing_anything(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, id="p-7", created_at="2026-10-01T00:00:00Z")
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        seen = _inspect(client).json()
+        response = _adopt(client, seen["digest"])
+        assert post.call_count == 0
+    assert response.status_code == 200, response.text
+    item = response.json()
+    assert item["slug"] == HAND and item["adopted"] is True  # the name is kept, with no prefix added
+    assert (item["enabled"], item["auto_apply"]) == (False, False)  # adopting writes nothing, now or on a timer
+    state = _state()
+    assert state["owned"] == [HAND]
+    record = state["owners"][HAND]
+    assert record["fingerprint"] == owner_fingerprint(BASE, KEY) and record["adopted"] is True
+    assert (record["preset_id"], record["created_at"]) == ("p-7", "2026-10-01T00:00:00Z") and record["adopted_at"]
+    assert state["reviewed"] == {HAND: passthrough_digest(HAND_CONFIG)}
+    assert KEY not in json.dumps(state)
+    saved = client.get("/api/settings").json()["settings"]["presets"]["items"]
+    assert [i["slug"] for i in saved] == [SLUG, HAND] and saved[1]["adopted"] is True
+    assert client.get("/api/presets/state").json()["owned"] == [HAND]
+    # and it is no longer something to adopt
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        again = _inspect(client).json()
+    assert again["managed"] is True and again["adoptable"] is False
+
+
+def test_adopting_is_refused_when_the_preset_changed_since_it_was_shown(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        stale = _inspect(client).json()["digest"]
+    for config, version in ((HAND_CONFIG, 4), ({**HAND_CONFIG, "tools": []}, 3)):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, HAND, config, version=version)
+            response = _adopt(client, stale)
+        assert response.status_code == 409 and "changed" in response.json()["detail"]
+    assert _state() == {} and [i["slug"] for i in _saved_items(client)] == [SLUG]
+
+
+def _saved_items(client: TestClient) -> list[dict[str, Any]]:
+    return client.get("/api/settings").json()["settings"]["presets"]["items"]
+
+
+def test_adopting_is_refused_for_an_archived_preset_and_for_one_with_a_system_prompt(client):
+    for extra, word in (({"status": "archived"}, "archived"), ({"system_prompt": "Be brief."}, "system prompt")):
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, HAND, HAND_CONFIG, version=3, **extra)
+            digest = _inspect(client).json()["digest"]
+            response = _adopt(client, digest)
+        assert response.status_code == 409 and word in response.json()["detail"], word
+    assert _state() == {} and [i["slug"] for i in _saved_items(client)] == [SLUG]
+
+
+def test_adopting_is_refused_for_a_preset_that_is_already_managed_or_was_made_by_the_app(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        seen = _inspect(client, SLUG).json()
+        response = _adopt(client, seen["digest"], SLUG)
+    assert response.status_code == 409 and "already" in response.json()["detail"]
+    # one that only the list holds, with no record, is as managed as the other
+    _items(_item(), _adopted_item())
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        response = _adopt(client, _inspect(client).json()["digest"])
+    assert response.status_code == 409
+    assert HAND not in _state().get("owned", [])
+
+
+def test_a_name_recorded_under_another_key_is_not_adoptable_with_this_one(client):
+    _own_as(OTHER_KEY, slug=HAND)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        body = _inspect(client).json()
+        response = _adopt(client, body["digest"])
+    assert body["adoptable"] is False and response.status_code == 409
+    assert _state()["owners"][HAND]["fingerprint"] == owner_fingerprint(BASE, OTHER_KEY)
+
+
+def test_no_more_than_twenty_presets_can_be_managed(client):
+    _items(*[_item(f"vibonomics-p{n}") for n in range(20)])
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        body = _inspect(client).json()
+        response = _adopt(client, body["digest"])
+    assert body["adoptable"] is False and response.status_code == 409 and "20" in response.json()["detail"]
+
+
+def test_adopting_a_preset_that_does_not_exist_or_cannot_be_read_is_not_a_success(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, "nowhere", None)
+        assert _adopt(client, "x", "nowhere").status_code == 404
+    with respx.mock(assert_all_called=False) as router:
+        _raw(router, HAND, {"slug": HAND})
+        body = _inspect(client).json()
+        assert _adopt(client, body["digest"]).status_code == 409
+    assert _state() == {}
+
+
+def test_an_adopted_preset_is_planned_under_its_own_name_and_keeps_every_key_it_has(client):
+    _adopt_hand_made(client)
+    _items(_item(), _adopted_item(enabled=True))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        plan = _plan(client, HAND)
+
+    assert plan["slug"] == HAND and plan["action"] == "update"
+    assert plan["request"]["url"] == f"{BASE}/presets/{HAND}/chat/completions"
+    config = plan["config"]
+    assert config["tools"] == HAND_CONFIG["tools"] and config["reasoning"] == {"enabled": True}
+    assert config["provider"]["quantizations"] == ["fp8"] and config["provider"]["data_collection"] == "deny"
+    assert plan["passthrough"] == passthrough_view(HAND_CONFIG)
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_slug_with_no_record_of_the_adoption_is_never_planned_or_written(client):
+    from vibonomics import presets as engine
+
+    # the list says adopted, but nothing says the owner agreed to it: not a path to writing a preset made by hand
+    _items(_item(), _adopted_item(enabled=True, auto_apply=True))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client, HAND)
+        assert plan["action"] == "blocked" and plan["request"] is None and plan["digest"] is None
+        assert "adopt" in plan["reason"].lower()
+        assert client.post("/api/presets/apply", json={"slug": HAND, "digest": "anything"}).status_code == 409
+        await engine.sync(HAND, "schedule")  # and a timer, which names no digest, gets no further
+        assert post.call_count == 0
+    assert _state()["last"][HAND]["status"] == "blocked"
+    # a record for the name that is not an adoption (a slug the app created) does not do either
+    _own_as(KEY, slug=HAND)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        assert _plan(client, HAND)["action"] == "blocked"
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 0
+
+
+def test_an_adopted_preset_that_is_gone_from_the_account_is_not_created_again(client):
+    _adopt_hand_made(client)
+    _items(_item(), _adopted_item(enabled=True))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, None)
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client, HAND)
+        assert plan["action"] == "blocked" and "gone" in plan["reason"]
+        assert post.call_count == 0
+
+
+def _set_state(state: dict[str, Any]) -> None:
+    with session_scope() as session:
+        session.merge(Setting(key=STATE_KEY, value=state))
+
+
+def _own_both(key: str = KEY) -> None:
+    """SLUG made by the app and HAND adopted, both under ``key``."""
+    mine = owner_fingerprint(BASE, key)
+    _set_state(
+        {
+            "owned": [SLUG, HAND],
+            "owners": {
+                SLUG: {"fingerprint": mine, "version_at_create": 1},
+                HAND: {"fingerprint": mine, "adopted": True, "adopted_at": "2026-11-05T00:00:00+00:00"},
+            },
+            "reviewed": {HAND: passthrough_digest(HAND_CONFIG)},
+        }
+    )
+
+
+def test_the_ownership_rules_of_a_key_hold_for_each_preset_by_itself(client):
+    _own_both()
+    _items(_item(), _adopted_item(enabled=True))
+    _use_key(OTHER_KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        for slug in (SLUG, HAND):
+            plan = _plan(client, slug)
+            assert plan["action"] == "blocked" and "different OpenRouter key or account" in plan["reason"], slug
+            assert plan["request"] is None
+    _use_key(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        assert _plan(client, SLUG)["action"] == "update" and _plan(client, HAND)["action"] == "update"
+    # an adopted name that was deleted and made again is no longer the preset that was adopted
+    state = _state()
+    state["owners"][HAND]["preset_id"] = "p-7"
+    _set_state(state)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        _remote(router, HAND, HAND_CONFIG, version=3, id="p-other")
+        assert _plan(client, HAND)["action"] == "blocked"
+        assert "no longer the one" in _plan(client, HAND)["reason"]
+        assert _plan(client, SLUG)["action"] == "update"
+
+
+def _adopted_world(client: TestClient) -> None:
+    """HAND adopted from the account as HAND_CONFIG, then switched on to write and to run on a timer."""
+    _adopt_hand_made(client)
+    _items(_item(), _adopted_item(enabled=True, auto_apply=True))
+
+
+def _write_to_hand(router: respx.Router) -> respx.Route:
+    def write(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(HAND, sent, version=4))
+
+    return router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=write)
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_writes_an_adopted_preset_only_while_its_other_keys_are_as_they_were_reviewed(client):
+    from vibonomics import presets as engine
+
+    _adopted_world(client)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        post = _write_to_hand(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 1  # nothing changed since the owner looked
+    assert _state()["last"][HAND]["status"] == "applied"
+
+    # someone adds a tool in the OpenRouter UI: the keys the owner looked at are not the keys that are there
+    changed = {**HAND_CONFIG, "tools": [{"type": "openrouter:web_search"}, {"type": "openrouter:datetime"}]}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, changed, version=5)
+        post = _write_to_hand(router)
+        await engine.sync(HAND, "schedule")
+        await engine.sync(HAND, "startup")
+        assert post.call_count == 0
+    last = _state()["last"][HAND]
+    assert last["status"] == "blocked" and "since you reviewed" in last["message"] and last["trigger"] == "startup"
+    assert _slug_state(client, HAND)["last_status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_a_manual_apply_of_an_adopted_preset_accepts_the_keys_it_showed_and_lets_the_timer_go_on(client):
+    from vibonomics import presets as engine
+
+    _adopted_world(client)
+    changed = {**HAND_CONFIG, "reasoning": {"enabled": False}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, changed, version=5)
+        post = _write_to_hand(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 0  # blocked, until the owner has seen the new keys
+        plan = _plan(client, HAND)
+        assert plan["passthrough"]["reasoning"] == {"enabled": False}  # and sees them here
+        assert _apply(client, plan, HAND).status_code == 200
+        assert post.call_count == 1
+    assert _state()["reviewed"][HAND] == passthrough_digest(changed)
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, {**changed, "model": "x/old"}, version=6)
+        post = _write_to_hand(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 1  # reviewed now, so the timer writes again
+
+
+def test_a_manual_apply_that_finds_nothing_to_write_still_counts_as_reviewing_the_keys(client):
+    _adopted_world(client)
+    changed = {**HAND_CONFIG, "reasoning": {"enabled": False}}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, changed, version=5)
+        wanted = _plan(client, HAND)["config"]
+    with respx.mock(assert_all_called=False) as router:  # the preset already holds what the plan would write
+        _remote(router, HAND, wanted, version=6)
+        post = _write_to_hand(router)
+        again = _plan(client, HAND)
+        assert again["action"] == "unchanged"
+        assert _apply(client, again, HAND).json()["applied"] is False
+        assert post.call_count == 0
+    assert _state()["reviewed"][HAND] == passthrough_digest(wanted) != passthrough_digest(HAND_CONFIG)
+
+
+def test_an_ordinary_preset_is_not_held_back_by_the_review(client):
+    # SLUG was created by the app, so the owner never reviewed anything of the keys it carries
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "tools": [1]}, version=2)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert _apply(client, plan).status_code == 200
+        assert post.call_count == 1
+    assert "reviewed" not in _state()
+
+
+def test_taking_an_adopted_preset_out_of_the_list_ends_the_adoption_and_leaves_the_rest_alone(client):
+    _own_both()
+    state = _state()
+    state["last"] = {HAND: {"at": "2026-11-01T00:00:00+00:00"}, SLUG: {"at": "2026-11-01T00:00:00+00:00"}}
+    state["pins"] = {HAND: ["a"], SLUG: ["b"]}
+    _set_state(state)
+    _items(_item(), _adopted_item())
+    current = client.get("/api/settings").json()["settings"]
+
+    kept = [i for i in _saved_items(client) if i["slug"] != HAND]
+    assert client.put("/api/settings", json={"settings": _with_items(current, kept)}).status_code == 200
+
+    state = _state()
+    assert state["owned"] == [SLUG] and set(state["owners"]) == {SLUG}
+    assert HAND not in state["reviewed"] and set(state["last"]) == {SLUG} and state["pins"] == {SLUG: ["b"]}
+    # and it can be adopted again
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        assert _adopt(client, _inspect(client).json()["digest"]).status_code == 200
+
+
+def test_taking_a_preset_the_app_made_out_of_the_list_does_not_release_it(client):
+    _own_both()
+    _items(_item(), _adopted_item())
+    current = client.get("/api/settings").json()["settings"]
+
+    kept = [i for i in _saved_items(client) if i["slug"] != SLUG]
+    assert client.put("/api/settings", json={"settings": _with_items(current, kept)}).status_code == 200
+
+    assert _state()["owned"] == [SLUG, HAND]  # it still exists on the account, and is still the app's
+
+
+def _with_items(current: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {**current, "presets": {**current["presets"], "items": items}}
+
+
+def test_keeping_an_adopted_preset_in_the_list_keeps_the_adoption(client):
+    _adopt_hand_made(client)
+    current = client.get("/api/settings").json()["settings"]
+    assert client.put("/api/settings", json={"settings": current}).status_code == 200
+    assert _state()["owned"] == [HAND] and _state()["reviewed"][HAND]
