@@ -28,6 +28,7 @@ import { ModelBadges, ScoreNumber } from './models/cells';
 import { CopyIconButton } from './CopyIconButton';
 import { ProviderDot } from './ProviderDot';
 import { providerTextColor } from '../lib/providerColors';
+import { tone } from '../lib/tone';
 import { EmptyState, ErrorState, LoadingState } from './DataState';
 import { SnippetTabs } from './SnippetTabs';
 
@@ -207,15 +208,21 @@ function OverviewTab({ detail, profile }: { detail: ModelDetail; profile: UsageP
   );
 }
 
-function ScoreCard({ label, value, hint }: { label: string; value: number | null | undefined; hint?: string }) {
+export function ScoreCard({ label, value, hint }: { label: string; value: number | null | undefined; hint?: string }) {
   return (
     <Card withBorder padding="sm">
       <Text size="xs" c="dimmed">
         {label}
       </Text>
-      <Text size="xl" fw={700} c={value === null || value === undefined ? 'dimmed' : scoreColor(value)}>
-        {value === null || value === undefined ? DASH : Math.round(value)}
-      </Text>
+      {value === null || value === undefined ? (
+        <Text size="xl" fw={700} c="dimmed">
+          {DASH}
+        </Text>
+      ) : (
+        <Text size="xl" fw={700} style={{ color: tone(scoreColor(value)) }}>
+          {Math.round(value)}
+        </Text>
+      )}
       {hint && (
         <Text size="xs" c="dimmed">
           {hint}

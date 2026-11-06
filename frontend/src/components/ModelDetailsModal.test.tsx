@@ -2,7 +2,8 @@ import { MantineProvider } from '@mantine/core';
 import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import type { ModelDetail } from '../api/types';
-import { FreeTerms, TestsTab } from './ModelDetailsModal';
+import { tone } from '../lib/tone';
+import { FreeTerms, ScoreCard, TestsTab } from './ModelDetailsModal';
 
 // A result that was not graded has a placeholder score of 0. It must read as a dash, not as a zero the
 // model earned: the run summary already does this, and this tab has to agree with it.
@@ -61,6 +62,19 @@ describe('TestsTab', () => {
     expect(scoreCell('acc-context')).toBe('0'); // failed is a real zero
     expect(scoreCell('tool-pick')).not.toBe('0'); // errored: no grade
     expect(scoreCell('agentic-fix-mean')).not.toBe('0'); // ungraded: no grade
+  });
+});
+
+describe('ScoreCard', () => {
+  it('colours the score with tone(), so it clears AA in both schemes', () => {
+    render(
+      <MantineProvider>
+        <ScoreCard label="Composite" value={85} />
+        <ScoreCard label="Coding" value={45} />
+      </MantineProvider>,
+    );
+    expect(screen.getByText('85').getAttribute('style') ?? '').toContain(tone('green'));
+    expect(screen.getByText('45').getAttribute('style') ?? '').toContain(tone('yellow'));
   });
 });
 
