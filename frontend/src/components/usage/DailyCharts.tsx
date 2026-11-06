@@ -14,6 +14,7 @@ import {
   linePath,
   longDay,
 } from '../../lib/usage';
+import { CREDIT_ONLY } from './creditOnly';
 
 const HEIGHT = 200;
 const MARGIN = { top: 10, right: 12, bottom: 26, left: 50 };
@@ -278,7 +279,9 @@ function DailyTable({ days }: { days: SpendDay[] }) {
             <Table.Th ta="right">Spend</Table.Th>
             <Table.Th ta="right">Tokens</Table.Th>
             <Table.Th ta="right">Requests</Table.Th>
-            <Table.Th ta="right">Per 1M tokens</Table.Th>
+            <Table.Th ta="right" title={CREDIT_ONLY}>
+              Per 1M tokens
+            </Table.Th>
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
@@ -353,7 +356,7 @@ export function DailyCharts({ days, refreshing }: { days: SpendDay[]; refreshing
       </ChartCard>
       <ChartCard
         title="Cost per 1M tokens"
-        note="Spend divided by tokens processed: lower is more efficient"
+        note="Credit-billed traffic only: spend divided by its tokens, lower is more efficient"
         days={days}
       >
         <EfficiencyLine {...shared} />

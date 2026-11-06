@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import type { SpendBucket } from '../../api/types';
 import { DASH, integer, money, percent } from '../../lib/format';
 import { CHART, bigCount, shareLabel } from '../../lib/usage';
+import { CREDIT_ONLY } from './creditOnly';
 
 export interface BreakdownRow {
   id: string;
@@ -46,7 +47,9 @@ export function BreakdownTable({
               <Table.Th ta="right">Share</Table.Th>
               <Table.Th ta="right">Tokens</Table.Th>
               <Table.Th ta="right">Requests</Table.Th>
-              <Table.Th ta="right">Per 1M tokens</Table.Th>
+              <Table.Th ta="right" title={CREDIT_ONLY}>
+                Per 1M tokens
+              </Table.Th>
               <Table.Th ta="right">Cached</Table.Th>
             </Table.Tr>
           </Table.Thead>
