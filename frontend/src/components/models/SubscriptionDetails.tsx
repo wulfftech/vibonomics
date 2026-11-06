@@ -27,8 +27,8 @@ export function SubscriptionDetails({ usage }: { usage: ClaudeUsage }) {
             <Text size="xs">Usage credits this month</Text>
             <Text size="xs" fw={600}>
               {usage.extra.limit !== null && usage.extra.limit !== undefined
-                ? `${money(usage.extra.used ?? 0)} of ${money(usage.extra.limit)}`
-                : `${money(usage.extra.used ?? 0)} spent`}
+                ? `${money(usage.extra.used ?? 0, usage.extra.currency)} of ${money(usage.extra.limit, usage.extra.currency)}`
+                : `${money(usage.extra.used ?? 0, usage.extra.currency)} spent`}
             </Text>
           </Group>
           {usage.extra.utilization !== null && usage.extra.utilization !== undefined && (

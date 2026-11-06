@@ -9,28 +9,29 @@ import { balanceWindows } from '../../lib/usageWindows';
 import { UsageWindows } from '../UsageWindows';
 
 function keyLine(balance: BalanceOut): string | null {
+  const currency = balance.currency;
   const usage = balance.key_usage ?? null;
   const limit = balance.key_limit ?? null;
   if (usage !== null && limit !== null) {
-    return `Key: ${money(usage)} of ${money(limit)} limit`;
+    return `Key: ${money(usage, currency)} of ${money(limit, currency)} limit`;
   }
   if (usage !== null) {
-    return `Key spend: ${money(usage)}`;
+    return `Key spend: ${money(usage, currency)}`;
   }
   if (balance.key_remaining !== null && balance.key_remaining !== undefined) {
-    return `Key: ${money(balance.key_remaining)} left`;
+    return `Key: ${money(balance.key_remaining, currency)} left`;
   }
   return null;
 }
 
 function accountLine(balance: BalanceOut): string | null {
   if (balance.account_balance !== null && balance.account_balance !== undefined) {
-    return `${money(balance.account_balance)} left`;
+    return `${money(balance.account_balance, balance.currency)} left`;
   }
   if (balance.account_used !== null && balance.account_used !== undefined) {
     // Providers that report spend name the window (Anthropic: "this month"); others just say "Spent".
     const period = typeof balance.details?.spend_period === 'string' ? ` ${balance.details.spend_period}` : '';
-    return `Spent ${money(balance.account_used)}${period}`;
+    return `Spent ${money(balance.account_used, balance.currency)}${period}`;
   }
   return null;
 }
@@ -68,7 +69,7 @@ export function BalanceBody({ provider }: { provider: ProviderOut }) {
           )}
           {trailing !== null && trailing !== balance.account_used && (
             <Text size="xs" c="dimmed">
-              Last 30 days {money(trailing)}
+              Last 30 days {money(trailing, balance.currency)}
             </Text>
           )}
           {key !== null && (
