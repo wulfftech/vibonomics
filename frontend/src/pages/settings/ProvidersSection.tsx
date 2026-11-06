@@ -82,6 +82,8 @@ function KeyBadge({ provider, envVar }: { provider: ProviderOut; envVar: string 
   );
 }
 
+const QUEUED_MESSAGE = 'Queued behind the refresh already running; it will run when that finishes.';
+
 function optionString(value: unknown): string {
   if (value === null || value === undefined) {
     return '';
@@ -130,7 +132,16 @@ function ProviderForm({
 
   const afterSave = (saved: ProviderOut) => {
     markRequested(['models', 'balances']);
-    refresh.mutate([saved.id]);
+    // mutateAsync, not mutate: onClose unmounts this form, and a per-call callback never fires after that.
+    void refresh.mutateAsync([saved.id]).then(
+      (answer) => {
+        if (answer.status === 'queued') {
+          notifications.show({ message: QUEUED_MESSAGE, color: 'blue' });
+        }
+      },
+      // The save went through; the next scheduled refresh picks the provider up.
+      () => undefined,
+    );
     notifications.show({ message: 'Saved. Refreshing…', color: 'green' });
     onClose();
   };
@@ -332,19 +343,128 @@ function ProviderForm({
   );
 }
 
+/**
+ * One table row. It owns its mutations: a mutation shared by every row reports only its latest call, so a
+ * second click elsewhere would swallow the first row's result.
+ */
+function ProviderRow({
+  provider,
+  type,
+  onEdit,
+  onDelete,
+}: {
+  provider: ProviderOut;
+  type: ProviderTypeOut | undefined;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const update = useUpdateProvider();
+  const test = useTestProvider();
+  return (
+    <Table.Tr>
+      <Table.Td>
+        <Group gap={6} wrap="nowrap">
+          <ProviderDot type={provider.type} />
+          <Text size="sm" fw={500}>
+            {provider.name}
+          </Text>
+        </Group>
+        <Text size="xs" c="dimmed">
+          {type?.name ?? provider.type}
+          {provider.base_url ? ` · ${provider.base_url}` : ''}
+        </Text>
+      </Table.Td>
+      <Table.Td>
+        <Switch
+          aria-label={`Enable ${provider.name}`}
+          checked={provider.enabled}
+          disabled={update.isPending}
+          onChange={(event) =>
+            update.mutate(
+              { id: provider.id, body: { enabled: event.currentTarget.checked } },
+              { onError: (error) => notifications.show({ message: error.message, color: 'red' }) },
+            )
+          }
+        />
+      </Table.Td>
+      <Table.Td>
+        <KeyBadge provider={provider} envVar={type?.env_key} />
+      </Table.Td>
+      <Table.Td>{provider.model_count.toLocaleString()}</Table.Td>
+      <Table.Td>
+        {provider.last_refresh_status ? (
+          <Tooltip
+            label={`${provider.last_refresh_message ?? statusLabel(provider.last_refresh_status)} · ${relativeTime(provider.last_refresh_at)}`}
+            multiline
+            maw={360}
+            withArrow
+          >
+            <Badge size="sm" variant="light" color={statusColor(provider.last_refresh_status)}>
+              {statusLabel(provider.last_refresh_status)}
+            </Badge>
+          </Tooltip>
+        ) : (
+          <Text size="sm" c="dimmed">
+            {DASH}
+          </Text>
+        )}
+      </Table.Td>
+      <Table.Td>
+        <Group gap={4} wrap="nowrap">
+          <BalanceSupportBadge support={provider.balance_support} note={provider.balance_note} />
+          {provider.billing_url && (
+            <Anchor
+              href={provider.billing_url}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={`Open the ${provider.name} billing page`}
+            >
+              <ExternalLink size={12} />
+            </Anchor>
+          )}
+        </Group>
+      </Table.Td>
+      <Table.Td>
+        <Group gap="xs" justify="flex-end" wrap="nowrap">
+          <Button
+            variant="default"
+            size="xs"
+            loading={test.isPending}
+            onClick={() =>
+              test.mutate(
+                { id: provider.id },
+                {
+                  onSuccess: (result) =>
+                    notifications.show({ message: result.message, color: result.ok ? 'green' : 'red' }),
+                  onError: (error) => notifications.show({ message: error.message, color: 'red' }),
+                },
+              )
+            }
+          >
+            Test
+          </Button>
+          <Button variant="light" size="xs" disabled={type === undefined} onClick={onEdit}>
+            Edit
+          </Button>
+          <Button variant="light" color="red" size="xs" onClick={onDelete}>
+            Delete
+          </Button>
+        </Group>
+      </Table.Td>
+    </Table.Tr>
+  );
+}
+
 export function ProvidersSection() {
   const mobile = useMediaQuery('(max-width: 48em)');
   const providers = useProviders();
   const types = useProviderTypes();
-  const update = useUpdateProvider();
   const remove = useDeleteProvider();
-  const test = useTestProvider();
 
   const [picking, setPicking] = useState(false);
   const [pickedType, setPickedType] = useState<string | null>(null);
   const [form, setForm] = useState<{ provider: ProviderOut | null; type: string } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProviderOut | null>(null);
-  const [testingId, setTestingId] = useState<number | null>(null);
 
   const typeList = types.data ?? [];
   const typeOf = (type: string) => typeList.find((t) => t.type === type);
@@ -393,108 +513,18 @@ export function ProvidersSection() {
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
-                {rows.map((provider) => {
-                  const type = typeOf(provider.type);
-                  return (
-                    <Table.Tr key={provider.id}>
-                      <Table.Td>
-                        <Group gap={6} wrap="nowrap">
-                          <ProviderDot type={provider.type} />
-                          <Text size="sm" fw={500}>
-                            {provider.name}
-                          </Text>
-                        </Group>
-                        <Text size="xs" c="dimmed">
-                          {type?.name ?? provider.type}
-                          {provider.base_url ? ` · ${provider.base_url}` : ''}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Switch
-                          aria-label={`Enable ${provider.name}`}
-                          checked={provider.enabled}
-                          disabled={update.isPending && update.variables?.id === provider.id}
-                          onChange={(event) =>
-                            update.mutate(
-                              { id: provider.id, body: { enabled: event.currentTarget.checked } },
-                              { onError: (error) => notifications.show({ message: error.message, color: 'red' }) },
-                            )
-                          }
-                        />
-                      </Table.Td>
-                      <Table.Td>
-                        <KeyBadge provider={provider} envVar={type?.env_key} />
-                      </Table.Td>
-                      <Table.Td>{provider.model_count.toLocaleString()}</Table.Td>
-                      <Table.Td>
-                        {provider.last_refresh_status ? (
-                          <Tooltip
-                            label={`${provider.last_refresh_message ?? statusLabel(provider.last_refresh_status)} · ${relativeTime(provider.last_refresh_at)}`}
-                            multiline
-                            maw={360}
-                            withArrow
-                          >
-                            <Badge size="sm" variant="light" color={statusColor(provider.last_refresh_status)}>
-                              {statusLabel(provider.last_refresh_status)}
-                            </Badge>
-                          </Tooltip>
-                        ) : (
-                          <Text size="sm" c="dimmed">
-                            {DASH}
-                          </Text>
-                        )}
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap={4} wrap="nowrap">
-                          <BalanceSupportBadge support={provider.balance_support} note={provider.balance_note} />
-                          {provider.billing_url && (
-                            <Anchor
-                              href={provider.billing_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              aria-label={`Open the ${provider.name} billing page`}
-                            >
-                              <ExternalLink size={12} />
-                            </Anchor>
-                          )}
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap="xs" justify="flex-end" wrap="nowrap">
-                          <Button
-                            variant="default"
-                            size="xs"
-                            loading={test.isPending && testingId === provider.id}
-                            onClick={() => {
-                              setTestingId(provider.id);
-                              test.mutate(
-                                { id: provider.id },
-                                {
-                                  onSuccess: (result) =>
-                                    notifications.show({ message: result.message, color: result.ok ? 'green' : 'red' }),
-                                  onError: (error) => notifications.show({ message: error.message, color: 'red' }),
-                                },
-                              );
-                            }}
-                          >
-                            Test
-                          </Button>
-                          <Button
-                            variant="light"
-                            size="xs"
-                            disabled={type === undefined}
-                            onClick={() => setForm({ provider, type: provider.type })}
-                          >
-                            Edit
-                          </Button>
-                          <Button variant="light" color="red" size="xs" onClick={() => setPendingDelete(provider)}>
-                            Delete
-                          </Button>
-                        </Group>
-                      </Table.Td>
-                    </Table.Tr>
-                  );
-                })}
+                {rows.map((provider) => (
+                  <ProviderRow
+                    key={provider.id}
+                    provider={provider}
+                    type={typeOf(provider.type)}
+                    onEdit={() => setForm({ provider, type: provider.type })}
+                    onDelete={() => {
+                      remove.reset();
+                      setPendingDelete(provider);
+                    }}
+                  />
+                ))}
               </Table.Tbody>
             </Table>
           </Table.ScrollContainer>
@@ -568,6 +598,12 @@ export function ProvidersSection() {
             Delete {pendingDelete?.name ?? 'this provider'}? Its models, prices and stored keys are removed from
             Vibonomics. Test results are kept.
           </Text>
+          {pendingDelete?.type === 'openrouter' && (
+            <Text size="sm">
+              Its stored spend history is deleted too. OpenRouter reports only the last 30 days, so older days cannot be
+              fetched again.
+            </Text>
+          )}
           {remove.error && (
             <Text size="sm" style={{ color: tone('red') }}>
               {remove.error.message}
