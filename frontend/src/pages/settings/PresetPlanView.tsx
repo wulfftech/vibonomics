@@ -1,8 +1,10 @@
-import { Alert, Badge, Button, Code, Collapse, Group, Stack, Table, Text, Title } from '@mantine/core';
+import { Alert, Anchor, Badge, Button, Code, Collapse, Group, Stack, Table, Text, Title } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
+import { Fragment } from 'react';
 import { CopyIconButton } from '../../components/CopyIconButton';
 import { DASH, dateTime, discountLabel, money, relativeTime } from '../../lib/format';
+import { openRouterModelUrl } from '../../lib/presets';
 import type { PresetPlan } from '../../api/types';
 
 const ACTIONS: Record<PresetPlan['action'], { label: string; color: string }> = {
@@ -17,52 +19,93 @@ function shown(json: string | null | undefined): string {
   return json === null || json === undefined ? DASH : json;
 }
 
+/** A model's name, or its id where there is no name, linked to its page on OpenRouter in a new tab. */
+function ModelLink({ id, name }: { id: string; name?: string }) {
+  const label = name ?? id;
+  return (
+    <Anchor
+      href={openRouterModelUrl(id)}
+      target="_blank"
+      rel="noopener noreferrer"
+      inherit
+      aria-label={`Open ${label} on OpenRouter`}
+    >
+      {label}
+      <ExternalLink size={12} style={{ marginInlineStart: 3, verticalAlign: '-1px' }} />
+    </Anchor>
+  );
+}
+
+/** Model links in a sentence or a cell, with a comma between them. */
+function ModelLinks({ ids, names }: { ids: string[]; names: Map<string, string> }) {
+  return ids.map((id, i) => (
+    <Fragment key={id}>
+      {i > 0 && ', '}
+      <ModelLink id={id} name={names.get(id)} />
+    </Fragment>
+  ));
+}
+
 function Versions({ plan }: { plan: PresetPlan }) {
+  const [open, { toggle }] = useDisclosure(false);
   if (plan.versions.length === 0) {
     return null;
   }
+  const live = plan.versions.find((v) => v.live)?.version ?? plan.current_version;
+  const summary =
+    live === null || live === undefined ? `${plan.versions.length}` : `${plan.versions.length}, live v${live}`;
   return (
     <Stack gap={4}>
-      <Text fw={600} size="sm">
-        Versions on OpenRouter
-      </Text>
-      <Table.ScrollContainer minWidth={420}>
-        <Table verticalSpacing={4} withRowBorders={false} aria-label="Preset versions">
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>Version</Table.Th>
-              <Table.Th>Saved</Table.Th>
-              <Table.Th>Model</Table.Th>
-              <Table.Th>Providers</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {plan.versions.map((v) => (
-              <Table.Tr key={v.version ?? 'unknown'}>
-                <Table.Td>
-                  <Group gap={6} wrap="nowrap">
-                    <Text size="sm">v{v.version ?? DASH}</Text>
-                    {v.live && (
-                      <Badge size="xs" variant="light" color="teal">
-                        live
-                      </Badge>
-                    )}
-                  </Group>
-                </Table.Td>
-                <Table.Td title={dateTime(v.created_at)}>
-                  <Text size="sm">{relativeTime(v.created_at)}</Text>
-                </Table.Td>
-                <Table.Td>
-                  <Text size="sm">{v.model ?? DASH}</Text>
-                </Table.Td>
-                <Table.Td>
-                  <Text size="sm">{v.providers.join(', ') || DASH}</Text>
-                </Table.Td>
+      <Group>
+        <Button
+          variant="subtle"
+          size="compact-sm"
+          leftSection={open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          aria-expanded={open}
+          onClick={toggle}
+        >
+          {`Versions on OpenRouter (${summary})`}
+        </Button>
+      </Group>
+      <Collapse expanded={open}>
+        <Table.ScrollContainer minWidth={420}>
+          <Table verticalSpacing={4} withRowBorders={false} aria-label="Preset versions">
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Version</Table.Th>
+                <Table.Th>Saved</Table.Th>
+                <Table.Th>Model</Table.Th>
+                <Table.Th>Providers</Table.Th>
               </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
-      </Table.ScrollContainer>
+            </Table.Thead>
+            <Table.Tbody>
+              {plan.versions.map((v) => (
+                <Table.Tr key={v.version ?? 'unknown'}>
+                  <Table.Td>
+                    <Group gap={6} wrap="nowrap">
+                      <Text size="sm">v{v.version ?? DASH}</Text>
+                      {v.live && (
+                        <Badge size="xs" variant="light" color="teal">
+                          live
+                        </Badge>
+                      )}
+                    </Group>
+                  </Table.Td>
+                  <Table.Td title={dateTime(v.created_at)}>
+                    <Text size="sm">{relativeTime(v.created_at)}</Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text size="sm">{v.model ? <ModelLink id={v.model} /> : DASH}</Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text size="sm">{v.providers.join(', ') || DASH}</Text>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
+      </Collapse>
     </Stack>
   );
 }
@@ -120,8 +163,9 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
             {plan.kept_current ? 'Staying on' : 'Best value'}
           </Text>
           <Text size="sm">
-            {plan.pick.name} <Code>{plan.pick.model_id}</Code> scores {plan.pick.score}, about{' '}
-            {money(plan.pick.task_cost)} a task, {Math.round(plan.pick.value).toLocaleString()} points per dollar.
+            <ModelLink id={plan.pick.model_id} name={plan.pick.name} /> <Code>{plan.pick.model_id}</Code> scores{' '}
+            {plan.pick.score}, about {money(plan.pick.task_cost)} a task, {Math.round(plan.pick.value).toLocaleString()}{' '}
+            points per dollar.
           </Text>
         </Stack>
       )}
@@ -147,7 +191,7 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
                   <Table.Tr key={c.model_id}>
                     <Table.Td>{i + 1}</Table.Td>
                     <Table.Td>
-                      {c.name} <Code>{c.model_id}</Code>
+                      <ModelLink id={c.model_id} name={c.name} /> <Code>{c.model_id}</Code>
                     </Table.Td>
                     <Table.Td>{c.score}</Table.Td>
                     <Table.Td>{money(c.task_cost)}</Table.Td>
@@ -190,7 +234,9 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
                     <Table.Td>{money(p.task_cost)}</Table.Td>
                     {plan.picks.length > 1 && (
                       <Table.Td>
-                        <Text size="sm">{p.models.map((id) => names.get(id) ?? id).join(', ')}</Text>
+                        <Text size="sm">
+                          <ModelLinks ids={p.models} names={names} />
+                        </Text>
                       </Table.Td>
                     )}
                   </Table.Tr>
@@ -276,7 +322,12 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
         <Stack gap={4}>
           <Title order={6}>Next best by value</Title>
           <Text size="sm" c="dimmed">
-            {plan.runners_up.map((c) => `${c.name} (${Math.round(c.value).toLocaleString()})`).join(', ')}
+            {plan.runners_up.map((c, i) => (
+              <Fragment key={c.model_id}>
+                {i > 0 && ', '}
+                <ModelLink id={c.model_id} name={c.name} /> ({Math.round(c.value).toLocaleString()})
+              </Fragment>
+            ))}
           </Text>
         </Stack>
       )}
