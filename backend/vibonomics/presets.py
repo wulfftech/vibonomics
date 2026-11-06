@@ -181,6 +181,11 @@ class Plan:
     draft: bool = False  # made from unsaved settings, so it cannot be applied
     excluded: Excluded = field(default_factory=Excluded)  # what the blocklists took out of this run
     own_tests_preferred: bool = False  # the scores the ranking used: the model's own tests over the computed ones
+    # The system prompt on the live preset, the one this plan's write carries (None: no system message is sent), and
+    # where that one comes from: managed | cleared | kept (the live one, sent back as it is) | none.
+    live_prompt: str | None = None
+    prompt: str | None = None
+    prompt_source: str = "none"
     passthrough: dict[str, Any] = field(default_factory=dict)  # the keys that are sent back as they were found
     reviewed: str | None = None  # the passthrough digest to record as seen, once an apply the owner watched is done
     fingerprint: str | None = None  # which key and host the plan was made for
@@ -521,8 +526,40 @@ def build_config(
 
 
 def _prompt_text(value: str | None) -> str | None:
-    """A system prompt as it counts: nothing and an empty one are the same."""
+    """A system prompt as it is sent: nothing and an empty one are the same."""
     return value if isinstance(value, str) and value else None
+
+
+def _norm_prompt(value: str | None) -> str | None:
+    """A system prompt as two of them are compared: space around the text is not a difference, since a store is free
+    to trim it, and a version made for that alone would be one nobody asked for."""
+    text = (value or "").strip() if isinstance(value, str) else ""
+    return text or None
+
+
+def prompt_in_force(guardrails: PresetGuardrails, live: str | None) -> tuple[str | None, str]:
+    """The system prompt a write carries, and whose it is.
+
+    OpenRouter takes the prompt from the system message of each write, and a write with none sets it to null: the
+    version before it is not carried over. So a prompt the owner does not manage is the live one, sent back as it is.
+    """
+    if guardrails.system_prompt is not None:
+        return guardrails.system_prompt, "managed"
+    if SYSTEM_KEY in guardrails.clear:
+        return None, "cleared"
+    live = _prompt_text(live)
+    return live, "kept" if live is not None else "none"
+
+
+def write_body(config: dict[str, Any], prompt: str | None) -> dict[str, Any]:
+    """The request that makes a version: the config, and the messages the create endpoint insists on.
+
+    A system message is the only way to give the version a system prompt, so it is there whenever one is in force.
+    """
+    messages = [dict(m) for m in PLACEHOLDER_MESSAGES]
+    if prompt is not None:
+        messages.insert(0, {"role": "system", "content": prompt})
+    return {**config, "messages": messages}
 
 
 def owned_view(
@@ -544,7 +581,7 @@ def owned_view(
     }
     for key in guardrails.owned_keys() if guardrails else []:
         if key == SYSTEM_KEY:
-            view[key] = _prompt_text(system_prompt)
+            view[key] = _norm_prompt(system_prompt)
         elif key in GUARDRAIL_PROVIDER:
             view[key] = provider.get(key)
         else:
@@ -604,8 +641,9 @@ def passthrough_digest(
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-# Keys whose storage OpenRouter does not document, so a write may come back without them.
-UNDOCUMENTED = {"route": "route", "provider.sort": "sort"}
+# Keys whose storage OpenRouter does not document, so a write may come back without them. The system prompt is
+# kept (measured), but a write whose read-back showed it was not is not sent again for the same result.
+UNDOCUMENTED = {"route": "route", "provider.sort": "sort", SYSTEM_KEY: SYSTEM_KEY}
 
 
 def _unkept(state: dict[str, Any], slug: str) -> set[str]:
@@ -714,7 +752,7 @@ def diff_config(
                     changes.append(Change(f"provider.{sub}", _json(old.get(sub)), _json(new.get(sub))))
         elif old != new:
             changes.append(Change(key, _json(old), _json(new)))
-    if _prompt_text(before_prompt) != _prompt_text(after_prompt):
+    if _norm_prompt(before_prompt) != _norm_prompt(after_prompt):
         changes.append(Change(SYSTEM_KEY, _prompt_text(before_prompt), _prompt_text(after_prompt)))
     return changes
 
@@ -769,7 +807,8 @@ def owner_fingerprint(base_url: str, api_key: str) -> str:
 
 
 # Kept per slug, so a write to one preset leaves what another's record says alone.
-_PER_SLUG = ("owners", "pins", "applied", "last", "reviewed")
+_PER_SLUG = ("owners", "pins", "applied", "last", "reviewed", "system_backups")
+BACKUP_MAX_CHARS = 20_000
 
 
 def _normalise_state(raw: dict[str, Any]) -> dict[str, Any]:
@@ -905,6 +944,22 @@ def _claim_record(
             "created_at": old.get("created_at") or created_at,
         }
     return _owner_record(plan.fingerprint or "", None, preset_id, created_at)
+
+
+def _backup_of(plan: Plan) -> dict[str, Any] | None:
+    """What to keep of the live system prompt before a write that replaces or removes it; None when none is lost.
+
+    Resending the prompt unchanged loses nothing, so it records nothing and an earlier backup is not overwritten.
+    """
+    if plan.live_prompt is None or plan.current is None:
+        return None
+    if _norm_prompt(plan.live_prompt) == _norm_prompt(plan.prompt):
+        return None
+    return {
+        "text": plan.live_prompt[:BACKUP_MAX_CHARS],
+        "version": plan.current.version,
+        "at": utcnow().isoformat(),
+    }
 
 
 def _stable_id(data: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -1135,6 +1190,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
     except FetchError as exc:
         return _blocked(plan, f"Could not read the preset from OpenRouter: {exc}")
     plan.current = remote
+    plan.live_prompt = _prompt_text(remote.system_prompt) if remote is not None else None
+    plan.prompt, plan.prompt_source = prompt_in_force(cfg.guardrails, plan.live_prompt)
     if remote is None and cfg.adopted:
         return _blocked(
             plan,
@@ -1183,12 +1240,6 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             log.info("Preset %s was recorded as ours before accounts were tracked; adopting it for this key", cfg.slug)
             record = _owner_record(plan.fingerprint, None, remote.preset_id, remote.created_at)
             await asyncio.to_thread(_update_state, {}, cfg.slug, record, True)
-    if remote is not None and remote.system_prompt:
-        return _blocked(
-            plan,
-            "The preset has a system prompt, and OpenRouter's API cannot carry one over to a new version. Clear it "
-            "in the OpenRouter web UI, or use another name.",
-        )
     if not inputs.candidates:
         return _blocked(
             plan,
@@ -1217,9 +1268,11 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
                 "Vibonomics could not read what to start from. Try again later.",
             )
         base_config = template.config
-        if template.system_prompt:
+        if template.system_prompt and cfg.guardrails.system_prompt is None:
+            # A template lends its settings, not its text: the prompt is the owner's to give a new preset.
             plan.warnings.append(
-                "The template has a system prompt, which a new preset cannot take over; it is left out."
+                "The template has a system prompt, which a new preset does not copy. Set a system prompt in this "
+                "preset's guardrails to give it one."
             )
 
     # What the endpoints are filtered by is the config this plan will write, so a guardrail the owner manages is what
@@ -1295,9 +1348,9 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
     )
     plan.passthrough = passthrough_view(plan.config, cfg.guardrails)
     plan.url = f"{inputs.base_url}/presets/{quote(cfg.slug, safe='')}/chat/completions"
-    plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
-    plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None)
-    plan.changes = diff_config(remote.config if remote else None, plan.config)
+    plan.body = write_body(plan.config, plan.prompt)
+    plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None, plan.prompt)
+    plan.changes = diff_config(remote.config if remote else None, plan.config, plan.live_prompt, plan.prompt)
     plan.pinned = ids if plan.providers else []
     # The models whose providers the live preset named when it was last in step with a plan, and that have none now.
     known = (inputs.state.get("pins") or {}).get(cfg.slug) or []
@@ -1310,7 +1363,14 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             if len(ids) == 1
             else f"Creates {cfg.slug} with {len(ids)} models, led by {pick.name}."
         )
-    elif not _owned_differs(plan.config, remote.config, unkept := _unkept(inputs.state, cfg.slug), cfg.guardrails):
+    elif not _owned_differs(
+        plan.config,
+        remote.config,
+        unkept := _unkept(inputs.state, cfg.slug),
+        cfg.guardrails,
+        plan.prompt,
+        plan.live_prompt,
+    ):
         plan.action = "unchanged"
         best = inputs.candidates[0]
         plan.reason = "Already up to date." + (
@@ -1326,8 +1386,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
                 "it no more now, so it is not sent again. Nothing is written until something else changes."
             )
             plan.config = copy.deepcopy(remote.config)
-            plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
-            plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version)
+            plan.body = write_body(plan.config, plan.prompt)
+            plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version, plan.prompt)
             plan.changes = []
     elif lost and (live_provider.get("only") or live_provider.get("order")):
         # A failed endpoint lookup, or the option switched off, leaves a model with no data for a while. Writing now
@@ -1341,15 +1401,21 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             "instead of being unpinned. Nothing is written until the data is back."
         )
         plan.config = copy.deepcopy(remote.config)
-        plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
-        plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version)
+        plan.body = write_body(plan.config, plan.prompt)
+        plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version, plan.prompt)
         plan.changes, plan.pinned = [], None
     elif before != ids:
         plan.action, plan.reason = "update", _model_change(before, plan.picks, inputs.candidates)
     else:
         plan.action = "update"
         paths = {c.path for c in plan.changes}
-        what = "route" if paths and paths <= {"route", "provider.sort"} else "provider list"
+        mine = {guardrail_path(k) for k in cfg.guardrails.owned_keys()}
+        if paths and paths <= {"route", "provider.sort"}:
+            what = "route"
+        elif paths and paths <= mine:
+            what = "system prompt" if paths == {SYSTEM_KEY} else "guardrails"
+        else:
+            what = "provider list" + (" and guardrails" if paths & mine else "")
         plan.reason = f"Same {'model' if len(ids) == 1 else 'models'}, {pick.name}; the {what} changed."
     if remote is not None and cfg.route == "fallback":
         gone = [k for k in ("route", "provider.sort") if k in {c.path for c in plan.changes}]
@@ -1389,8 +1455,12 @@ class _Unconfirmed(Exception):
     """OpenRouter answered a write with a success status but did not report the version it made."""
 
 
-def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any]]:
-    """The preset, its live version and the config OpenRouter stored, from a write's response.
+# What a write's answer says of the system prompt when it does not say: not the same as saying there is none.
+_UNREPORTED: Any = object()
+
+
+def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any], Any]:
+    """The preset, its live version, the config and the system prompt OpenRouter stored, from a write's response.
 
     A 2xx alone proves nothing: an error can ride a 200, and a body with no version means no version was made.
     """
@@ -1403,7 +1473,7 @@ def _confirmed(body: Any, slug: str) -> tuple[dict[str, Any], Any, dict[str, Any
         and isinstance(live.get("config"), dict)
         and data.get("slug", slug) == slug
     ):
-        return data, live["version"], live["config"]
+        return data, live["version"], live["config"], live.get("system_prompt", _UNREPORTED)
     error = body.get("error") if isinstance(body, dict) else None
     detail = error.get("message") if isinstance(error, dict) else error
     raise _Unconfirmed(f"the answer named no version of {slug}" + (f" ({str(detail)[:200]})" if detail else ""))
@@ -1418,18 +1488,30 @@ async def _settle(
     preset_id: str | None,
     created_at: str | None,
     read_back: bool = False,
+    stored_prompt: Any = _UNREPORTED,
 ) -> Applied:
     """Record a write that went through: the slug is ours from here on, and the run is logged."""
     assert plan.config is not None
     slug = plan.slug
     cleared = [guardrail_path(k) for k in plan.settings.guardrails.clear if k != SYSTEM_KEY]
     unsaved = unsaved_keys(plan.config, stored, cleared)
+    unverified = False
+    if plan.prompt is not None or plan.live_prompt is not None:
+        # Whatever was sent, the prompt the version holds is compared with it: a version that lost it has lost the
+        # owner's text, and must not pass for a write that went well.
+        seen = stored_prompt if stored_prompt is not _UNREPORTED else await _stored_prompt(inputs, slug)
+        if seen is _UNREPORTED:
+            unverified = True
+        elif _norm_prompt(seen) != _norm_prompt(plan.prompt):
+            unsaved.append(SYSTEM_KEY)
     verb = "Created" if plan.action == "create" else "Updated"
     message = f"{verb} {slug} as version {version}: {plan.reason}"
     if read_back:
         message += " OpenRouter's answer did not arrive, so this was read back from the preset."
     if unsaved:
         message += f" OpenRouter did not keep: {', '.join(unsaved)}."
+    if unverified:
+        message += " It could not be checked whether OpenRouter kept the system prompt."
     applied = {
         "slug": slug,
         "model_id": plan.config.get("model"),
@@ -1446,6 +1528,16 @@ async def _settle(
     await asyncio.to_thread(_update_state, patch, slug, owner)
     await asyncio.to_thread(_record_run, slug, "applied", message, trigger)
     return Applied(version=version, unsaved=unsaved, message=message)
+
+
+async def _stored_prompt(inputs: Inputs, slug: str) -> Any:
+    """The system prompt the live version holds, by a plain read, for a write whose answer did not carry it."""
+    assert inputs.api_key is not None
+    try:
+        seen = await fetch_remote(inputs.base_url, inputs.api_key, slug)
+    except FetchError:
+        return _UNREPORTED
+    return seen.system_prompt if seen is not None and seen.readable else _UNREPORTED
 
 
 async def _identity(
@@ -1477,10 +1569,23 @@ async def _read_back(plan: Plan, inputs: Inputs, trigger: str) -> Applied | None
         remote = await fetch_remote(inputs.base_url, inputs.api_key, plan.slug)
     except FetchError:
         return None
-    if remote is None or not remote.readable or remote.config != plan.config:
+    if (
+        remote is None
+        or not remote.readable
+        or remote.config != plan.config
+        or _norm_prompt(remote.system_prompt) != _norm_prompt(plan.prompt)
+    ):
         return None
     return await _settle(
-        plan, inputs, trigger, remote.version, remote.config, remote.preset_id, remote.created_at, True
+        plan,
+        inputs,
+        trigger,
+        remote.version,
+        remote.config,
+        remote.preset_id,
+        remote.created_at,
+        True,
+        remote.system_prompt,
     )
 
 
@@ -1528,6 +1633,10 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
             await asyncio.to_thread(_record_run, cfg.slug, "blocked", str(invalid), trigger)
             raise invalid
         assert inputs.api_key is not None
+        if (backup := _backup_of(plan)) is not None:
+            # The write replaces the live system prompt, and the version it held stays only in OpenRouter's history,
+            # which no call here can read it from. Kept first, so the owner can get the text back whatever follows.
+            await asyncio.to_thread(_update_state, {"system_backups": {cfg.slug: backup}})
         headers = {**_auth(inputs.api_key), "Content-Type": "application/json"}
         try:
             resp = await request(
@@ -1538,7 +1647,7 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
                 timeout=30,
                 retries=0,  # a retried create would leave a second version behind
             )
-            data, version, stored = _confirmed(resp.json(), cfg.slug)
+            data, version, stored, stored_prompt = _confirmed(resp.json(), cfg.slug)
         except asyncio.CancelledError:
             # Whoever cancelled has stopped waiting, but OpenRouter may have taken the write. Claim it if so, or the
             # preset it made would be blocked as someone else's.
@@ -1558,7 +1667,7 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
         ident = _stable_id(data)
         if plan.action == "create":
             ident = await _identity(inputs, cfg.slug, ident)
-        return plan, await _settle(plan, inputs, trigger, version, stored, *ident)
+        return plan, await _settle(plan, inputs, trigger, version, stored, *ident, stored_prompt=stored_prompt)
 
 
 async def sync(slug: str, trigger: str = "schedule") -> None:
@@ -1596,8 +1705,9 @@ class Inspection:
 
 
 def inspection_digest(remote: Remote) -> str:
-    """Names the preset as shown: its slug, its live version and its config. Adopt refuses if any has moved."""
-    return digest_of(remote.slug, remote.config, None, remote.version)
+    """Names the preset as shown: its slug, its live version, its config and its system prompt. Adopt refuses if any
+    has moved."""
+    return digest_of(remote.slug, remote.config, None, remote.version, remote.system_prompt)
 
 
 def _managed_slugs() -> list[str]:
@@ -1616,11 +1726,6 @@ def _blockers(slug: str, remote: Remote, state: dict[str, Any], managed_slugs: l
         out.append("The preset is archived on OpenRouter, and an archived preset takes no new versions.")
     if not remote.readable:
         out.append("OpenRouter returned no live version for it, so there is nothing to read what it holds from.")
-    if remote.system_prompt:
-        out.append(
-            "The preset has a system prompt, and OpenRouter's API cannot carry one over to a new version. Clear it "
-            "in the OpenRouter web UI first."
-        )
     if is_owned(state, slug) or slug in managed_slugs:
         out.append("Vibonomics already manages a preset with this name.")
     elif len(managed_slugs) >= PRESET_MAX_ITEMS:
@@ -1671,7 +1776,7 @@ def _record_adoption(slug: str, fingerprint: str, remote: Remote) -> PresetSetti
             "preset_id": remote.preset_id,
             "created_at": remote.created_at,
         }
-        patch = {"reviewed": {slug: passthrough_digest(remote.config)}}
+        patch = {"reviewed": {slug: passthrough_digest(remote.config, item.guardrails, remote.system_prompt)}}
         _merge_state(state, patch, slug, record)
         _store_state(s, state)
         return item

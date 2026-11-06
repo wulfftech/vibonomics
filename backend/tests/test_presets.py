@@ -513,7 +513,9 @@ def test_a_preset_vibonomics_did_not_create_is_never_touched(client):
     assert plan["current_version"] == 1
 
 
-def test_a_system_prompt_blocks_the_update_because_the_api_cannot_carry_it(client):
+def test_a_preset_with_a_system_prompt_is_planned_and_the_prompt_goes_back_with_the_write(client):
+    # OpenRouter takes the prompt from the system message of each write and nulls it when there is none, so the
+    # live one is resent: the preset is no longer one the app has to refuse.
     with session_scope() as session:
         row = session.get(Setting, STATE_KEY) or Setting(key=STATE_KEY, value={})
         row.value = {"owned": [SLUG]}
@@ -521,8 +523,9 @@ def test_a_system_prompt_blocks_the_update_because_the_api_cannot_carry_it(clien
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, {"model": "acme/best"}, system_prompt="Be brief.")
         plan = _plan(client)
-    assert plan["action"] == "blocked"
-    assert "system prompt" in plan["reason"]
+    assert plan["action"] == "update"
+    assert plan["request"]["body"]["messages"] == [{"role": "system", "content": "Be brief."}, *PLACEHOLDER_MESSAGES]
+    assert not any(c["path"] == "system_prompt" for c in plan["changes"])  # sent back as it is: nothing changes
 
 
 def _own(slug: str = SLUG) -> None:
@@ -2326,6 +2329,7 @@ def test_a_new_preset_shows_the_passthrough_it_takes_from_its_template(client):
 
 def test_a_plan_that_is_blocked_still_shows_what_the_live_preset_holds(client):
     _own_as(KEY)
+    _settings(min_score=99)  # no model passes, so nothing is planned, and the live preset is what there is to show
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, {"model": "acme/best", "tools": [1]}, version=3, system_prompt="Be brief.")
         plan = _plan(client)
@@ -2469,13 +2473,24 @@ def test_the_inspect_digest_names_the_slug_the_version_and_the_config(client):
 
 
 def test_inspect_says_why_a_preset_cannot_be_adopted(client):
-    for word, extra in (("system prompt", {"system_prompt": "Be brief."}), ("archived", {"status": "archived"})):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, status="archived")
+        body = _inspect(client).json()
+    assert body["adoptable"] is False
+    assert any("archived" in blocker for blocker in body["blockers"]), body["blockers"]
+
+
+def test_a_system_prompt_is_not_a_reason_to_refuse_a_preset_and_it_is_part_of_what_the_digest_names(client):
+    digests = []
+    for prompt in (None, "Be brief.", "Be terse."):
         with respx.mock(assert_all_called=False) as router:
-            _remote(router, HAND, HAND_CONFIG, version=3, **extra)
+            _remote(router, HAND, HAND_CONFIG, version=3, system_prompt=prompt)
             body = _inspect(client).json()
-        assert body["adoptable"] is False, word
-        assert any(word in blocker for blocker in body["blockers"]), (word, body["blockers"])
-        assert body["has_system_prompt"] is (word == "system prompt")
+        assert (body["adoptable"], body["blockers"]) == (True, [])
+        assert body["has_system_prompt"] is (prompt is not None)
+        digests.append(body["digest"])
+    assert len(set(digests)) == 3
+    assert digests[0] == digest_of(HAND, HAND_CONFIG, None, 3)  # no prompt: the digest is what it was before prompts
 
 
 def test_inspect_reads_a_preset_the_app_manages_too_and_says_it_is_managed(client):
@@ -2548,14 +2563,36 @@ def _saved_items(client: TestClient) -> list[dict[str, Any]]:
     return client.get("/api/settings").json()["settings"]["presets"]["items"]
 
 
-def test_adopting_is_refused_for_an_archived_preset_and_for_one_with_a_system_prompt(client):
-    for extra, word in (({"status": "archived"}, "archived"), ({"system_prompt": "Be brief."}, "system prompt")):
-        with respx.mock(assert_all_called=False) as router:
-            _remote(router, HAND, HAND_CONFIG, version=3, **extra)
-            digest = _inspect(client).json()["digest"]
-            response = _adopt(client, digest)
-        assert response.status_code == 409 and word in response.json()["detail"], word
+def test_adopting_is_refused_for_an_archived_preset(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, status="archived")
+        digest = _inspect(client).json()["digest"]
+        response = _adopt(client, digest)
+    assert response.status_code == 409 and "archived" in response.json()["detail"]
     assert _state() == {} and [i["slug"] for i in _saved_items(client)] == [SLUG]
+
+
+def test_a_preset_with_a_system_prompt_is_adopted_and_the_reviewed_digest_covers_the_prompt(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be brief.")
+        seen = _inspect(client).json()
+        post = router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=_echo)
+        response = _adopt(client, seen["digest"])
+        assert post.call_count == 0
+    assert response.status_code == 200 and response.json()["adopted"] is True
+    assert _state()["reviewed"] == {HAND: passthrough_digest(HAND_CONFIG, None, "Be brief.")}
+    assert _state()["reviewed"][HAND] != passthrough_digest(HAND_CONFIG)
+
+
+def test_adopting_is_refused_when_only_the_system_prompt_changed_since_it_was_shown(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be brief.")
+        stale = _inspect(client).json()["digest"]
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be terse.")
+        response = _adopt(client, stale)
+    assert response.status_code == 409 and "changed" in response.json()["detail"]
+    assert _state() == {}
 
 
 def test_adopting_is_refused_for_a_preset_that_is_already_managed_or_was_made_by_the_app(client):
@@ -3470,3 +3507,339 @@ def test_the_guardrails_of_a_draft_are_what_the_preview_shows(client):
         _remote(router, "vibonomics-fresh", None)
         plan = client.post("/api/presets/plan", json={"settings": draft.model_dump(mode="json")}).json()
     assert plan["draft"] is True and plan["config"]["top_p"] == 0.4
+
+
+# ---- the system prompt: always resent, or the write would null it ---------------------------------------------------
+
+
+class _PromptAccount:
+    """A preset on the account that keeps what a write sends, system message included, as OpenRouter does.
+
+    ``stores`` is what the version holds after a write: the prompt as sent by default; ``dropping`` makes the account
+    lose it, to test a read-back that disagrees.
+    """
+
+    def __init__(
+        self,
+        router: respx.Router,
+        config: dict[str, Any],
+        prompt: str | None,
+        version: int = 2,
+        dropping: bool = False,
+        answer_prompt: bool = True,
+    ) -> None:
+        self.config, self.prompt, self.version = config, prompt, version
+        self.dropping, self.answer_prompt = dropping, answer_prompt
+        self.bodies: list[dict[str, Any]] = []
+        router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=self._get)
+        router.get(f"{BASE}/presets/{SLUG}/versions").mock(return_value=httpx.Response(200, json={"data": []}))
+        self.post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=self._write)
+
+    def _get(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_preset(SLUG, self.config, version=self.version, system_prompt=self.prompt))
+
+    def _write(self, request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        self.bodies.append(json.loads(request.content))
+        messages = sent.pop("messages", [])
+        said = next((m["content"] for m in messages if m.get("role") == "system"), None)
+        self.config, self.version = sent, self.version + 1
+        self.prompt = None if self.dropping else said
+        answer = _preset(SLUG, self.config, version=self.version, system_prompt=self.prompt)
+        if not self.answer_prompt:
+            del answer["data"]["designated_version"]["system_prompt"]
+        return httpx.Response(200, json=answer)
+
+    def system_messages(self, body: dict[str, Any]) -> list[str]:
+        return [m["content"] for m in body["messages"] if m.get("role") == "system"]
+
+
+LIVE_DESIRED = build_config(None, ["acme/best"], TAGS)  # what a plan for SLUG writes when nothing else is set
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"guardrails": {"temperature": 0.7}},
+        {"guardrails": {"clear": ["top_p"]}},
+        {"max_models": 2},
+        {"route": "sort", "sort": "latency"},
+        {"guardrails": {"ignore": ["wafer"], "require_parameters": True}},
+    ],
+)
+def test_a_write_to_a_preset_that_has_a_system_prompt_always_carries_it_unless_the_owner_changed_it(client, settings):
+    _own_as(KEY)
+    _settings(**settings)
+    live = {"model": "acme/best", "top_p": 0.9}
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, live, "Be brief.")
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        body = _apply(client, plan).json()
+    assert body["applied"] is True and body["unsaved"] == []
+    assert len(account.bodies) == 1
+    assert account.system_messages(account.bodies[0]) == ["Be brief."]
+    assert account.bodies[0]["messages"][-1] == PLACEHOLDER_MESSAGES[0]  # the user message the create call insists on
+    assert account.prompt == "Be brief."
+    assert "system_backups" not in _state()  # sent back as it was: nothing was lost, so nothing is kept
+
+
+def test_a_managed_system_prompt_replaces_the_live_one_as_a_system_message_and_the_old_text_is_kept(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.", version=2)
+        plan = _plan(client)
+        assert plan["action"] == "update" and "system prompt" in plan["reason"]
+        assert {c["path"]: (c["before"], c["after"]) for c in plan["changes"]} == {
+            "system_prompt": ("Be brief.", "Answer in one line.")
+        }
+        assert plan["request"]["body"]["messages"] == [
+            {"role": "system", "content": "Answer in one line."},
+            *PLACEHOLDER_MESSAGES,
+        ]
+        body = _apply(client, plan).json()
+    assert body["applied"] is True and body["unsaved"] == []
+    assert account.system_messages(account.bodies[0]) == ["Answer in one line."]
+    backup = _state()["system_backups"][SLUG]
+    assert (backup["text"], backup["version"]) == ("Be brief.", 2) and backup["at"]
+
+
+def test_a_cleared_system_prompt_sends_no_system_message_and_the_old_text_is_kept(client):
+    _own_as(KEY)
+    _settings(guardrails={"clear": ["system_prompt"]})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.", version=4)
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        assert plan["request"]["body"]["messages"] == PLACEHOLDER_MESSAGES
+        assert [(c["path"], c["before"], c["after"]) for c in plan["changes"]] == [("system_prompt", "Be brief.", None)]
+        body = _apply(client, plan).json()
+    assert body["applied"] is True and body["unsaved"] == []
+    assert account.system_messages(account.bodies[0]) == [] and account.prompt is None
+    assert _state()["system_backups"][SLUG]["text"] == "Be brief." and _state()["system_backups"][SLUG]["version"] == 4
+
+
+def test_a_managed_system_prompt_on_a_new_preset_is_created_with_it(client):
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_creates_with_prompt)
+        plan = _plan(client)
+        assert plan["action"] == "create"
+        body = _apply(client, plan).json()
+        sent = json.loads(post.calls[0].request.content)
+    assert body["applied"] is True and body["unsaved"] == []
+    assert sent["messages"][0] == {"role": "system", "content": "Answer in one line."}
+    assert "system_backups" not in _state()  # there was nothing before it to lose
+
+
+def _creates_with_prompt(request: httpx.Request) -> httpx.Response:
+    sent = json.loads(request.content)
+    messages = sent.pop("messages", [])
+    said = next((m["content"] for m in messages if m.get("role") == "system"), None)
+    return httpx.Response(200, json=_preset(SLUG, sent, version=1, system_prompt=said))
+
+
+def test_a_backup_is_made_only_when_a_write_takes_text_away_and_is_capped(client):
+    _own_as(KEY)
+    long = "x" * 25_000  # a prompt made in the OpenRouter UI can be longer than the one the app lets the owner set
+    _settings(guardrails={"system_prompt": "New."})
+    with respx.mock(assert_all_called=False) as router:
+        _PromptAccount(router, LIVE_DESIRED, long, version=2)
+        assert _apply(client, _plan(client)).json()["applied"] is True
+    assert len(_state()["system_backups"][SLUG]["text"]) == 20_000
+    # the same text again is no change: nothing is written and the backup stays what it was
+    before = _state()["system_backups"][SLUG]
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "New.", version=3)
+        plan = _plan(client)
+        assert plan["action"] == "unchanged" and _apply(client, plan).json()["applied"] is False
+        assert account.bodies == []
+    assert _state()["system_backups"][SLUG] == before
+
+
+def test_a_dry_run_and_a_blocked_write_leave_no_backup(client):
+    _own_as(KEY)
+    _settings(guardrails={"clear": ["system_prompt"]})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.")
+        _plan(client)
+        assert account.bodies == []
+    assert "system_backups" not in _state()
+    with respx.mock(assert_all_called=False) as router:  # a live check that fails stops the write before the backup
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.")
+        _live_listing(router, _without("wafer/bf16"))
+        assert _apply(client, _plan(client)).status_code == 409
+        assert account.bodies == []
+    assert "system_backups" not in _state()
+
+
+def test_a_system_prompt_openrouter_did_not_keep_is_reported_and_not_sent_again_each_run(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.", dropping=True)
+        body = _apply(client, _plan(client)).json()
+        assert body["applied"] is True and body["unsaved"] == ["system_prompt"]
+        assert "did not keep: system_prompt" in body["message"]
+        again = _plan(client)
+        assert again["action"] == "unchanged" and any("did not keep" in w for w in again["warnings"])
+        assert len(account.bodies) == 1
+
+
+def test_a_write_whose_answer_leaves_the_prompt_out_is_checked_with_a_read(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        _PromptAccount(router, LIVE_DESIRED, "Be brief.", answer_prompt=False)
+        assert _apply(client, _plan(client)).json()["unsaved"] == []
+    with respx.mock(assert_all_called=False) as router:
+        _PromptAccount(router, LIVE_DESIRED, "Be brief.", answer_prompt=False, dropping=True)
+        assert _apply(client, _plan(client)).json()["unsaved"] == ["system_prompt"]
+
+
+def test_a_write_whose_prompt_cannot_be_checked_says_so_instead_of_claiming_it_was_kept(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    with respx.mock(assert_all_called=False) as router:
+        account = _PromptAccount(router, LIVE_DESIRED, "Be brief.", answer_prompt=False)
+        plan = _plan(client)
+        gets = {"n": 0}
+
+        def read(request: httpx.Request) -> httpx.Response:
+            gets["n"] += 1
+            if account.bodies:  # after the write, the account cannot be read
+                return httpx.Response(500, json={"error": "down"})
+            return account._get(request)
+
+        router.get(f"{BASE}/presets/{SLUG}").mock(side_effect=read)
+        body = _apply(client, plan).json()
+    assert body["applied"] is True and body["unsaved"] == []
+    assert "could not be checked" in body["message"]
+
+
+def test_the_plan_digest_names_the_system_prompt_that_would_be_sent(client):
+    _own_as(KEY)
+    digests = []
+    for prompt, settings in (
+        ("One.", {}),
+        ("Two.", {}),
+        ("One.", {"guardrails": {"system_prompt": "Mine."}}),
+        ("One.", {"guardrails": {"system_prompt": "Mine too."}}),
+    ):
+        _settings(**settings)
+        with respx.mock(assert_all_called=False) as router:
+            _remote(router, SLUG, LIVE_DESIRED, version=2, system_prompt=prompt)
+            digests.append(_plan(client)["digest"])
+    assert len(set(digests)) == 4  # the same version number, the same config, and a different prompt in each
+
+
+def test_a_write_whose_answer_was_lost_is_claimed_only_if_the_preset_holds_the_prompt_that_was_sent(client):
+    _own_as(KEY)
+    _settings(guardrails={"system_prompt": "Answer in one line."})
+    for holds, claimed in (("Answer in one line.", True), ("Be brief.", False), (None, False)):
+        with respx.mock(assert_all_called=False) as router:
+            account = _PromptAccount(router, LIVE_DESIRED, "Be brief.")
+            plan = _plan(client)
+
+            def lost(request: httpx.Request, account=account, holds=holds) -> httpx.Response:
+                sent = json.loads(request.content)
+                account.config, account.prompt = {k: v for k, v in sent.items() if k != "messages"}, holds
+                raise httpx.ReadTimeout("read timed out", request=request)
+
+            account.post.mock(side_effect=lost)
+            response = _apply(client, plan)
+        assert (response.status_code == 200) is claimed, (holds, response.text)
+        if claimed:
+            assert "read back" in response.json()["message"]
+
+
+def test_a_template_system_prompt_is_not_copied_and_the_plan_says_how_to_give_one(client):
+    _settings(template_slug="my-tools")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", {"model": "other/model"}, version=3, system_prompt="Template prompt.")
+        plan = _plan(client)
+    assert plan["request"]["body"]["messages"] == PLACEHOLDER_MESSAGES
+    assert any("system prompt" in w and "guardrails" in w for w in plan["warnings"])
+    _settings(template_slug="my-tools", guardrails={"system_prompt": "Mine."})
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", {"model": "other/model"}, version=3, system_prompt="Template prompt.")
+        plan = _plan(client)
+    assert plan["request"]["body"]["messages"][0] == {"role": "system", "content": "Mine."}
+    assert not any("template has a system prompt" in w for w in plan["warnings"])
+
+
+def _hand_keeps_prompts(router: respx.Router) -> respx.Route:
+    """A write to HAND that the account takes with the system message it carries."""
+
+    def write(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        messages = sent.pop("messages", [])
+        said = next((m["content"] for m in messages if m.get("role") == "system"), None)
+        return httpx.Response(200, json=_preset(HAND, sent, version=9, system_prompt=said))
+
+    return router.post(f"{BASE}/presets/{HAND}/chat/completions").mock(side_effect=write)
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_resends_the_prompt_of_an_adopted_preset_and_stops_when_the_prompt_was_edited(client):
+    from vibonomics import presets as engine
+
+    _adopt_hand_made(client, system_prompt="Be brief.")
+    _items(_item(), _adopted_item(enabled=True, auto_apply=True))
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="Be brief.")
+        post = _hand_keeps_prompts(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 1  # nothing changed since the owner looked
+        assert json.loads(post.calls[0].request.content)["messages"][0] == {"role": "system", "content": "Be brief."}
+    # someone rewrites the prompt in the OpenRouter UI: it is part of what the owner agreed to hand over
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=5, system_prompt="Be rude.")
+        post = _hand_keeps_prompts(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 0
+    assert _state()["last"][HAND]["status"] == "blocked"
+    # and a manual apply, after the plan showed it, accepts the new text and the timer goes on
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=5, system_prompt="Be rude.")
+        post = _hand_keeps_prompts(router)
+        assert _apply(client, _plan(client, HAND), HAND).status_code == 200
+        assert json.loads(post.calls[0].request.content)["messages"][0]["content"] == "Be rude."
+    assert _state()["reviewed"][HAND] == passthrough_digest(HAND_CONFIG, None, "Be rude.")
+
+
+@pytest.mark.asyncio
+async def test_a_managed_system_prompt_on_an_adopted_preset_does_not_wait_for_a_review_of_the_live_one(client):
+    from vibonomics import presets as engine
+
+    _adopt_hand_made(client, system_prompt="Be brief.")
+    _items(_item(), _adopted_item(enabled=True, auto_apply=True, guardrails={"system_prompt": "Mine."}))
+    state = _state()
+    state["reviewed"][HAND] = passthrough_digest(HAND_CONFIG, PresetGuardrails(system_prompt="Mine."), "Be brief.")
+    _set_state(state)
+    with respx.mock(assert_all_called=False) as router:  # the live prompt is changed, which the owner replaces anyway
+        _remote(router, HAND, HAND_CONFIG, version=5, system_prompt="Be rude.")
+        post = _hand_keeps_prompts(router)
+        await engine.sync(HAND, "schedule")
+        assert post.call_count == 1
+        assert json.loads(post.calls[0].request.content)["messages"][0]["content"] == "Mine."
+
+
+def test_taking_an_adopted_preset_out_of_the_list_forgets_its_prompt_backup_too(client):
+    _own_both()
+    state = _state()
+    state["system_backups"] = {
+        HAND: {"text": "old", "version": 1, "at": "2026-11-01T00:00:00+00:00"},
+        SLUG: {"text": "o"},
+    }
+    _set_state(state)
+    _items(_item(), _adopted_item())
+    current = client.get("/api/settings").json()["settings"]
+    kept = [i for i in _saved_items(client) if i["slug"] != HAND]
+    assert client.put("/api/settings", json={"settings": _with_items(current, kept)}).status_code == 200
+    assert set(_state()["system_backups"]) == {SLUG}
