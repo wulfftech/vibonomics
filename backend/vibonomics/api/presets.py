@@ -96,6 +96,10 @@ class PresetPlanOut(BaseModel):
     slug: str
     enabled: bool
     auto_apply: bool
+    route: Literal["fallback", "sort"] = Field(description="The routing mode the preset is set to")
+    sort: Literal["price", "throughput", "latency"] | None = Field(
+        description="What `provider.sort` is on the sort route; price when null"
+    )
     draft: bool = Field(description="Made from unsaved settings: a preview only, not something to apply")
     generated_at: datetime
     profile: str | None
@@ -198,6 +202,8 @@ def _plan_out(plan: Plan) -> PresetPlanOut:
         slug=plan.slug,
         enabled=cfg.enabled,
         auto_apply=cfg.auto_apply,
+        route=cfg.route,
+        sort=cfg.sort,
         draft=plan.draft,
         generated_at=plan.generated_at,
         profile=plan.profile,

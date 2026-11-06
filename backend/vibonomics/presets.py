@@ -26,7 +26,7 @@ import hashlib
 import json
 import logging
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -359,11 +359,18 @@ def choose_endpoints(
 # ---- the config ----------------------------------------------------------------------------------------------
 
 
-def build_config(base: dict[str, Any] | None, model_ids: list[str], tags: list[str]) -> dict[str, Any]:
-    """``base`` with the models and the provider lists replaced; every other key is the operator's.
+def build_config(
+    base: dict[str, Any] | None,
+    model_ids: list[str],
+    tags: list[str],
+    route: str = "fallback",
+    sort: str | None = None,
+) -> dict[str, Any]:
+    """``base`` with the models, the provider lists and the route replaced; every other key is the operator's.
 
     One model is ``model``. Several are ``model`` (the lead) and ``models`` (all of them, in order, the lead first),
-    so a preset that keeps only one of the two is still a working preset.
+    so a preset that keeps only one of the two is still a working preset. ``route`` ``sort`` writes ``route: "sort"``
+    and ``provider.sort`` (price unless ``sort`` says otherwise); ``fallback`` writes neither.
     """
     config = copy.deepcopy(base) if base else {}
     config["model"] = model_ids[0]
@@ -380,6 +387,14 @@ def build_config(base: dict[str, Any] | None, model_ids: list[str], tags: list[s
         # A list left over from another model would name providers that do not serve this one.
         provider.pop("only", None)
         provider.pop("order", None)
+    if route == "sort":
+        config["route"] = "sort"
+        provider["sort"] = sort or "price"
+    else:
+        # Fallback is OpenRouter's own behaviour, so it is written as no key at all, and the two keys a sort route
+        # sets are taken off a preset that had them: they are Vibonomics's to decide.
+        config.pop("route", None)
+        provider.pop("sort", None)
     # No default is written for the operator (allow_fallbacks is on at OpenRouter already): a key that Vibonomics adds
     # and the account does not keep would make every later plan differ from the live preset.
     if provider or "provider" in config:
@@ -393,9 +408,31 @@ def owned_view(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "model": config.get("model"),
         "models": config.get("models"),
+        "route": config.get("route"),
         "only": provider.get("only"),
         "order": provider.get("order"),
+        "sort": provider.get("sort"),
     }
+
+
+# Keys whose storage OpenRouter does not document, so a write may come back without them.
+UNDOCUMENTED = {"route": "route", "provider.sort": "sort"}
+
+
+def _unkept(state: dict[str, Any], slug: str) -> set[str]:
+    """The owned keys of ``slug`` that OpenRouter did not keep when last sent, by their name in ``owned_view``."""
+    applied = (state.get("applied") or {}).get(slug) or {}
+    return {UNDOCUMENTED[k] for k in applied.get("unsaved") or [] if k in UNDOCUMENTED}
+
+
+def _owned_differs(want: dict[str, Any], have: dict[str, Any], unkept: Collection[str] = ()) -> bool:
+    """Whether the keys Vibonomics decides differ, leaving out the ones the live preset lacks and cannot be given."""
+    a, b = owned_view(want), owned_view(have)
+    for name in unkept:
+        if b.get(name) is None:
+            a.pop(name, None)
+            b.pop(name, None)
+    return a != b
 
 
 def current_models(config: dict[str, Any]) -> list[str]:
@@ -974,7 +1011,7 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         )
 
     ids = [c.model_id for c in plan.picks]
-    plan.config = build_config(base_config, ids, [p["tag"] for p in plan.providers])
+    plan.config = build_config(base_config, ids, [p["tag"] for p in plan.providers], cfg.route, cfg.sort)
     plan.url = f"{inputs.base_url}/presets/{quote(cfg.slug, safe='')}/chat/completions"
     plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
     plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None)
@@ -991,7 +1028,7 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             if len(ids) == 1
             else f"Creates {cfg.slug} with {len(ids)} models, led by {pick.name}."
         )
-    elif owned_view(plan.config) == owned_view(remote.config):
+    elif not _owned_differs(plan.config, remote.config, unkept := _unkept(inputs.state, cfg.slug)):
         plan.action = "unchanged"
         best = inputs.candidates[0]
         plan.reason = "Already up to date." + (
@@ -999,6 +1036,17 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
             if plan.kept_current
             else ""
         )
+        if plan.changes:
+            # What still differs is a key OpenRouter did not keep when it was last sent. Sending it again would make a
+            # new version on every run for the same result.
+            plan.warnings.append(
+                f"OpenRouter did not keep {', '.join(sorted(unkept))} the last time it was sent, and the preset has "
+                "it no more now, so it is not sent again. Nothing is written until something else changes."
+            )
+            plan.config = copy.deepcopy(remote.config)
+            plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
+            plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version)
+            plan.changes = []
     elif lost and (live_provider.get("only") or live_provider.get("order")):
         # A failed endpoint lookup, or the option switched off, leaves a model with no data for a while. Writing now
         # would unpin the preset, and the next good refresh would pin it again: two versions for nothing.
@@ -1018,7 +1066,16 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         plan.action, plan.reason = "update", _model_change(before, plan.picks, inputs.candidates)
     else:
         plan.action = "update"
-        plan.reason = f"Same {'model' if len(ids) == 1 else 'models'}, {pick.name}; the provider list changed."
+        paths = {c.path for c in plan.changes}
+        what = "route" if paths and paths <= {"route", "provider.sort"} else "provider list"
+        plan.reason = f"Same {'model' if len(ids) == 1 else 'models'}, {pick.name}; the {what} changed."
+    if remote is not None and cfg.route == "fallback":
+        gone = [k for k in ("route", "provider.sort") if k in {c.path for c in plan.changes}]
+        if gone:
+            plan.warnings.append(
+                f"The preset sets {' and '.join(gone)}, which Vibonomics decides: on the fallback route it takes "
+                f"{'it' if len(gone) == 1 else 'them'} off. Choose the sort route to keep sorting."
+            )
     return plan
 
 
@@ -1092,6 +1149,8 @@ async def _settle(
         "model_id": plan.config.get("model"),
         "version": version,
         "at": datetime.now(UTC).isoformat(),
+        # So a later plan does not send again what OpenRouter has shown it will not keep.
+        "unsaved": unsaved,
     }
     # The slug becomes ours the moment OpenRouter has created it, even if recording the run then fails.
     owner = _claim_record(plan, inputs.state, version, preset_id, created_at)

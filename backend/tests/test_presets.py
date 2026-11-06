@@ -28,6 +28,7 @@ from vibonomics.presets import (
     diff_config,
     digest_of,
     merge_endpoints,
+    owned_view,
     owner_fingerprint,
     rank,
     select_models,
@@ -1873,3 +1874,182 @@ def test_blocklists_are_saved_with_the_settings_and_trimmed(client):
     assert saved["items"][0]["blocked_models"] == ["openai/*", "*:free"]
     assert saved["items"][0]["blocked_providers"] == ["DeepInfra"]
     assert (saved["blocked_models"], saved["blocked_providers"]) == (["x-ai/*"], ["slow*"])
+
+
+# ---- route ------------------------------------------------------------------------------------------------------
+
+TAGS = ["novita/fp4", "deepinfra/fp8", "wafer/bf16"]
+
+
+def test_sort_writes_the_route_and_the_provider_sort_and_price_is_the_default():
+    config = build_config({"model": "old", "tools": [1]}, ["a/m"], ["x/fp8"], route="sort", sort="latency")
+    assert config == {
+        "model": "a/m",
+        "tools": [1],
+        "route": "sort",
+        "provider": {"only": ["x/fp8"], "order": ["x/fp8"], "sort": "latency"},
+    }
+    assert build_config(None, ["m"], [], route="sort") == {"model": "m", "route": "sort", "provider": {"sort": "price"}}
+    assert build_config(None, ["m"], ["x"], route="sort", sort=None)["provider"]["sort"] == "price"
+
+
+def test_fallback_writes_no_route_and_takes_away_one_a_live_preset_has():
+    live = {"model": "old", "route": "sort", "provider": {"sort": "price", "only": ["x"], "quantizations": ["fp8"]}}
+
+    config = build_config(live, ["a/m"], ["x/fp8"])
+
+    assert "route" not in config
+    assert config["provider"] == {"only": ["x/fp8"], "order": ["x/fp8"], "quantizations": ["fp8"]}
+    assert "route" not in build_config(None, ["m"], [])
+    assert live["route"] == "sort"  # the base is not edited in place
+
+
+def test_the_route_and_the_sort_are_among_the_keys_the_app_decides():
+    live = {"model": "a", "route": "sort", "provider": {"sort": "price", "only": ["x"], "data_collection": "deny"}}
+    assert owned_view(live) == {
+        "model": "a",
+        "models": None,
+        "route": "sort",
+        "only": ["x"],
+        "order": None,
+        "sort": "price",
+    }
+    assert owned_view({"model": "a"})["route"] is None and owned_view({"model": "a"})["sort"] is None
+    # a key that is not the app's does not show
+    assert "data_collection" not in str(owned_view(live))
+
+
+def test_the_diff_names_a_route_that_goes_and_a_sort_that_changes():
+    before = {"model": "a", "route": "sort", "provider": {"sort": "price"}}
+    fallback = build_config(before, ["a"], [])
+    assert {c.path: (c.before, c.after) for c in diff_config(before, fallback)} == {
+        "route": ('"sort"', None),
+        "provider.sort": ('"price"', None),
+    }
+    after = {"model": "a", "route": "sort", "provider": {"sort": "latency"}}
+    assert {c.path: (c.before, c.after) for c in diff_config(before, after)} == {
+        "provider.sort": ('"price"', '"latency"')
+    }
+
+
+def test_a_route_openrouter_dropped_is_named_among_the_keys_it_did_not_keep():
+    sent = {"model": "m", "route": "sort", "provider": {"sort": "price", "only": ["x"]}}
+    assert unsaved_keys(sent, {"model": "m", "provider": {"sort": "price", "only": ["x"]}}) == ["route"]
+    assert unsaved_keys(sent, {"model": "m", "route": "sort", "provider": {"only": ["x"]}}) == ["provider.sort"]
+    assert unsaved_keys(sent, sent) == []
+
+
+def _live_sorted(sort: str = "price", **extra: Any) -> dict[str, Any]:
+    return {
+        "model": "acme/best",
+        "route": "sort",
+        "provider": {"only": TAGS, "order": TAGS, "sort": sort, **extra},
+    }
+
+
+def test_a_plan_for_the_sort_route_writes_both_keys_and_says_which_route_it_is(client):
+    _settings(route="sort", sort="throughput")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+
+    assert plan["config"]["route"] == "sort" and plan["config"]["provider"]["sort"] == "throughput"
+    assert (plan["route"], plan["sort"]) == ("sort", "throughput")
+    assert plan["request"]["body"]["route"] == "sort"
+
+
+def test_sort_without_a_choice_means_price(client):
+    _settings(route="sort")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+
+    assert plan["config"]["provider"]["sort"] == "price" and plan["sort"] is None
+
+
+def test_a_preset_already_on_the_sort_route_is_unchanged_and_a_new_sort_is_an_update(client):
+    _own_as(KEY)
+    _settings(route="sort")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, _live_sorted(), version=2)
+        assert _plan(client)["action"] == "unchanged"
+    _settings(route="sort", sort="latency")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, _live_sorted(), version=2)
+        plan = _plan(client)
+    assert plan["action"] == "update" and [c["path"] for c in plan["changes"]] == ["provider.sort"]
+
+
+def test_switching_to_fallback_takes_the_route_and_the_sort_off_the_live_preset(client):
+    _own_as(KEY)
+    live = _live_sorted(data_collection="deny")
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+
+    assert plan["action"] == "update"
+    assert {c["path"] for c in plan["changes"]} == {"route", "provider.sort"}
+    assert "route" not in plan["config"] and "sort" not in plan["config"]["provider"]
+    assert plan["config"]["provider"]["data_collection"] == "deny"  # the rest of the provider block is not touched
+    assert any("route" in w and "sort" in w for w in plan["warnings"])
+
+
+def test_a_preset_that_never_had_a_route_stays_unchanged_on_fallback(client):
+    _own_as(KEY)
+    desired = build_config(None, ["acme/best"], TAGS)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, desired, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and plan["warnings"] == []
+
+
+def test_a_store_that_drops_the_route_is_reported_and_does_not_write_a_new_version_every_sync(client):
+    _settings(route="sort")
+    account: _Account
+
+    def stores_less(request: httpx.Request) -> httpx.Response:
+        account.take(request)
+        assert account.written is not None
+        account.written.pop("route", None)  # whatever it does not keep
+        return httpx.Response(200, json=_preset(SLUG, account.written, version=1, id="p-1"))
+
+    with respx.mock(assert_all_called=False) as router:
+        account = _Account(router, None, id="p-1")
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=stores_less)
+        plan = _plan(client)
+        assert plan["config"]["route"] == "sort"
+        body = _apply(client, plan).json()
+        assert body["applied"] is True and body["unsaved"] == ["route"]
+        assert "OpenRouter did not keep: route" in body["message"]
+        assert _state()["applied"][SLUG]["unsaved"] == ["route"]
+
+        for _ in range(2):  # and every later sync leaves it be, instead of sending the same route again
+            again = _plan(client)
+            assert again["action"] == "unchanged" and again["changes"] == []
+            assert any("did not keep" in w and "route" in w for w in again["warnings"])
+            assert _apply(client, again).json()["applied"] is False
+        assert post.call_count == 1
+
+
+def test_a_changed_sort_is_written_even_while_the_route_is_one_openrouter_does_not_keep(client):
+    _own_as(KEY)
+    with session_scope() as session:
+        session.merge(
+            Setting(key=STATE_KEY, value={**_state(), "applied": {SLUG: {"slug": SLUG, "unsaved": ["route"]}}})
+        )
+    _settings(route="sort", sort="latency")
+    live = {"model": "acme/best", "provider": {"only": TAGS, "order": TAGS, "sort": "price"}}  # no route kept
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "update" and "provider.sort" in {c["path"] for c in plan["changes"]}
+
+
+def test_the_route_choice_is_saved_with_the_settings(client):
+    current = client.get("/api/settings").json()["settings"]
+    saved = client.put("/api/settings", json={"settings": _with_item(current, route="sort", sort="latency")})
+    assert saved.status_code == 200
+    item = saved.json()["settings"]["presets"]["items"][0]
+    assert (item["route"], item["sort"]) == ("sort", "latency")
+    for bad in ({"route": "fastest"}, {"sort": "cheap"}):
+        assert client.put("/api/settings", json={"settings": _with_item(current, **bad)}).status_code == 422
