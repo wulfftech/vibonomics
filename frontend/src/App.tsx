@@ -43,7 +43,7 @@ function Routes() {
  * Shows the login card while auth is on, this browser has no session and reading is not open; any 401 brings it
  * back. When reading is open a 401 means a change needs the password, so it says so and leaves the page alone.
  */
-function AuthGate() {
+export function AuthGate() {
   const client = useQueryClient();
   const auth = useAuthStatus();
 
@@ -62,12 +62,15 @@ function AuthGate() {
     return () => setUnauthorizedListener(null);
   }, [client]);
 
-  if (auth.isPending) {
-    return <LoadingState />;
+  if (auth.data === undefined) {
+    return auth.isError ? (
+      <ErrorState title="Vibonomics is unreachable" message={auth.error.message} />
+    ) : (
+      <LoadingState />
+    );
   }
-  if (auth.isError) {
-    return <ErrorState title="Vibonomics is unreachable" message={auth.error.message} />;
-  }
+  // Past this point a failed refetch (a restart, a dropped connection) keeps the status it had: tearing the pages
+  // down would throw away whatever is half-typed in them for a blip that the retry in useAuthStatus clears.
   if (needsLoginScreen(auth.data)) {
     return <LoginScreen />;
   }
