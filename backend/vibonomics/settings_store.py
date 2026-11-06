@@ -106,7 +106,20 @@ class ScoringSettings(BaseModel):
         ge=0,
         le=_MAX_WEIGHT,
         allow_inf_nan=False,
-        description="Weight of Vibonomics's own test results vs third-party data",
+        description="Weight of Vibonomics's own test results vs third-party data. Has no effect on a model whose own "
+        "test score is preferred (see prefer_own_tests)",
+    )
+    prefer_own_tests: bool = Field(
+        False,
+        description="When a model has enough graded own-test results, its own test score is its coding and agentic "
+        "score instead of being blended with third-party percentiles",
+    )
+    prefer_own_tests_min_tasks: int = Field(
+        5,
+        ge=1,
+        le=200,
+        description="The fewest graded task results a model must have, summed over providers, before its own test "
+        "score replaces the computed one; a model tested on a handful of tasks is too noisy to override a benchmark",
     )
     free_model_cost: float = Field(
         0.01,

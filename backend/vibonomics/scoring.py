@@ -4,7 +4,9 @@ Every third-party metric is converted to a percentile within its own leaderboard
 100 = best), which makes Elo ratings, pass rates and indices comparable. A dimension score
 (intelligence / coding / agentic) is the weighted mean of the percentiles available for that
 model; the composite is the weighted mean of the available dimensions. Vibonomics test scores
-(already 0-100) feed the coding and agentic dimensions with ``own_tests_weight``.
+(already 0-100) feed the coding and agentic dimensions with ``own_tests_weight``. With
+``prefer_own_tests``, a model with at least ``prefer_own_tests_min_tasks`` graded task results takes its own
+test score as its coding and agentic score outright; intelligence stays third-party only.
 
 Blended prices and value scores depend on the usage profile the operator picks in the UI, so they
 are computed client-side from the raw prices and the composite returned here. A program that can't run the
@@ -57,6 +59,10 @@ class ModelScores:
     agentic: float | None = None
     composite: float | None = None
     own_test: float | None = None
+    own_test_tasks: int = 0
+    """Graded task results behind ``own_test``, summed over the providers of this model."""
+    own_test_preferred: bool = False
+    """Whether coding and agentic are the own test score itself rather than a blend with third-party percentiles."""
     source_count: int = 0
     metrics: list[MetricValue] = field(default_factory=list)
     reported_cost_per_task: float | None = None
@@ -69,6 +75,7 @@ class ModelScores:
             "agentic": self.agentic,
             "composite": self.composite,
             "own_test": self.own_test,
+            "own_test_preferred": self.own_test_preferred,
             "source_count": self.source_count,
         }
 
@@ -137,8 +144,13 @@ def source_in_use(settings: AppSettings, source_id: str, spec: SourceSpec) -> bo
 
 
 def compute_scores(
-    session: Session, settings: AppSettings, own_tests: dict[tuple[int, str], dict[str, Any]] | None = None
+    session: Session,
+    settings: AppSettings,
+    own_tests: dict[tuple[int, str], dict[str, Any]] | None = None,
+    prefer_own_tests: bool | None = None,
 ) -> dict[str, ModelScores]:
+    """Scores per canonical model. ``prefer_own_tests`` overrides ``settings.scoring.prefer_own_tests`` for this call
+    (None follows the setting); the minimum number of tasks always comes from the settings."""
     weights = {
         "intelligence": settings.scoring.intelligence_weight,
         "coding": settings.scoring.coding_weight,
@@ -192,16 +204,27 @@ def compute_scores(
             costs[cid].append((row.cost_per_task, spec.name))
         sources_per_model[cid].add(source)
 
-    # Own tests, aggregated per canonical model across providers.
-    own_by_canonical: dict[str, list[float]] = defaultdict(list)
+    prefer = settings.scoring.prefer_own_tests if prefer_own_tests is None else prefer_own_tests
+
+    # Own tests, aggregated per canonical model across providers: (average score, graded tasks) per provider row.
+    own_by_canonical: dict[str, list[tuple[float, int]]] = defaultdict(list)
     for (pid, mid), info in (own_tests or {}).items():
         if info.get("score") is not None:
-            own_by_canonical[score_key(info.get("canonical_id"), pid, mid)].append(info["score"])
-    for cid, values in own_by_canonical.items():
+            own_by_canonical[score_key(info.get("canonical_id"), pid, mid)].append(
+                (info["score"], int(info.get("tasks") or 0))
+            )
+    for cid, rows in own_by_canonical.items():
         ms = scores.setdefault(cid, ModelScores(canonical_id=cid))
-        ms.own_test = round(sum(values) / len(values), 1)
+        ms.own_test = round(sum(s for s, _ in rows) / len(rows), 1)
+        ms.own_test_tasks = sum(n for _, n in rows)
         w = settings.scoring.own_tests_weight
-        if w > 0:
+        if prefer and ms.own_test_tasks >= settings.scoring.prefer_own_tests_min_tasks:
+            # The owner trusts their own tests over the benchmarks for this model: the third-party coding and agentic
+            # percentiles are dropped rather than outweighed, so own_tests_weight plays no part.
+            ms.own_test_preferred = True
+            for dim in ("coding", "agentic"):
+                dims[cid][dim] = [(ms.own_test, 1.0)]
+        elif w > 0:
             dims[cid]["coding"].append((ms.own_test, w))
             dims[cid]["agentic"].append((ms.own_test, w))
         sources_per_model[cid].add("vibonomics")

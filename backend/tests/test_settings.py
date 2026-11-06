@@ -87,6 +87,67 @@ def test_the_bounds_leave_every_sensible_setting_valid():
 # ---- V-6 ------------------------------------------------------------------------------------------------------
 
 
+# ---- preferring the owner's own test scores -----------------------------------------------------------------------
+
+
+def test_preferring_own_tests_is_off_and_needs_five_tasks_by_default():
+    scoring = ScoringSettings()
+    assert (scoring.prefer_own_tests, scoring.prefer_own_tests_min_tasks) == (False, 5)
+
+
+def test_the_minimum_task_count_is_bounded():
+    for value in (0, -1, 201):
+        with pytest.raises(ValidationError):
+            ScoringSettings(prefer_own_tests_min_tasks=value)
+    assert ScoringSettings(prefer_own_tests_min_tasks=1).prefer_own_tests_min_tasks == 1
+    assert ScoringSettings(prefer_own_tests_min_tasks=200).prefer_own_tests_min_tasks == 200
+
+
+def test_a_save_with_an_out_of_range_minimum_is_refused(client):
+    current = client.get("/api/settings").json()["settings"]
+    for value in (0, 201):
+        scoring = {**current["scoring"], "prefer_own_tests": True, "prefer_own_tests_min_tasks": value}
+        assert client.put("/api/settings", json={"settings": {**current, "scoring": scoring}}).status_code == 422
+    assert client.get("/api/settings").json()["settings"]["scoring"]["prefer_own_tests"] is False
+
+
+def test_the_preference_is_saved_and_read_back(client):
+    current = client.get("/api/settings").json()["settings"]
+    scoring = {**current["scoring"], "prefer_own_tests": True, "prefer_own_tests_min_tasks": 12}
+
+    response = client.put("/api/settings", json={"settings": {**current, "scoring": scoring}})
+
+    assert response.status_code == 200
+    saved = client.get("/api/settings").json()["settings"]["scoring"]
+    assert (saved["prefer_own_tests"], saved["prefer_own_tests_min_tasks"]) == (True, 12)
+
+
+def test_a_stored_minimum_out_of_range_falls_back_without_losing_the_rest_of_scoring():
+    stored = AppSettings().model_dump(mode="json")
+    stored["scoring"].update({"prefer_own_tests": True, "prefer_own_tests_min_tasks": 500, "coding_weight": 2.0})
+    _store(stored)
+
+    with session_scope() as s:
+        loaded = load_settings(s)
+
+    assert loaded.scoring.prefer_own_tests_min_tasks == ScoringSettings().prefer_own_tests_min_tasks
+    assert loaded.scoring.prefer_own_tests is True
+    assert loaded.scoring.coding_weight == 2.0
+
+
+def test_settings_stored_before_the_preference_existed_load_with_it_off():
+    stored = AppSettings().model_dump(mode="json")
+    del stored["scoring"]["prefer_own_tests"], stored["scoring"]["prefer_own_tests_min_tasks"]
+    stored["scoring"]["coding_weight"] = 2.0
+    _store(stored)
+
+    with session_scope() as s:
+        loaded = load_settings(s)
+
+    assert (loaded.scoring.prefer_own_tests, loaded.scoring.prefer_own_tests_min_tasks) == (False, 5)
+    assert loaded.scoring.coding_weight == 2.0
+
+
 def test_a_usage_profile_needs_some_input_or_output_tokens():
     with pytest.raises(ValidationError, match="some input or output tokens"):
         UsageProfile(**_profile(task_input_tokens=0, task_output_tokens=0))

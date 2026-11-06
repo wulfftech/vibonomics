@@ -146,6 +146,13 @@ Every metric is converted to a percentile inside its own leaderboard. Elo rating
 share no unit; percentiles give them one. Available percentiles form an intelligence, coding and agentic
 subtotal, and those form a weighted composite. The weights are in **Settings → Scoring**.
 
+Your own test results count as one more entry in the coding and agentic subtotals, at the weight set there.
+Switch on the prefer-own-tests option and a model with enough graded results (5 tasks by default, added up
+across its providers) uses its own test score as its coding and agentic score outright. The third-party
+percentiles for those two drop out and the blend weight stops applying. Intelligence stays third-party only, and
+the composite is worked out from the three as usual. A model with fewer tasks, or none, is scored as before, and
+the Models table marks the scores that are your own.
+
 | Source | Default | Licence | What it contributes |
 |---|---|---|---|
 | Terminal-Bench 4.0 | on | Apache-2.0 | agentic coding accuracy, cost and tokens per trial |

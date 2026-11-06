@@ -13,8 +13,9 @@ from sqlalchemy import delete, select
 from vibonomics.app import create_app
 from vibonomics.config import get_config
 from vibonomics.db import init_db, session_scope
-from vibonomics.orm import BenchmarkScore, Model, ProviderConfig
+from vibonomics.orm import BenchmarkScore, EvalResult, EvalRun, Model, ProviderConfig
 from vibonomics.pricing import Task, effective_input_price, task_cost, value_of
+from vibonomics.settings_store import load_settings, save_settings
 
 PROVIDER = "Value test router"
 REFRESHED = datetime(2026, 10, 28, 9, 0, tzinfo=UTC)
@@ -159,6 +160,118 @@ def test_a_profile_sets_the_task_size(client):
     }
     default = _ask(client, ["acme/cheap-60:batch"])
     assert default["task"]["profile"] == settings["default_profile"]
+
+
+OWN_MODEL = "acme/cheap-60:batch"
+
+
+@pytest.fixture
+def own_tests(client):
+    """OWN_MODEL gets a weak third-party coding percentile (20) and six graded tests of 90.
+
+    Blended (weight 1) its coding is (20 * 0.75 + 90) / 1.75 = 60 and its composite 70.5; preferred, coding and
+    agentic are 90 and the composite is 60 * 0.3 + 90 * 0.35 + 90 * 0.35 = 81.
+    """
+    canonical = _canonical(OWN_MODEL)
+    with session_scope() as session:
+        before = load_settings(session)
+        provider = session.scalars(select(ProviderConfig).where(ProviderConfig.name == PROVIDER)).one()
+        session.add(
+            BenchmarkScore(
+                source="epoch",
+                metric="swe_bench_verified",
+                dimension="coding",
+                source_model="value-test-own-coding",
+                canonical_id=canonical,
+                value=20,
+                percentile=20,
+            )
+        )
+        run = EvalRun(status="done", suite="quick")
+        session.add(run)
+        session.flush()
+        for n in range(6):
+            session.add(
+                EvalResult(
+                    run_id=run.id,
+                    provider_config_id=provider.id,
+                    model_id=OWN_MODEL,
+                    task_id=f"t{n}",
+                    category="chat",
+                    status="passed",
+                    score=90.0,
+                )
+            )
+        run_id = run.id
+    yield
+    with session_scope() as session:
+        session.delete(session.get(EvalRun, run_id))
+        session.execute(delete(BenchmarkScore).where(BenchmarkScore.source_model == "value-test-own-coding"))
+        save_settings(session, before)
+
+
+def _prefer_own_tests(on: bool, min_tasks: int = 5) -> None:
+    with session_scope() as session:
+        settings = load_settings(session)
+        settings.scoring.prefer_own_tests = on
+        settings.scoring.prefer_own_tests_min_tasks = min_tasks
+        save_settings(session, settings)
+
+
+def _listed(client: TestClient) -> dict:
+    rows = client.get("/api/models").json()["models"]
+    return next(r for r in rows if r["provider_name"] == PROVIDER and r["model_id"] == OWN_MODEL)["scores"]
+
+
+def test_the_value_api_and_the_models_list_blend_own_tests_until_told_to_prefer_them(own_tests, client):
+    asked = _ask(client, [OWN_MODEL], task=TASK, dimension="coding")["models"][0]
+    assert asked["score"] == 60.0
+    assert (asked["scores"]["coding"], asked["scores"]["composite"]) == (60.0, 70.5)
+    assert asked["scores"]["own_test_preferred"] is False
+    listed = _listed(client)
+    assert (listed["coding"], listed["composite"], listed["own_test"], listed["own_test_preferred"]) == (
+        60.0,
+        70.5,
+        90.0,
+        False,
+    )
+
+
+def test_the_value_api_and_the_models_list_follow_the_prefer_own_tests_setting(own_tests, client):
+    _prefer_own_tests(True)
+
+    asked = _ask(client, [OWN_MODEL], task=TASK, dimension="coding")["models"][0]
+    assert asked["score"] == 90.0
+    assert asked["scores"] == {
+        "intelligence": 60.0,
+        "coding": 90.0,
+        "agentic": 90.0,
+        "composite": 81.0,
+        "own_test": 90.0,
+        "own_test_preferred": True,
+        "source_count": 2,
+    }
+    assert asked["value"] == pytest.approx(90.0 / 0.009, abs=0.1), "the value index uses the preferred score"
+    listed = _listed(client)
+    assert (listed["coding"], listed["agentic"], listed["composite"], listed["own_test_preferred"]) == (
+        90.0,
+        90.0,
+        81.0,
+        True,
+    )
+    # the composite is what the default dimension ranks by
+    assert _ask(client, [OWN_MODEL], task=TASK)["models"][0]["score"] == 81.0
+
+
+def test_a_model_below_the_minimum_task_count_keeps_its_computed_scores_in_the_api(own_tests, client):
+    _prefer_own_tests(True, min_tasks=7)  # the model has six graded tasks
+
+    asked = _ask(client, [OWN_MODEL], task=TASK, dimension="coding")["models"][0]
+    assert (asked["score"], asked["scores"]["own_test_preferred"]) == (60.0, False)
+    assert (_listed(client)["coding"], _listed(client)["own_test_preferred"]) == (60.0, False)
+
+    _prefer_own_tests(True, min_tasks=6)
+    assert _ask(client, [OWN_MODEL], task=TASK, dimension="coding")["models"][0]["score"] == 90.0
 
 
 def test_a_dimension_without_scores_picks_nothing(client):

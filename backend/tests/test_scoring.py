@@ -143,3 +143,177 @@ def test_results_of_a_model_that_is_gone_still_count_under_its_own_key():
         assert own[(pid, mid)]["score"] == 70.0
         assert own[(pid, mid)]["canonical_id"] is None
         assert f"@{pid}/{mid}" in compute_scores(session, AppSettings(), own)
+
+
+# -- preferring the model's own tests over the computed score ----------------------------------------------------
+
+PREFIX = "ownpref/"
+PROVIDER_A, PROVIDER_B = 9001, 9002  # compute_scores only reads the dict it is given, so these need no provider row
+
+# canonical id -> percentiles (intelligence, coding, agentic), one source each, at weights 1.5 / 0.75 / 1.5
+THIRD_PARTY = {
+    PREFIX + "full": (80, 50, 70),
+    PREFIX + "few": (80, 50, 70),
+    PREFIX + "two-providers": (80, 50, 70),
+    PREFIX + "no-tests": (60, 40, 20),
+}
+BENCHMARK_ROWS = (
+    ("epoch", "eci", "intelligence"),
+    ("epoch", "swe_bench_verified", "coding"),
+    ("terminal-bench", "accuracy", "agentic"),
+)
+
+
+def _seed_third_party() -> None:
+    init_db()
+    with session_scope() as session:
+        session.execute(delete(BenchmarkScore).where(BenchmarkScore.canonical_id.like(PREFIX + "%")))
+        for canonical, percentiles in THIRD_PARTY.items():
+            for (source, metric, dimension), percentile in zip(BENCHMARK_ROWS, percentiles, strict=True):
+                session.add(
+                    BenchmarkScore(
+                        source=source,
+                        metric=metric,
+                        dimension=dimension,
+                        source_model=f"{canonical}-{metric}",
+                        canonical_id=canonical,
+                        value=percentile,
+                        percentile=percentile,
+                    )
+                )
+
+
+def _own(canonical: str, score: float, tasks: int, provider: int = PROVIDER_A) -> dict:
+    return {(provider, canonical): {"score": score, "tasks": tasks, "canonical_id": canonical}}
+
+
+# "full" has plenty of tasks, "few" is one short of the default minimum, "two-providers" reaches it only by adding up
+# its two providers, "own-only" has no third-party data at all and "no-tests" has no tests.
+OWN_TESTS = {
+    **_own(PREFIX + "full", 90.0, 10),
+    **_own(PREFIX + "few", 90.0, 4),
+    **_own(PREFIX + "two-providers", 80.0, 3, PROVIDER_A),
+    **_own(PREFIX + "two-providers", 60.0, 2, PROVIDER_B),
+    **_own(PREFIX + "own-only", 60.0, 8),
+}
+
+
+def _compute(settings: AppSettings | None = None, **kwargs) -> dict:
+    _seed_third_party()
+    with session_scope() as session:
+        return compute_scores(session, settings or AppSettings(), OWN_TESTS, **kwargs)
+
+
+def _preferring(**scoring) -> AppSettings:
+    settings = AppSettings()
+    settings.scoring.prefer_own_tests = True
+    for field, value in scoring.items():
+        setattr(settings.scoring, field, value)
+    return settings
+
+
+def _numbers(scores: dict, name: str) -> tuple:
+    s = scores[PREFIX + name]
+    return (s.intelligence, s.coding, s.agentic, s.composite)
+
+
+def test_without_the_setting_the_own_tests_are_blended_in_as_they_always_were():
+    scores = _compute()
+    # coding = (50 * 0.75 + 90 * 1) / 1.75, agentic = (70 * 1.5 + 90 * 1) / 2.5, weights 0.3 / 0.35 / 0.35
+    assert _numbers(scores, "full") == (80.0, 72.9, 78.0, 76.8)
+    assert _numbers(scores, "few") == (80.0, 72.9, 78.0, 76.8)
+    assert _numbers(scores, "two-providers") == (80.0, 61.4, 70.0, 70.0)
+    assert _numbers(scores, "own-only") == (None, 60.0, 60.0, 60.0)
+    assert _numbers(scores, "no-tests") == (60.0, 40.0, 20.0, 39.0)
+    assert scores[PREFIX + "full"].own_test == 90.0
+    assert scores[PREFIX + "no-tests"].own_test is None
+
+
+def test_the_preference_is_off_by_default_and_nothing_reports_preferred():
+    assert AppSettings().scoring.prefer_own_tests is False
+    assert AppSettings().scoring.prefer_own_tests_min_tasks == 5
+    scores = _compute()
+    assert not any(s.own_test_preferred or s.summary()["own_test_preferred"] for s in scores.values())
+
+
+def test_a_model_with_enough_tests_scores_exactly_what_its_own_tests_scored():
+    scores = _compute(_preferring())
+    full = scores[PREFIX + "full"]
+    # Coding and agentic are the own score whatever the benchmarks say; intelligence is unchanged (own tests do not
+    # measure it); the composite is 80 * 0.3 + 90 * 0.35 + 90 * 0.35.
+    assert _numbers(scores, "full") == (80.0, 90.0, 90.0, 87.0)
+    assert full.own_test == 90.0
+    assert full.own_test_preferred is True
+    assert full.summary()["own_test_preferred"] is True
+    assert full.summary()["own_test"] == 90.0
+
+
+def test_the_composite_of_a_preferred_model_follows_the_configured_dimension_weights():
+    scores = _compute(_preferring(intelligence_weight=1, coding_weight=2, agentic_weight=1))
+    assert _numbers(scores, "full") == (80.0, 90.0, 90.0, 87.5)  # (80 + 90 * 2 + 90) / 4
+    scores = _compute(_preferring(intelligence_weight=0, coding_weight=1, agentic_weight=3))
+    assert scores[PREFIX + "full"].composite == 90.0
+
+
+def test_a_model_with_too_few_graded_tasks_is_computed_as_before():
+    scores = _compute(_preferring())
+    few = scores[PREFIX + "few"]
+    assert _numbers(scores, "few") == (80.0, 72.9, 78.0, 76.8)
+    assert few.own_test == 90.0, "its own score is still shown"
+    assert few.own_test_preferred is False
+
+
+def test_a_model_without_tests_is_computed_as_before():
+    scores = _compute(_preferring())
+    assert _numbers(scores, "no-tests") == (60.0, 40.0, 20.0, 39.0)
+    assert scores[PREFIX + "no-tests"].own_test_preferred is False
+
+
+def test_a_model_with_tests_and_no_third_party_data_is_still_preferred():
+    scores = _compute(_preferring())
+    assert _numbers(scores, "own-only") == (None, 60.0, 60.0, 60.0)
+    assert scores[PREFIX + "own-only"].own_test_preferred is True
+
+
+def test_the_minimum_is_a_count_of_tasks_summed_over_the_providers_of_one_model():
+    two = _compute(_preferring())[PREFIX + "two-providers"]
+    assert two.own_test == 70.0, "the average of the two providers' averages, as it always was"
+    assert two.own_test_tasks == 5
+    assert (two.coding, two.agentic, two.composite) == (70.0, 70.0, 73.0)
+    assert two.own_test_preferred is True, "3 + 2 tasks reach the minimum of 5 though neither provider does alone"
+    assert _compute(_preferring(prefer_own_tests_min_tasks=6))[PREFIX + "two-providers"].own_test_preferred is False
+
+
+def test_the_minimum_counts_tasks_inclusively():
+    assert _compute(_preferring(prefer_own_tests_min_tasks=10))[PREFIX + "full"].own_test_preferred is True
+    assert _compute(_preferring(prefer_own_tests_min_tasks=11))[PREFIX + "full"].own_test_preferred is False
+    assert _compute(_preferring(prefer_own_tests_min_tasks=1))[PREFIX + "few"].own_test_preferred is True
+
+
+def test_the_blend_weight_has_no_effect_on_a_preferred_model():
+    for weight in (0, 1, 5):
+        scores = _compute(_preferring(own_tests_weight=weight))
+        assert _numbers(scores, "full") == (80.0, 90.0, 90.0, 87.0), weight
+        assert scores[PREFIX + "full"].own_test_preferred is True
+    # ... while it still decides how much a model that does not qualify takes from its tests
+    assert _numbers(_compute(_preferring(own_tests_weight=0)), "few") == (80.0, 50.0, 70.0, 66.0)
+
+
+def test_the_blend_weight_zero_keeps_the_own_score_out_when_the_preference_is_off():
+    scores = _compute(AppSettings(scoring={"own_tests_weight": 0}))
+    assert _numbers(scores, "full") == (80.0, 50.0, 70.0, 66.0)
+    assert scores[PREFIX + "full"].own_test == 90.0
+    assert scores[PREFIX + "full"].own_test_preferred is False
+
+
+def test_a_caller_can_override_the_setting_for_one_call():
+    on_by_setting, off_by_setting = _preferring(), AppSettings()
+    assert _compute(off_by_setting, prefer_own_tests=True)[PREFIX + "full"].coding == 90.0
+    assert _compute(off_by_setting, prefer_own_tests=None)[PREFIX + "full"].coding == 72.9
+    assert _compute(off_by_setting, prefer_own_tests=False)[PREFIX + "full"].coding == 72.9
+    assert _compute(on_by_setting, prefer_own_tests=False)[PREFIX + "full"].coding == 72.9
+    assert _compute(on_by_setting, prefer_own_tests=None)[PREFIX + "full"].coding == 90.0
+    # the override only flips the switch: the minimum still comes from the settings
+    assert _compute(off_by_setting, prefer_own_tests=True)[PREFIX + "few"].own_test_preferred is False
+    # and it leaves the settings object alone
+    assert off_by_setting.scoring.prefer_own_tests is False and on_by_setting.scoring.prefer_own_tests is True
