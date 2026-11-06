@@ -38,6 +38,8 @@ class ScoresOut(BaseModel):
     agentic: float | None = None
     composite: float | None = None
     own_test: float | None = None
+    own_test_preferred: bool = False
+    """Coding and agentic are the model's own test score, not a blend with third-party percentiles."""
     source_count: int = 0
 
 
