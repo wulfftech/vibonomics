@@ -397,6 +397,13 @@ A preset with a system prompt cannot be updated: the API takes no system prompt,
 drop it. Vibonomics reports that instead of writing. The preset calls use your ordinary OpenRouter API key,
 not the management key.
 
+**Preset catalogue.** Vibonomics keeps a local copy of every preset on your OpenRouter account, up to 100,
+archived ones included: the models, the providers, the live version and the config keys it has no setting for.
+It reads the account every 30 minutes, at startup and when you press Refresh, with the same API key as the
+update, and only reads. A preset's config can hold anything you put in it, so a visitor to an instance that is
+open to read does not get the catalogue. If one preset can't be read, its last copy stays and the page says the
+sync was partial.
+
 ## Refreshing
 
 The **Refresh** menu on the Models page runs a whole kind — models and prices, balances, benchmarks or spend
