@@ -23,6 +23,10 @@ const HAND_MADE = live('my-tools', {
   passthrough_keys: ['temperature'],
 });
 
+const PROMPT = 'Answer in one short line.';
+const PROMPT_NOTE =
+  'This preset has a system prompt. Vibonomics resends it unchanged on every update and backs up the old text before it replaces it.';
+
 function open(slug: string) {
   localStorage.setItem(SELECTED_KEY, JSON.stringify(slug));
 }
@@ -94,10 +98,45 @@ describe('PresetInspector a preset made by hand', () => {
     expect(screen.queryByRole('button', { name: /Versions on OpenRouter/ })).toBeNull();
   });
 
-  it('warns that a preset with a system prompt is never written', async () => {
-    serve({ items: [], catalog: [{ ...HAND_MADE, has_system_prompt: true }] });
+  it('says Vibonomics resends the system prompt and backs it up, and keeps the text folded away', async () => {
+    serve({
+      items: [],
+      catalog: [{ ...HAND_MADE, has_system_prompt: true }],
+      inspect: inspection('my-tools', { has_system_prompt: true, system_prompt: PROMPT }),
+    });
+    const user = userEvent.setup();
     renderSection();
-    expect(await screen.findByText(/has a system prompt\. Vibonomics never writes/)).toBeInTheDocument();
+    expect(await screen.findByText(PROMPT_NOTE)).toBeInTheDocument();
+    // the old promise, that a preset with a prompt is never written, is gone
+    expect(screen.queryByText(/never writes/)).toBeNull();
+    const show = await screen.findByRole('button', { name: 'Show the system prompt (25 characters)' });
+    expect(show).toHaveAttribute('aria-expanded', 'false');
+    expect(await screen.findByLabelText('Live system prompt')).not.toBeVisible();
+    await user.click(show);
+    await waitFor(() => expect(screen.getByLabelText('Live system prompt')).toBeVisible());
+    expect(screen.getByLabelText('Live system prompt').textContent).toBe(PROMPT);
+    // it can still be adopted
+    expect(screen.getByRole('button', { name: 'Adopt…' })).toBeEnabled();
+  });
+
+  it('says it from the last sync when the preset cannot be read now, without the text', async () => {
+    serve({
+      items: [],
+      catalog: [{ ...HAND_MADE, has_system_prompt: true }],
+      inspect: { status: 502, detail: 'OpenRouter is down.' },
+    });
+    renderSection();
+    expect(await screen.findByText(PROMPT_NOTE)).toBeInTheDocument();
+    await screen.findByText(/Could not read this preset from OpenRouter/);
+    expect(screen.queryByRole('button', { name: /Show the system prompt/ })).toBeNull();
+  });
+
+  it('says nothing about a prompt for a preset that has none', async () => {
+    serve({ items: [], catalog: [HAND_MADE] });
+    renderSection();
+    await screen.findByRole('button', { name: /Versions on OpenRouter/ });
+    expect(screen.queryByText(PROMPT_NOTE)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Show the system prompt/ })).toBeNull();
   });
 });
 
@@ -211,6 +250,43 @@ describe('AdoptPresetModal', () => {
     expect(savedPresets()?.items[1]).toMatchObject({ adopted: true, min_score: 70 });
   });
 
+  it('shows the system prompt folded away and says it is resent and backed up, and adopts all the same', async () => {
+    serve({
+      items: [],
+      catalog: [{ ...HAND_MADE, has_system_prompt: true }],
+      inspect: inspection('my-tools', { has_system_prompt: true, system_prompt: PROMPT }),
+    });
+    const user = userEvent.setup();
+    renderSection();
+    const dialog = await startAdopting(user);
+    expect(await dialog.findByText(PROMPT_NOTE)).toBeInTheDocument();
+    const show = dialog.getByRole('button', { name: 'Show the system prompt (25 characters)' });
+    expect(show).toHaveAttribute('aria-expanded', 'false');
+    expect(await dialog.findByLabelText('Live system prompt')).not.toBeVisible();
+    await user.click(show);
+    await waitFor(() => expect(dialog.getByLabelText('Live system prompt')).toBeVisible());
+    expect(dialog.getByLabelText('Live system prompt').textContent).toBe(PROMPT);
+
+    // a prompt does not stop the adoption: only what the server lists as a blocker does
+    const confirm = dialog.getByRole('button', { name: 'Adopt this preset' });
+    expect(dialog.getByRole('checkbox', { name: 'I have read these keys' })).toBeEnabled();
+    await user.click(dialog.getByRole('checkbox', { name: 'I have read these keys' }));
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    await waitFor(() => expect(calls('api/presets/adopt')).toHaveLength(1));
+    expect(sentTo('api/presets/adopt')).toEqual({ slug: 'my-tools', digest: 'digest-1' });
+  });
+
+  it('says nothing about a prompt when the preset has none', async () => {
+    serve({ items: [], catalog: [HAND_MADE] });
+    const user = userEvent.setup();
+    renderSection();
+    const dialog = await startAdopting(user);
+    await dialog.findByText('Kept as it is');
+    expect(dialog.queryByText(PROMPT_NOTE)).toBeNull();
+    expect(dialog.queryByRole('button', { name: /Show the system prompt/ })).toBeNull();
+  });
+
   it('says nothing is kept when the preset has no keys of that kind', async () => {
     serve({ items: [], catalog: [HAND_MADE], inspect: inspection('my-tools', { passthrough: {} }) });
     const user = userEvent.setup();
@@ -225,7 +301,7 @@ describe('AdoptPresetModal', () => {
       items: [],
       catalog: [HAND_MADE],
       inspect: inspection('my-tools', {
-        blockers: ['It is archived.', 'It has a system prompt.'],
+        blockers: ['It is archived.', 'Its name starts a different owner.'],
         adoptable: false,
       }),
     });
@@ -233,7 +309,7 @@ describe('AdoptPresetModal', () => {
     renderSection();
     const dialog = await startAdopting(user);
     expect(await dialog.findByText('It is archived.')).toBeInTheDocument();
-    expect(dialog.getByText('It has a system prompt.')).toBeInTheDocument();
+    expect(dialog.getByText('Its name starts a different owner.')).toBeInTheDocument();
     expect(dialog.getByRole('checkbox', { name: 'I have read these keys' })).toBeDisabled();
     expect(dialog.getByRole('button', { name: 'Adopt this preset' })).toBeDisabled();
     expect(calls('api/presets/adopt')).toHaveLength(0);

@@ -2,6 +2,7 @@ import { Alert, Button, Card, Group, Stack, Text, Title } from '@mantine/core';
 import type { UseQueryResult } from '@tanstack/react-query';
 import type { CatalogPreset, PresetInspect } from '../../api/types';
 import type { PresetEntry } from '../../lib/presets';
+import { LiveSystemPrompt } from './LiveSystemPrompt';
 import { PresetHeader } from './PresetHeader';
 import { ModelLinks, PresetVersions, RawConfig } from './PresetParts';
 
@@ -36,11 +37,7 @@ export function PresetInspector({
           again.
         </Alert>
       )}
-      {preset.has_system_prompt && (
-        <Alert color="orange" variant="light" py="xs">
-          This preset has a system prompt. Vibonomics never writes to a preset that has one.
-        </Alert>
-      )}
+      <LiveSystemPrompt present={live?.has_system_prompt ?? preset.has_system_prompt} prompt={live?.system_prompt} />
       <Card withBorder padding="md">
         <Stack gap="md">
           <Group justify="space-between" align="flex-start">
