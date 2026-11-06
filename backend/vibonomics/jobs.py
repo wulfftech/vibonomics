@@ -266,10 +266,10 @@ def _extra_keeping_endpoints(stored: dict[str, Any] | None, offer: ModelOffer) -
 
     An offer has no ``endpoints`` key when the lookup failed or the discounts setting is off. Dropping them then
     unpinned the preset until the next good refresh. A lookup that succeeded with no endpoints sets an empty list,
-    which replaces them, and a free model is never looked up, so it has no endpoints to keep.
+    which replaces them. Free and stealth models are looked up like any other, so they keep theirs the same way.
     """
     known = (stored or {}).get("endpoints")
-    if "endpoints" in offer.extra or offer.is_free or not known:
+    if "endpoints" in offer.extra or not known:
         return offer.extra
     return {**offer.extra, "endpoints": known}
 
