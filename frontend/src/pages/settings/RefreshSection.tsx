@@ -4,7 +4,11 @@ import { SaveBar } from './SaveBar';
 import { toNumber, useSettingsDraft } from './useSettingsDraft';
 
 export function RefreshSection() {
-  const { query, value, update, dirty, submit, saving, reset } = useSettingsDraft(['refresh', 'highlight', 'general']);
+  const { query, value, update, dirty, submit, saving, reset } = useSettingsDraft(
+    ['refresh', 'highlight', 'general'],
+    // This tab edits one flag of `general`; the instance name is the General tab's to change.
+    { general: ['hide_inactive_models'] },
+  );
 
   if (query.isPending) {
     return <LoadingState />;

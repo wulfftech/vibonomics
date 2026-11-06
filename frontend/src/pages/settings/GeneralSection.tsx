@@ -20,7 +20,9 @@ function InfoRow({ label, children }: { label: string; children: ReactNode }) {
 }
 
 export function GeneralSection() {
-  const { query, value, update, dirty, submit, saving, reset } = useSettingsDraft(['general']);
+  const { query, value, update, dirty, submit, saving, reset } = useSettingsDraft(['general'], {
+    general: ['instance_name'],
+  });
   const system = useSystemStatus();
 
   if (query.isPending) {
@@ -90,7 +92,8 @@ export function GeneralSection() {
       </Card>
 
       <SaveBar
-        dirty={dirty && value.general.instance_name.trim() !== ''}
+        dirty={dirty}
+        canSave={value.general.instance_name.trim() !== ''}
         saving={saving}
         onReset={reset}
         onSave={() => submit()}
