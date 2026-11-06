@@ -2265,6 +2265,13 @@ def test_inspect_shows_a_preset_made_by_hand_with_everything_the_app_would_send_
     assert body["updated_at"] == "2026-11-04T07:36:33Z"
 
 
+def test_inspect_gives_a_null_id_and_workspace_when_the_response_names_neither(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, HAND, HAND_CONFIG, version=3)
+        body = _inspect(client).json()
+    assert body["preset_id"] is None and body["workspace"] is None
+
+
 def test_the_inspect_digest_names_the_slug_the_version_and_the_config(client):
     digests = []
     for config, version in ((HAND_CONFIG, 3), (HAND_CONFIG, 4), ({**HAND_CONFIG, "tools": []}, 3)):
