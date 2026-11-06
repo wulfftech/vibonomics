@@ -1,9 +1,19 @@
 import { MantineProvider } from '@mantine/core';
 import { render, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ModelDetail } from '../api/types';
 import { tone } from '../lib/tone';
-import { FreeTerms, ScoreCard, TestsTab } from './ModelDetailsModal';
+import { FreeTerms, ModelDetailsModal, ScoreCard, TestsTab } from './ModelDetailsModal';
+
+// What the detail query returns for the open model. With no id it is disabled, so it holds nothing and is pending.
+let loaded: ModelDetail | undefined;
+vi.mock('../api/models', () => ({
+  useModelDetail: (id: number | null) =>
+    id === null
+      ? { data: undefined, isPending: true, isError: false }
+      : { data: loaded, isPending: false, isError: false },
+}));
+vi.mock('./SnippetTabs', () => ({ SnippetTabs: () => null }));
 
 // A result that was not graded has a placeholder score of 0. It must read as a dash, not as a zero the
 // model earned: the run summary already does this, and this tab has to agree with it.
@@ -128,5 +138,45 @@ describe('FreeTerms', () => {
   it('draws nothing for a model with neither', () => {
     renderTerms(termsDetail({}, null));
     expect(screen.queryByText('Free model terms')).toBeNull();
+  });
+});
+
+describe('ModelDetailsModal, closing', () => {
+  loaded = {
+    row: {
+      id: 1,
+      name: 'Alpha',
+      model_id: 'acme/alpha',
+      provider_type: 'openrouter',
+      provider_name: 'OpenRouter',
+      input_modalities: ['text'],
+      price: { input: 3, output: 15, cache_read: null, cache_write: null },
+      list_price: null,
+      discount: null,
+      pricing_source: 'test',
+      first_seen: '2026-01-01T00:00:00Z',
+      scores: {},
+    },
+    description: null,
+    tests: [],
+  } as unknown as ModelDetail;
+
+  it('keeps the last model on screen while it fades out, instead of flashing "Loading…"', () => {
+    const modal = (modelId: number | null) => (
+      <MantineProvider>
+        <ModelDetailsModal
+          modelId={modelId}
+          profile={undefined}
+          onChangeModel={() => undefined}
+          onClose={() => undefined}
+        />
+      </MantineProvider>
+    );
+    const { rerender } = render(modal(1));
+    expect(screen.getByText('Prices per 1M tokens')).toBeInTheDocument();
+
+    rerender(modal(null));
+    expect(screen.getByText('Prices per 1M tokens')).toBeInTheDocument();
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
   });
 });

@@ -16,7 +16,7 @@ import {
 } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
 import { ExternalLink } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useModelDetail } from '../api/models';
 import type { ModelDetail, UsageProfile } from '../api/types';
 import { compactTokens, dateOnly, dateTime, DASH, discountLabel, integer, money, relativeTime } from '../lib/format';
@@ -610,11 +610,17 @@ export function ModelDetailsModal({
 }) {
   const mobile = useMediaQuery('(max-width: 48em)');
   const detail = useModelDetail(modelId);
-  const data = detail.data;
+  const [lastData, setLastData] = useState<ModelDetail | undefined>(undefined);
+  if (detail.data !== undefined && detail.data !== lastData) {
+    setLastData(detail.data);
+  }
+  // Closing clears the id, which disables the query and empties it. The modal fades out for a moment, so it keeps
+  // the last model's content until it is gone rather than flashing "Loading…".
+  const data = modelId === null ? lastData : detail.data;
 
   return (
     <Modal opened={modelId !== null} onClose={onClose} title={data?.row.name ?? 'Model'} size="xl" fullScreen={mobile}>
-      {detail.isPending && <LoadingState />}
+      {modelId !== null && detail.isPending && <LoadingState />}
       {detail.isError && <ErrorState message={detail.error.message} />}
       {data && (
         <Stack gap="md">
