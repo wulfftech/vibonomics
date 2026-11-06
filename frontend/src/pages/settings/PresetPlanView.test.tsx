@@ -53,6 +53,9 @@ function plan(over: Partial<PresetPlan> = {}): PresetPlan {
     own_tests_preferred: false,
     passthrough: {},
     managed_keys: ['model', 'models', 'provider.only'],
+    validation: [],
+    validated_at: null,
+    valid: true,
     state: { owned: ['vibonomics-best-value'], slugs: {} },
     ...over,
   };

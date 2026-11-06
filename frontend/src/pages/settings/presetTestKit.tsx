@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render } from '@testing-library/react';
+import { render, type RenderResult } from '@testing-library/react';
 import { vi, type Mock } from 'vitest';
 import {
   PRESET_DEFAULTS,
@@ -58,6 +58,9 @@ export function plan(over: Partial<PresetPlan> = {}): PresetPlan {
     own_tests_preferred: false,
     passthrough: {},
     managed_keys: ['model', 'models', 'provider.only'],
+    validation: [],
+    validated_at: null,
+    valid: true,
     state: { owned: ['vibonomics-best-value'], slugs: {} },
     ...over,
   };
@@ -265,7 +268,8 @@ export function serve(opts: ServeOptions = {}): World {
   return world;
 }
 
-export function renderSection() {
+// Annotated because the inferred type reaches into node_modules by a path that is not portable.
+export function renderSection(): RenderResult {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
