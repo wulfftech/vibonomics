@@ -23,11 +23,11 @@ export const OWN_TEST_COMPOSITE_NOTE = 'Coding and agentic are from your own tes
  * Marks a score that is Vibonomics's own test result rather than a blend with third-party benchmarks (Settings →
  * Scoring → Prefer my own test scores). An icon, not a column or a coloured number: the figure keeps its score colour.
  */
-export function OwnTestMark({ label = OWN_TEST_NOTE }: { label?: string }) {
+export function OwnTestMark({ label = OWN_TEST_NOTE, size = 12 }: { label?: string; size?: number }) {
   return (
     <Tooltip label={label} withArrow>
       <span role="img" aria-label={label} style={{ display: 'inline-flex', cursor: 'help', color: tone('grape') }}>
-        <FlaskConical size={12} aria-hidden />
+        <FlaskConical size={size} aria-hidden />
       </span>
     </Tooltip>
   );

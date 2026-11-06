@@ -1,9 +1,11 @@
 import { MantineProvider } from '@mantine/core';
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { ModelDetail } from '../api/types';
 import { tone } from '../lib/tone';
 import { FreeTerms, ModelDetailsModal, ScoreCard, TestsTab } from './ModelDetailsModal';
+import { OWN_TEST_COMPOSITE_NOTE, OWN_TEST_NOTE } from './models/cells';
 
 // What the detail query returns for the open model. With no id it is disabled, so it holds nothing and is pending.
 let loaded: ModelDetail | undefined;
@@ -178,5 +180,68 @@ describe('ModelDetailsModal, closing', () => {
     rerender(modal(null));
     expect(screen.getByText('Prices per 1M tokens')).toBeInTheDocument();
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+  });
+});
+
+describe('ModelDetailsModal, scores', () => {
+  function scoresDetail(preferred: boolean): ModelDetail {
+    return {
+      row: {
+        id: 1,
+        name: 'Alpha',
+        model_id: 'acme/alpha',
+        provider_type: 'openrouter',
+        provider_name: 'OpenRouter',
+        input_modalities: ['text'],
+        price: { input: 3, output: 15, cache_read: null, cache_write: null },
+        list_price: null,
+        discount: null,
+        pricing_source: 'test',
+        first_seen: '2026-01-01T00:00:00Z',
+        reported_cost_per_task: null,
+        scores: {
+          intelligence: 60,
+          coding: 81,
+          agentic: 81,
+          composite: 74,
+          own_test: 81,
+          own_test_preferred: preferred,
+          source_count: 3,
+        },
+      },
+      description: null,
+      tests: [],
+      metrics: [],
+      attributions: [],
+      reported_cost_sources: [],
+    } as unknown as ModelDetail;
+  }
+
+  async function openScores(preferred: boolean) {
+    loaded = scoresDetail(preferred);
+    render(
+      <MantineProvider>
+        <ModelDetailsModal modelId={1} profile={undefined} onChangeModel={() => undefined} onClose={() => undefined} />
+      </MantineProvider>,
+    );
+    await userEvent.setup().click(screen.getByRole('tab', { name: 'Scores' }));
+  }
+
+  it('marks the coding, agentic and composite cards of a model scored from your own tests, and says what that means', async () => {
+    await openScores(true);
+    expect(screen.getAllByRole('img', { name: OWN_TEST_NOTE })).toHaveLength(2);
+    expect(screen.getAllByRole('img', { name: OWN_TEST_COMPOSITE_NOTE })).toHaveLength(1);
+    expect(screen.getByText(/third-party metrics listed below are not used/)).toBeInTheDocument();
+    // intelligence is still computed from the benchmarks, so its card carries no mark
+    expect(
+      within(screen.getByText('Intelligence').closest('.mantine-Card-root') as HTMLElement).queryByRole('img'),
+    ).toBeNull();
+  });
+
+  it('says nothing of the sort for a model that blends its tests with the benchmarks', async () => {
+    await openScores(false);
+    expect(screen.getByText('Coding')).toBeInTheDocument();
+    expect(screen.queryByRole('img')).toBeNull();
+    expect(screen.queryByText(/third-party metrics listed below are not used/)).toBeNull();
   });
 });

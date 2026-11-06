@@ -24,7 +24,7 @@ import { listPrices } from '../lib/modelTable';
 import { clientName, scoreColor } from '../lib/modelText';
 import { blendedPrice, profileFormula, taskCost } from '../lib/pricing';
 import { isGraded, statusColor, statusLabel } from '../lib/status';
-import { ModelBadges, ScoreNumber } from './models/cells';
+import { ModelBadges, OWN_TEST_COMPOSITE_NOTE, OwnTestMark, ScoreNumber } from './models/cells';
 import { CopyIconButton } from './CopyIconButton';
 import { ProviderDot } from './ProviderDot';
 import { providerTextColor } from '../lib/providerColors';
@@ -208,7 +208,18 @@ function OverviewTab({ detail, profile }: { detail: ModelDetail; profile: UsageP
   );
 }
 
-export function ScoreCard({ label, value, hint }: { label: string; value: number | null | undefined; hint?: string }) {
+export function ScoreCard({
+  label,
+  value,
+  hint,
+  mark,
+}: {
+  label: string;
+  value: number | null | undefined;
+  hint?: string;
+  /** Beside the number, e.g. the own-test mark. */
+  mark?: ReactNode;
+}) {
   return (
     <Card withBorder padding="sm">
       <Text size="xs" c="dimmed">
@@ -219,9 +230,12 @@ export function ScoreCard({ label, value, hint }: { label: string; value: number
           {DASH}
         </Text>
       ) : (
-        <Text size="xl" fw={700} style={{ color: tone(scoreColor(value)) }}>
-          {Math.round(value)}
-        </Text>
+        <Group gap={6} wrap="nowrap">
+          <Text size="xl" fw={700} style={{ color: tone(scoreColor(value)) }}>
+            {Math.round(value)}
+          </Text>
+          {mark}
+        </Group>
       )}
       {hint && (
         <Text size="xs" c="dimmed">
@@ -234,15 +248,26 @@ export function ScoreCard({ label, value, hint }: { label: string; value: number
 
 function ScoresTab({ detail }: { detail: ModelDetail }) {
   const { scores } = detail.row;
+  const own = scores.own_test_preferred;
   return (
     <Stack gap="md">
       <SimpleGrid cols={{ base: 2, sm: 5 }} spacing="sm">
-        <ScoreCard label="Composite" value={scores.composite} hint={`${scores.source_count} sources`} />
+        <ScoreCard
+          label="Composite"
+          value={scores.composite}
+          hint={`${scores.source_count} sources`}
+          mark={own && <OwnTestMark label={OWN_TEST_COMPOSITE_NOTE} size={16} />}
+        />
         <ScoreCard label="Intelligence" value={scores.intelligence} />
-        <ScoreCard label="Coding" value={scores.coding} />
-        <ScoreCard label="Agentic" value={scores.agentic} />
+        <ScoreCard label="Coding" value={scores.coding} mark={own && <OwnTestMark size={16} />} />
+        <ScoreCard label="Agentic" value={scores.agentic} mark={own && <OwnTestMark size={16} />} />
         <ScoreCard label="Vibonomics tests" value={scores.own_test} />
       </SimpleGrid>
+      {own && (
+        <Text size="sm">
+          Coding and agentic are your own test result; the third-party metrics listed below are not used for them.
+        </Text>
+      )}
 
       {detail.metrics.length === 0 ? (
         <EmptyState message="No benchmark results matched this model." />
