@@ -99,6 +99,8 @@ export function fullSettings(settings: AppSettings): FullSettings {
       coding_weight: 0.35,
       agentic_weight: 0.35,
       own_tests_weight: 1,
+      prefer_own_tests: false,
+      prefer_own_tests_min_tasks: 5,
       free_model_cost: 0.01,
       default_profile: 'agentic',
       ...settings.scoring,

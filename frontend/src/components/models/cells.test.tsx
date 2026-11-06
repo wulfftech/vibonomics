@@ -5,7 +5,7 @@ import type { ModelRow } from '../../api/types';
 import { discountLabel } from '../../lib/format';
 import { modelBadgeLabels } from '../../lib/modelText';
 import { tone } from '../../lib/tone';
-import { ModelNameCell } from './cells';
+import { CompositeCell, ModelNameCell, OWN_TEST_NOTE, ScoreNumber } from './cells';
 
 const row: ModelRow = {
   id: 1,
@@ -37,7 +37,15 @@ const row: ModelRow = {
   price_drop: true,
   active: false,
   testable: true,
-  scores: { intelligence: null, coding: null, agentic: null, composite: null, own_test: null, source_count: 0 },
+  scores: {
+    intelligence: null,
+    coding: null,
+    agentic: null,
+    composite: null,
+    own_test: null,
+    own_test_preferred: false,
+    source_count: 0,
+  },
   reported_cost_per_task: null,
   test: null,
   client_restricted: 'opencode',
@@ -94,5 +102,65 @@ describe('modelBadgeLabels', () => {
     const labels = modelBadgeLabels({ ...row, active: true });
     expect(labels).toEqual(['New', 'New discount', 'Price cut', 'Free', 'OpenCode only']);
     expect(modelBadgeLabels({ ...row, client_restricted: undefined })).not.toContain('OpenCode only');
+  });
+});
+
+describe('the own-test marker', () => {
+  const marker = () => screen.queryAllByRole('img', { name: OWN_TEST_NOTE });
+  const preferred = { ...row.scores, coding: 80, agentic: 82, composite: 75, own_test: 81, own_test_preferred: true };
+
+  it('follows a score number only when that score is your own test result', () => {
+    const { rerender } = render(
+      <MantineProvider>
+        <ScoreNumber value={80} />
+      </MantineProvider>,
+    );
+    expect(marker()).toHaveLength(0);
+
+    rerender(
+      <MantineProvider>
+        <ScoreNumber value={80} ownTest />
+      </MantineProvider>,
+    );
+    expect(screen.getByText('80')).toBeInTheDocument();
+    expect(marker()).toHaveLength(1);
+  });
+
+  it('is not drawn beside a dash, since there is no score to explain', () => {
+    render(
+      <MantineProvider>
+        <ScoreNumber value={null} ownTest />
+      </MantineProvider>,
+    );
+    expect(marker()).toHaveLength(0);
+  });
+
+  it('colours the icon with tone(), so it reads in both colour schemes', () => {
+    render(
+      <MantineProvider>
+        <ScoreNumber value={80} ownTest />
+      </MantineProvider>,
+    );
+    expect(marker()[0].getAttribute('style') ?? '').toContain(tone('grape'));
+  });
+
+  it('is on the composite of a model whose coding and agentic scores are its own, and says what that covers', () => {
+    render(
+      <MantineProvider>
+        <CompositeCell row={{ ...row, scores: preferred }} />
+      </MantineProvider>,
+    );
+    expect(screen.getByRole('img', { name: /coding and agentic .* your own tests/i })).toBeInTheDocument();
+    expect(screen.getByText('tested 81')).toBeInTheDocument();
+  });
+
+  it('is not on the composite of a model that blends its tests with the benchmarks', () => {
+    render(
+      <MantineProvider>
+        <CompositeCell row={{ ...row, scores: { ...preferred, own_test_preferred: false } }} />
+      </MantineProvider>,
+    );
+    expect(screen.queryByRole('img')).toBeNull();
+    expect(screen.getByText('tested 81')).toBeInTheDocument();
   });
 });

@@ -68,6 +68,8 @@ const BADGE_GAP = 6;
 /** Mantine's xs badge: 6px of padding either side and a 1px border. */
 const BADGE_CHROME = 14;
 const CELL_PADDING = 24;
+/** The own-test mark (a 12 px icon) and the gap before it, in the score cells. */
+const MARK_WIDTH = 16;
 
 /** The widest of a model's name line (name plus its badges) and its subline, as drawn by `ModelNameCell`. */
 function modelCellWidth(model: EnrichedModel): number {
@@ -108,7 +110,7 @@ function measureColumns(models: EnrichedModel[]): Record<string, number> {
     intel: textWidth('Intel', false, 600) + 22,
     coding: textWidth('Coding', false, 600) + 22,
     agentic: textWidth('Agentic', false, 600) + 22,
-    score: textWidth('100 ·3 tested 100', false, 600) + 20,
+    score: textWidth('100 ·3 tested 100', false, 600) + 20 + MARK_WIDTH,
     value: textWidth('Value', false, 600) + 28,
     context: widest(rows.map((row) => compactTokens(row.context_length))) + 24,
     released: Math.max(textWidth('2026-10-24'), textWidth('seen 12mo ago')) + 18,
@@ -257,10 +259,10 @@ const ModelTr = memo(function ModelTr({
         <ScoreNumber value={row.scores.intelligence} />
       </Table.Td>
       <Table.Td>
-        <ScoreNumber value={row.scores.coding} />
+        <ScoreNumber value={row.scores.coding} ownTest={row.scores.own_test_preferred} />
       </Table.Td>
       <Table.Td>
-        <ScoreNumber value={row.scores.agentic} />
+        <ScoreNumber value={row.scores.agentic} ownTest={row.scores.own_test_preferred} />
       </Table.Td>
       <Table.Td>
         <CompositeCell row={row} />
