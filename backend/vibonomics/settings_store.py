@@ -313,6 +313,11 @@ class PresetSettings(BaseModel):
     sort: Literal["price", "throughput", "latency"] | None = Field(
         None, description="What `provider.sort` is when `route` is `sort`; price when not set"
     )
+    prefer_own_tests: bool | None = Field(
+        None,
+        description="For this preset, prefer the model's own test scores over the computed ones. None follows the "
+        "global Scoring setting.",
+    )
 
     @field_validator("slug")
     @classmethod
