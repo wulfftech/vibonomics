@@ -51,7 +51,14 @@ async def _later() -> None:
 async def test_saving_settings_that_leave_the_intervals_alone_does_not_restart_any_timer(running):
     scheduler.reschedule(AppSettings(presets=AUTO))
     before = _timers()
-    assert set(before) == {"refresh-models", "refresh-balances", "refresh-benchmarks", "refresh-usage", "preset-sync"}
+    assert set(before) == {
+        "refresh-models",
+        "refresh-balances",
+        "refresh-benchmarks",
+        "refresh-usage",
+        "preset-sync",
+        "preset-catalog-sync",
+    }
 
     for _ in range(3):
         await _later()
@@ -224,12 +231,16 @@ async def test_startup_refreshes_every_kind_and_then_catches_up_the_preset(monke
     async def fake_catch_up(settings: AppSettings) -> None:
         order.append("preset")
 
+    async def fake_catalogue() -> None:
+        order.append("catalogue")  # the real one calls OpenRouter when an earlier test left a key in the database
+
     monkeypatch.setattr(app_module, "run_job", fake_run_job)
     monkeypatch.setattr(scheduler, "catch_up_preset", fake_catch_up)
+    monkeypatch.setattr(scheduler, "sync_catalogue", fake_catalogue)
 
     await app_module._startup_work(AppSettings(), delay=0)
 
-    assert order == [(kind, "startup") for kind in app_module.KINDS] + ["preset"]
+    assert order == [(kind, "startup") for kind in app_module.KINDS] + ["preset", "catalogue"]
 
 
 async def test_the_preset_catches_up_at_startup_even_when_the_refresh_is_off(monkeypatch):
@@ -241,9 +252,13 @@ async def test_the_preset_catches_up_at_startup_even_when_the_refresh_is_off(mon
     async def fake_catch_up(settings: AppSettings) -> None:
         order.append("preset")
 
+    async def fake_catalogue() -> None:
+        order.append("catalogue")
+
     monkeypatch.setattr(app_module, "run_job", fake_run_job)
     monkeypatch.setattr(scheduler, "catch_up_preset", fake_catch_up)
+    monkeypatch.setattr(scheduler, "sync_catalogue", fake_catalogue)
 
     await app_module._startup_work(AppSettings(refresh=RefreshSettings(refresh_on_startup=False)), delay=0)
 
-    assert order == ["preset"]
+    assert order == ["preset", "catalogue"]

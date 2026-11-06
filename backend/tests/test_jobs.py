@@ -297,12 +297,16 @@ async def test_the_startup_refresh_goes_on_after_a_kind_raises(monkeypatch):
     async def catch_up(_settings) -> None:
         ran.append("preset")
 
+    async def sync_catalogue() -> None:
+        ran.append("catalogue")  # the real one calls OpenRouter when an earlier test left a key in the database
+
     monkeypatch.setattr(app_module, "run_job", run_job)
     monkeypatch.setattr(app_module.scheduler, "catch_up_preset", catch_up)
+    monkeypatch.setattr(app_module.scheduler, "sync_catalogue", sync_catalogue)
 
     await app_module._startup_work(AppSettings(), delay=0)
 
-    assert ran == ["models", "balances", "benchmarks", "usage", "preset"]
+    assert ran == ["models", "balances", "benchmarks", "usage", "preset", "catalogue"]
 
 
 # ---- models.dev down, nothing cached --------------------------------------------------------------------------

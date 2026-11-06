@@ -10,13 +10,16 @@ from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import presets
+from . import preset_catalog, presets
 from .jobs import run_job
 from .settings_store import AppSettings
 
 log = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
+
+CATALOG_JOB = "preset-catalog-sync"
+CATALOG_INTERVAL_SECONDS = 30 * 60
 
 
 async def _scheduled(kind: str) -> None:
@@ -33,6 +36,7 @@ def start(settings: AppSettings) -> None:
         _scheduler = AsyncIOScheduler(job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 600})
         _scheduler.start()
     reschedule(settings)
+    _schedule_catalogue()
 
 
 def _set_interval(job_id: str, seconds: float, func: Callable[..., Awaitable[None]], args: list[Any]) -> bool:
@@ -111,6 +115,21 @@ async def catch_up_preset(settings: AppSettings) -> None:
             await presets.sync("startup")
     except Exception:  # a failed catch-up must not stop the startup work after it
         log.exception("Could not catch up the preset update")
+
+
+async def sync_catalogue() -> None:
+    """Refresh the local copy of the account's presets. Used by the timer and at startup; never raises."""
+    try:
+        await preset_catalog.sync()
+    except Exception:  # the scheduler and the startup work after this must survive any single failure
+        log.exception("Could not sync the preset catalogue")
+
+
+def _schedule_catalogue() -> None:
+    """The catalogue timer does not depend on any setting, so only ``start`` adds it and a save never moves it."""
+    assert _scheduler is not None
+    if _set_interval(CATALOG_JOB, CATALOG_INTERVAL_SECONDS, sync_catalogue, []):
+        log.info("Scheduled the preset catalogue sync every %s minutes", CATALOG_INTERVAL_SECONDS // 60)
 
 
 def shutdown() -> None:

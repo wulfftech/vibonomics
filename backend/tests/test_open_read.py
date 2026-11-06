@@ -73,6 +73,7 @@ CHANGES = [
     ("POST", "/api/presets/list"),
     ("POST", "/api/presets/plan"),
     ("POST", "/api/presets/apply"),
+    ("POST", "/api/presets/sync"),
     ("POST", "/api/evals/runs"),
     ("POST", "/api/evals/runs/1/cancel"),
     ("DELETE", "/api/evals/runs/1"),
@@ -97,6 +98,18 @@ def test_after_login_a_change_reaches_its_route(client):
         outbound.route().mock(return_value=httpx.Response(401, json={"error": "no network in tests"}))
         for method, path in CHANGES:
             assert client.request(method, path, json={}).status_code != 401, (method, path)
+
+
+def test_a_visitor_does_not_get_the_preset_catalogue(client):
+    # A GET, so the guard lets it through; the route itself refuses, because a preset's config is the owner's.
+    response = client.get("/api/presets/catalog")
+    assert response.status_code == 401
+    assert response.json() == NOT_AUTHENTICATED
+
+    _logged_in(client)
+    response = client.get("/api/presets/catalog")
+    assert response.status_code == 200
+    assert set(response.json()) == {"synced_at", "syncing", "error", "presets"}
 
 
 def test_the_read_only_post_is_open(client):
@@ -252,6 +265,7 @@ BODYLESS_POSTS = [
     "/api/evals/runs/1/cancel",
     "/api/presets/list",
     "/api/presets/plan",
+    "/api/presets/sync",
     "/api/auth/logout",
 ]
 REFUSED = {"detail": "Cross-site requests are refused"}

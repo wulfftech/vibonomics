@@ -19,6 +19,7 @@ from .api import (
     benchmarks,
     evals,
     models,
+    preset_catalog,
     presets,
     providers,
     refresh,
@@ -49,6 +50,8 @@ async def _startup_work(settings: AppSettings, delay: float = 2) -> None:
                 log.exception("Startup refresh of %s could not run", kind)
     # After the refresh, so a catch-up run ranks fresh prices.
     await scheduler.catch_up_preset(settings)
+    # last: a big account is a hundred reads, and nothing waits on this task
+    await scheduler.sync_catalogue()
 
 
 @asynccontextmanager
@@ -138,6 +141,7 @@ def _api_app() -> FastAPI:
         auth.router,
         models.router,
         value.router,
+        preset_catalog.router,  # before presets, so a path there can never shadow /api/presets/catalog
         presets.router,
         usage.router,
         providers.router,
