@@ -1,10 +1,13 @@
 import { MantineProvider } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProviderOut, ProviderTypeOut } from '../../api/types';
 import { ProvidersSection } from './ProvidersSection';
+
+vi.mock('@mantine/notifications', () => ({ notifications: { show: vi.fn() } }));
 
 const fetchMock = vi.fn();
 
@@ -52,14 +55,29 @@ const PROVIDER: ProviderOut = {
   balance_note: '',
 };
 
-function serve() {
-  fetchMock.mockImplementation((url: string) => {
-    const json = (body: unknown) =>
-      Promise.resolve(
-        new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }),
-      );
+const SECOND: ProviderOut = { ...PROVIDER, id: 8, name: 'Kimi backup' };
+const ROUTER: ProviderOut = { ...PROVIDER, id: 9, type: 'openrouter', name: 'OpenRouter', base_url: null, options: {} };
+
+function json(body: unknown, status = 200) {
+  return Promise.resolve(
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }),
+  );
+}
+
+interface Served {
+  providers?: ProviderOut[];
+  /** Answers a request before the defaults do; return undefined to fall through. */
+  override?: (url: string, init: RequestInit | undefined) => Promise<Response> | undefined;
+}
+
+function serve({ providers = [PROVIDER], override }: Served = {}) {
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    const early = override?.(url, init);
+    if (early !== undefined) {
+      return early;
+    }
     if (url === 'api/providers') {
-      return json([PROVIDER]);
+      return json(providers);
     }
     if (url === 'api/providers/types') {
       return json([TYPE]);
@@ -67,7 +85,13 @@ function serve() {
     if (url === 'api/providers/7/test') {
       return json({ ok: true, message: 'Key accepted.' });
     }
-    return Promise.resolve(new Response(JSON.stringify({ detail: `unexpected ${url}` }), { status: 500 }));
+    if (url === 'api/providers/7' && init?.method === 'PUT') {
+      return json(PROVIDER);
+    }
+    if (url === 'api/providers/refresh') {
+      return json({ status: 'started' }, 202);
+    }
+    return json({ detail: `unexpected ${url}` }, 500);
   });
   vi.stubGlobal('fetch', fetchMock);
 }
@@ -121,5 +145,131 @@ describe('ProvidersSection: testing an existing provider', () => {
     await waitFor(() =>
       expect(testedBody()).toEqual({ base_url: 'https://other.example/v1', options: { region: 'cn' } }),
     );
+  });
+});
+
+describe('ProvidersSection: the rows', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.mocked(notifications.show).mockClear();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('shows the result of each Test even when a second Test starts before the first finishes', async () => {
+    let finishFirst: (response: Response) => void = () => undefined;
+    const first = new Promise<Response>((resolve) => {
+      finishFirst = resolve;
+    });
+    serve({
+      providers: [PROVIDER, SECOND],
+      override: (url) => {
+        if (url === 'api/providers/7/test') {
+          return first;
+        }
+        if (url === 'api/providers/8/test') {
+          return json({ ok: true, message: 'Backup accepted.' });
+        }
+        return undefined;
+      },
+    });
+    const user = userEvent.setup();
+    renderSection();
+    const [testFirst, testSecond] = await screen.findAllByRole('button', { name: 'Test' });
+
+    await user.click(testFirst);
+    await user.click(testSecond);
+    await waitFor(() =>
+      expect(notifications.show).toHaveBeenCalledWith({ message: 'Backup accepted.', color: 'green' }),
+    );
+    expect(testFirst).toHaveAttribute('data-loading', 'true');
+    expect(testSecond).not.toHaveAttribute('data-loading');
+
+    finishFirst(await json({ ok: false, message: 'Key rejected.' }));
+    await waitFor(() => expect(notifications.show).toHaveBeenCalledWith({ message: 'Key rejected.', color: 'red' }));
+    expect(testFirst).not.toHaveAttribute('data-loading');
+  });
+
+  it('does not carry a failed delete over to the next provider it is opened for', async () => {
+    serve({
+      providers: [PROVIDER, SECOND],
+      override: (url, init) =>
+        url === 'api/providers/7' && init?.method === 'DELETE'
+          ? json({ detail: 'Kimi could not be deleted.' }, 500)
+          : undefined,
+    });
+    const user = userEvent.setup();
+    renderSection();
+    const [deleteFirst, deleteSecond] = await screen.findAllByRole('button', { name: 'Delete' });
+
+    await user.click(deleteFirst);
+    const failed = within(await screen.findByRole('dialog', { name: 'Delete provider' }));
+    await user.click(failed.getByRole('button', { name: 'Delete' }));
+    expect(await failed.findByText('Kimi could not be deleted.')).toBeInTheDocument();
+    await user.click(failed.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    await user.click(deleteSecond);
+    const next = within(await screen.findByRole('dialog', { name: 'Delete provider' }));
+    expect(next.getByText(/Delete Kimi backup\?/)).toBeInTheDocument();
+    expect(next.queryByText('Kimi could not be deleted.')).toBeNull();
+  });
+
+  it('warns that deleting an OpenRouter provider also deletes its stored spend history', async () => {
+    serve({ providers: [ROUTER] });
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Delete provider' }));
+    expect(dialog.getByText(/spend history/)).toHaveTextContent(/30 days/);
+  });
+
+  it('does not mention spend history when the provider is not OpenRouter', async () => {
+    serve();
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Delete provider' }));
+    expect(dialog.getByText(/Delete Kimi\?/)).toBeInTheDocument();
+    expect(dialog.queryByText(/spend history/)).toBeNull();
+  });
+});
+
+describe('ProvidersSection: saving a provider', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.mocked(notifications.show).mockClear();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function saveKimi() {
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    const form = within(await screen.findByRole('dialog', { name: 'Edit Kimi' }));
+    await user.click(form.getByRole('button', { name: 'Save' }));
+  }
+
+  it('says so when the refresh it asked for is queued behind one already running', async () => {
+    serve({
+      override: (url) => (url === 'api/providers/refresh' ? json({ status: 'queued' }, 202) : undefined),
+    });
+    await saveKimi();
+
+    await waitFor(() =>
+      expect(notifications.show).toHaveBeenCalledWith({
+        message: 'Queued behind the refresh already running; it will run when that finishes.',
+        color: 'blue',
+      }),
+    );
+  });
+
+  it('stays quiet about queueing when the refresh starts at once', async () => {
+    serve();
+    await saveKimi();
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === 'api/providers/refresh')).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 50)); // let the answer be read
+    expect(notifications.show).toHaveBeenCalledWith({ message: 'Saved. Refreshing…', color: 'green' });
+    expect(notifications.show).toHaveBeenCalledTimes(1);
   });
 });

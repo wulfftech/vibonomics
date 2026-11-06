@@ -20,6 +20,7 @@ import { useCanChange, useTriggerRefresh } from '../api/system';
 import type { SpendOut } from '../api/types';
 import { ErrorState, LoadingState } from '../components/DataState';
 import { BreakdownTable, type BreakdownRow } from '../components/usage/BreakdownTable';
+import { CREDIT_ONLY } from '../components/usage/creditOnly';
 import { DailyCharts } from '../components/usage/DailyCharts';
 import { dateOnly, integer, money, percent, relativeTime } from '../lib/format';
 import { bigCount, dayLabel } from '../lib/usage';
@@ -133,43 +134,50 @@ export function UsagePage() {
   const scope = providerId === null ? accounts : accounts.filter((a) => a.id === providerId);
   const synced = latest(scope.map((a) => a.last_synced ?? null));
   const filters = (
-    <Group gap="md" align="flex-end" wrap="wrap">
-      <SegmentedControl
-        value={String(days)}
-        onChange={(next) => setDays(Number(next))}
-        data={RANGES}
-        aria-label="Time range"
-      />
-      {accounts.length > 1 && (
-        <Select
-          label="Account"
-          w={200}
-          allowDeselect={false}
-          data={[
-            { value: 'all', label: 'All accounts' },
-            ...accounts.map((a) => ({ value: String(a.id), label: a.name })),
-          ]}
-          value={providerId === null ? 'all' : String(providerId)}
-          onChange={(next) => {
-            setProviderId(next === null || next === 'all' ? null : Number(next));
-            setKey(null);
-          }}
+    <Stack gap={6}>
+      <Group gap="md" align="flex-end" wrap="wrap">
+        <SegmentedControl
+          value={String(days)}
+          onChange={(next) => setDays(Number(next))}
+          data={RANGES}
+          aria-label="Time range"
         />
+        {accounts.length > 1 && (
+          <Select
+            label="Account"
+            w={200}
+            allowDeselect={false}
+            data={[
+              { value: 'all', label: 'All accounts' },
+              ...accounts.map((a) => ({ value: String(a.id), label: a.name })),
+            ]}
+            value={providerId === null ? 'all' : String(providerId)}
+            onChange={(next) => {
+              setProviderId(next === null || next === 'all' ? null : Number(next));
+              setKey(null);
+            }}
+          />
+        )}
+        {data.keys.length > 0 && (
+          <Select
+            label="API key"
+            w={220}
+            allowDeselect={false}
+            data={[{ value: 'all', label: 'All keys' }, ...data.keys.map((k) => ({ value: k.hash, label: k.name }))]}
+            value={key ?? 'all'}
+            onChange={(next) => setKey(next === null || next === 'all' ? null : next)}
+          />
+        )}
+        <Text size="sm" c="dimmed" ml="auto">
+          {synced ? `Synced ${relativeTime(synced)}` : 'Not synced yet'}
+        </Text>
+      </Group>
+      {accounts.length > 1 && providerId === null && (
+        <Text size="xs" c="dimmed">
+          Providers that share a management key are counted once.
+        </Text>
       )}
-      {data.keys.length > 0 && (
-        <Select
-          label="API key"
-          w={220}
-          allowDeselect={false}
-          data={[{ value: 'all', label: 'All keys' }, ...data.keys.map((k) => ({ value: k.hash, label: k.name }))]}
-          value={key ?? 'all'}
-          onChange={(next) => setKey(next === null || next === 'all' ? null : next)}
-        />
-      )}
-      <Text size="sm" c="dimmed" ml="auto">
-        {synced ? `Synced ${relativeTime(synced)}` : 'Not synced yet'}
-      </Text>
-    </Group>
+    </Stack>
   );
 
   if (data.daily.length === 0) {
@@ -225,6 +233,12 @@ export function UsagePage() {
             <>
               {dayLabel(data.since ?? '')} to {dayLabel(data.until ?? '')}
               {data.today_usd !== null && data.today_usd !== undefined && ` · ${money(data.today_usd)} so far today`}
+              {(t.byok_cost !== 0 || t.byok_tokens !== 0) && (
+                // Own-key requests report their cost apart from credits, so Spend leaves them out.
+                <span style={{ display: 'block' }}>
+                  {`+ ${money(t.byok_cost)} through your own keys (${bigCount(t.byok_tokens)} tokens)`}
+                </span>
+              )}
             </>
           }
         />
@@ -239,13 +253,13 @@ export function UsagePage() {
           sub={
             t.cost_per_request === null || t.cost_per_request === undefined
               ? undefined
-              : `${money(t.cost_per_request)} each`
+              : `${money(t.cost_per_request)} each, credit-billed traffic only`
           }
         />
         <Tile
           label="Cost per 1M tokens"
           value={t.cost_per_mtok === null || t.cost_per_mtok === undefined ? '—' : money(t.cost_per_mtok)}
-          sub="Overall efficiency"
+          sub={<span title={CREDIT_ONLY}>Credit-billed traffic only</span>}
         />
         <Tile
           label="Cached"
@@ -292,7 +306,8 @@ export function UsagePage() {
               )}`
             : ''}
           . Tokens are prompt plus completion, with reasoning counted inside completion. Cost per 1M tokens is spend
-          divided by those, so a cache that serves most of the prompt pulls it down.
+          divided by those, over traffic billed in credits only (requests made with your own provider keys are left
+          out), so a cache that serves most of the prompt pulls it down.
         </Text>
       </Alert>
     </Stack>

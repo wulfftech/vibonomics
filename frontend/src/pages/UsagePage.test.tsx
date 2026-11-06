@@ -126,6 +126,8 @@ describe('UsagePage', () => {
   beforeEach(() => {
     fetchMock.mockReset();
     canChange = true;
+    // jsdom lacks it, and Mantine's option list scrolls the active option into view.
+    window.HTMLElement.prototype.scrollIntoView = () => undefined;
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -142,6 +144,63 @@ describe('UsagePage', () => {
     expect(tile('Cost per 1M tokens').getByText('$0.986')).toBeInTheDocument();
     expect(tile('Cached').getByText('84%')).toBeInTheDocument();
     expect(screen.getByText(/Synced 3 h ago/)).toBeInTheDocument();
+  });
+
+  it('shows what went through the operator’s own provider keys beside Spend, only when there is some', async () => {
+    serve(spend({ totals: { ...TOTAL, byok_cost: 1.25, byok_tokens: 400_000 } }));
+    renderPage();
+    await screen.findByRole('table', { name: 'By model' });
+    expect(
+      within(screen.getByRole('group', { name: 'Spend' })).getByText('+ $1.25 through your own keys (400k tokens)'),
+    ).toBeInTheDocument();
+  });
+
+  it('still mentions own-key tokens when they carried no reported cost', async () => {
+    serve(spend({ totals: { ...TOTAL, byok_cost: 0, byok_tokens: 400_000 } }));
+    renderPage();
+    await screen.findByRole('table', { name: 'By model' });
+    expect(
+      within(screen.getByRole('group', { name: 'Spend' })).getByText('+ $0 through your own keys (400k tokens)'),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing about own keys when none were used', async () => {
+    serve(spend());
+    renderPage();
+    await screen.findByRole('table', { name: 'By model' });
+    expect(screen.queryByText(/your own keys/)).toBeNull();
+  });
+
+  it('labels the per-token and per-request figures as covering credit-billed traffic only', async () => {
+    serve(spend());
+    renderPage();
+    await screen.findByRole('table', { name: 'By model' });
+    const tile = (name: string) => within(screen.getByRole('group', { name }));
+    expect(tile('Cost per 1M tokens').getByText('Credit-billed traffic only')).toBeInTheDocument();
+    expect(tile('Requests').getByText('$0.10 each, credit-billed traffic only')).toBeInTheDocument();
+    for (const header of screen.getAllByRole('columnheader', { name: 'Per 1M tokens' })) {
+      expect(header).toHaveAttribute('title', expect.stringContaining('credit-billed traffic only'));
+    }
+  });
+
+  it('notes that providers sharing a management key are counted once, while All accounts is chosen', async () => {
+    const second = { ...spend().accounts[0], id: 2, name: 'OpenRouter work' };
+    serve(spend({ accounts: [...spend().accounts, second] }));
+    const user = userEvent.setup();
+    renderPage();
+    expect(await screen.findByText('Providers that share a management key are counted once.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('combobox', { name: 'Account' }));
+    await user.click(await screen.findByRole('option', { name: 'OpenRouter work', hidden: true }));
+    await waitFor(() => expect(usageUrls()).toContain('api/usage?days=30&provider_id=2'));
+    expect(screen.queryByText('Providers that share a management key are counted once.')).toBeNull();
+  });
+
+  it('does not add that note when there is only one account to choose from', async () => {
+    serve(spend());
+    renderPage();
+    await screen.findByRole('table', { name: 'By model' });
+    expect(screen.queryByText(/share a management key/)).toBeNull();
   });
 
   it('breaks the spend down by model, key and provider, with the remainder no key accounts for', async () => {

@@ -1,11 +1,13 @@
 import { ActionIcon, Anchor, Badge, Group, Stack, Text, Tooltip } from '@mantine/core';
 import { ExternalLink, RefreshCw } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { useRefreshProvider } from '../../api/providers';
 import type { BalanceOut, ProviderOut } from '../../api/types';
 import { money, relativeTime } from '../../lib/format';
 import { tone } from '../../lib/tone';
 import { balanceWindows } from '../../lib/usageWindows';
+import { ChangeOnly } from '../ChangeOnly';
 import { UsageWindows } from '../UsageWindows';
 
 function keyLine(balance: BalanceOut): string | null {
@@ -154,6 +156,9 @@ export function BalanceAge({ provider, label = 'updated' }: { provider: Provider
   );
 }
 
+/** How long a card keeps spinning for a balance that has not changed, before it assumes none is coming. */
+const REFRESH_WAIT_MS = 120_000;
+
 /**
  * The card's footer: when the figures were last fetched, and a button that refreshes just this card's
  * providers. A card that stands for two providers (OpenCode) passes both, so one click updates all of it.
@@ -169,24 +174,48 @@ export function BalanceFooter({ providers, label = 'updated' }: { providers: Pro
     return !bestStamp || new Date(stamp) > new Date(bestStamp) ? provider : best;
   }, null);
   const names = providers.map((provider) => provider.name).join(' and ');
+  const stamp = newest?.balance?.fetched_at ?? null;
+
+  // The request is answered 202 as soon as the refresh is queued, so the spinner waits for a newer balance.
+  const [asked, setAsked] = useState<{ from: string | null } | null>(null);
+  const waiting = asked !== null && asked.from === stamp;
+  useEffect(() => {
+    if (!waiting) {
+      return undefined;
+    }
+    // Without a ceiling a refresh that writes no balance, or a page that misses the update, would spin for good.
+    const timer = setTimeout(() => setAsked(null), REFRESH_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [waiting]);
+
   return (
     <Group justify="space-between" wrap="nowrap" gap="xs">
       <Text size="xs" c="dimmed" truncate="end">
-        {newest?.balance?.fetched_at ? `${label} ${relativeTime(newest.balance.fetched_at)}` : 'never refreshed'}
+        {stamp ? `${label} ${relativeTime(stamp)}` : 'never refreshed'}
       </Text>
-      <Tooltip label={`Refresh ${names}`} withArrow>
-        <ActionIcon
-          variant="subtle"
-          color="gray"
-          size="sm"
-          aria-label={`Refresh ${names}`}
-          loading={refresh.isPending}
-          disabled={providers.length === 0}
-          onClick={() => refresh.mutate(providers.map((provider) => provider.id))}
-        >
-          <RefreshCw size={14} />
-        </ActionIcon>
-      </Tooltip>
+      <ChangeOnly reason="Log in to refresh">
+        {(blocked) => (
+          <Tooltip label={`Refresh ${names}`} withArrow>
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              size="sm"
+              aria-label={`Refresh ${names}`}
+              loading={refresh.isPending || waiting}
+              disabled={blocked || providers.length === 0}
+              onClick={() => {
+                setAsked({ from: stamp });
+                refresh.mutate(
+                  providers.map((provider) => provider.id),
+                  { onError: () => setAsked(null) },
+                );
+              }}
+            >
+              <RefreshCw size={14} />
+            </ActionIcon>
+          </Tooltip>
+        )}
+      </ChangeOnly>
     </Group>
   );
 }
