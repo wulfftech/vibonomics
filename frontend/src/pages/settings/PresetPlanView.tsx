@@ -6,6 +6,7 @@ import { CopyIconButton } from '../../components/CopyIconButton';
 import { DASH, discountLabel, money } from '../../lib/format';
 import { openRouterPresetUrl } from '../../lib/presets';
 import type { PresetPlan } from '../../api/types';
+import { PlanGuardrails } from './PresetGuardrailsPlan';
 import { PresetLiveCheck } from './PresetLiveCheck';
 import { ModelLink, ModelLinks, PassthroughBlock, PresetPageLink, PresetVersions } from './PresetParts';
 
@@ -224,6 +225,8 @@ export function PresetPlanView({ plan }: { plan: PresetPlan }) {
           </Table.ScrollContainer>
         </Stack>
       )}
+
+      <PlanGuardrails plan={plan} />
 
       <PassthroughBlock passthrough={plan.passthrough} />
 

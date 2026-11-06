@@ -5,6 +5,7 @@ import { useAdoptPreset, useInspectPreset } from '../../api/presets';
 import { ApiError } from '../../api/client';
 import type { PresetSettings } from '../../api/types';
 import { ErrorState, LoadingState } from '../../components/DataState';
+import { LiveSystemPrompt } from './LiveSystemPrompt';
 import { PassthroughBlock } from './PresetParts';
 
 /**
@@ -83,6 +84,7 @@ function AdoptBody({
         ))}
         . Adopting writes nothing: the preset is added to your list with writing switched off.
       </Text>
+      <LiveSystemPrompt present={seen.has_system_prompt} prompt={seen.system_prompt} />
       <PassthroughBlock passthrough={seen.passthrough} />
       {seen.blockers.map((reason) => (
         <Alert key={reason} color="red" variant="light" py="xs">

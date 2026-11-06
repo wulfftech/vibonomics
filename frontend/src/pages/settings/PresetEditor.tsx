@@ -1,7 +1,8 @@
 import { Alert, Stack } from '@mantine/core';
 import type { ReactNode } from 'react';
 import type { FullSettings, PresetSettings, PresetSlugState } from '../../api/types';
-import type { PresetEntry } from '../../lib/presets';
+import { hasGuardrailProblems, livePreset, type PresetEntry } from '../../lib/presets';
+import { GuardrailsCard } from './GuardrailsCard';
 import { PresetForm } from './PresetForm';
 import { PresetHeader } from './PresetHeader';
 import { LastRun, PresetPreview } from './PresetPreview';
@@ -35,6 +36,8 @@ export function PresetEditor({
   saveBar: ReactNode;
 }) {
   const plan = update.plan.data?.slug === entry.slug ? update.plan.data : undefined;
+  // A Set guardrail without a usable value is never sent, so there is nothing to preview until it is fixed.
+  const canPreview = !hasGuardrailProblems(item.guardrails);
   return (
     <Stack gap="lg">
       <PresetHeader entry={entry} mark presetId={plan?.preset_id} workspace={plan?.workspace} />
@@ -46,9 +49,14 @@ export function PresetEditor({
         </Alert>
       )}
       <PresetForm item={item} onChange={onChange} scoring={scoring} templates={templates} />
+      <GuardrailsCard
+        guardrails={item.guardrails}
+        live={livePreset(entry.catalog, plan)}
+        onChange={(guardrails) => onChange({ guardrails })}
+      />
       {saveBar}
       <StopManaging slug={entry.slug} adopted={item.adopted} created={!entry.notCreated} onConfirm={onStop} />
-      <PresetPreview item={item} unsaved={unsaved} update={update} />
+      <PresetPreview item={item} unsaved={unsaved} update={update} canPreview={canPreview} />
       <LastRun slug={entry.slug} last={last} />
     </Stack>
   );

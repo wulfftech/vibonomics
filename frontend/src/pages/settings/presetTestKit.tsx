@@ -1,6 +1,6 @@
 import { MantineProvider } from '@mantine/core';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, type RenderResult } from '@testing-library/react';
+import { configure, render, type RenderResult } from '@testing-library/react';
 import { vi, type Mock } from 'vitest';
 import {
   PRESET_DEFAULTS,
@@ -15,11 +15,23 @@ import { OpenRouterSection } from './OpenRouterSection';
 
 /** Shared by the tests of the OpenRouter settings: fixtures, and a fetch that behaves like the server. */
 
+// The page is a lot of Mantine inputs, and when the whole suite runs at once its first render can take longer than
+// the 1 s that findBy waits by default.
+configure({ asyncUtilTimeout: 5000 });
+
 // Annotated because an exported inferred vitest type cannot be named from here.
 export const fetchMock: Mock = vi.fn();
 
 // jsdom has no scrollIntoView, which a Select calls to show the option that is chosen when it opens.
 Element.prototype.scrollIntoView = () => undefined;
+
+// jsdom has no document.fonts, which an autosizing Textarea listens to so that it can resize when a font arrives.
+if (!('fonts' in document)) {
+  Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => undefined, removeEventListener: () => undefined },
+    configurable: true,
+  });
+}
 
 export const SELECTED_KEY = 'vibonomics.presets.selected';
 
@@ -58,6 +70,10 @@ export function plan(over: Partial<PresetPlan> = {}): PresetPlan {
     own_tests_preferred: false,
     passthrough: {},
     managed_keys: ['model', 'models', 'provider.only'],
+    guardrails: { set: {}, cleared: [] },
+    system_prompt: { live: null, planned: null, source: 'none', changed: false },
+    capabilities: [],
+    system_backup_at: null,
     validation: [],
     validated_at: null,
     valid: true,
@@ -98,6 +114,7 @@ export function inspection(slug: string, over: Partial<PresetInspect> = {}): Pre
     workspace: 'team-a',
     config: { model: 'acme/one', temperature: 0.2, provider: { only: ['deepinfra'], data_collection: 'deny' } },
     has_system_prompt: false,
+    system_prompt: null,
     models: ['acme/one'],
     providers: ['deepinfra'],
     versions: [

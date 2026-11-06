@@ -14,11 +14,14 @@ export function PresetPreview({
   item,
   unsaved,
   update,
+  canPreview = true,
 }: {
   item: PresetSettings;
   /** The settings differ from what is saved, or are not saved at all: they can be previewed, not applied. */
   unsaved: boolean;
   update: PresetUpdate;
+  /** False while the settings hold something that cannot be sent, such as a guardrail that is Set but empty. */
+  canPreview?: boolean;
 }) {
   const { plan, apply } = update;
   const slug = itemSlug(item);
@@ -41,7 +44,12 @@ export function PresetPreview({
             </Text>
           </Stack>
           <Group gap="xs">
-            <Button variant="default" loading={plan.isPending && asked} onClick={() => update.preview(item, unsaved)}>
+            <Button
+              variant="default"
+              loading={plan.isPending && asked}
+              disabled={!canPreview}
+              onClick={() => update.preview(item, unsaved)}
+            >
               Preview
             </Button>
             <Button loading={apply.isPending} disabled={!canApply} onClick={update.applyPlan}>
@@ -49,6 +57,12 @@ export function PresetPreview({
             </Button>
           </Group>
         </Group>
+        {!canPreview && (
+          <Alert color="yellow" variant="light" py="xs">
+            A guardrail is set without a usable value, so there is nothing to preview yet. Fix it above, or set it to
+            Leave or Remove.
+          </Alert>
+        )}
         {unsaved && (
           <Alert color="blue" variant="light" py="xs">
             You have unsaved changes. Preview tries them out without saving them; save them to be able to apply.
