@@ -144,6 +144,7 @@ class Plan:
     state: dict[str, Any] = field(default_factory=dict)
     draft: bool = False  # made from unsaved settings, so it cannot be applied
     excluded: Excluded = field(default_factory=Excluded)  # what the blocklists took out of this run
+    passthrough: dict[str, Any] = field(default_factory=dict)  # the keys that are sent back as they were found
     fingerprint: str | None = None  # which key and host the plan was made for
     # The listed models whose providers the preset names once this plan stands; None when nothing is to be recorded.
     pinned: list[str] | None = None
@@ -414,6 +415,34 @@ def owned_view(config: dict[str, Any]) -> dict[str, Any]:
         "order": provider.get("order"),
         "sort": provider.get("sort"),
     }
+
+
+# What Vibonomics decides in a preset. Every other key is sent back as it was found.
+MANAGED_KEYS = ["model", "models", "route", "provider.only", "provider.order", "provider.sort"]
+_MANAGED_PROVIDER_KEYS = ("only", "order", "sort")
+
+
+def passthrough_view(config: dict[str, Any]) -> dict[str, Any]:
+    """The keys of ``config`` that Vibonomics does not decide and sends back unchanged.
+
+    That is every top-level key but the managed ones, and the other keys inside ``provider``. It is what the operator
+    is shown before handing a preset over, as raw JSON.
+    """
+    out = {k: copy.deepcopy(v) for k, v in config.items() if k not in ("model", "models", "route", "provider")}
+    provider = config.get("provider")
+    if isinstance(provider, dict):
+        rest = {k: copy.deepcopy(v) for k, v in provider.items() if k not in _MANAGED_PROVIDER_KEYS}
+        if rest:
+            out["provider"] = rest
+    elif "provider" in config:
+        out["provider"] = copy.deepcopy(provider)
+    return out
+
+
+def passthrough_digest(config: dict[str, Any]) -> str:
+    """Names the passthrough of ``config``, to tell whether it changed since the operator looked at it."""
+    raw = json.dumps(passthrough_view(config), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 # Keys whose storage OpenRouter does not document, so a write may come back without them.
@@ -886,6 +915,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
     except FetchError as exc:
         return _blocked(plan, f"Could not read the preset from OpenRouter: {exc}")
     plan.current = remote
+    if remote is not None and remote.readable:
+        plan.passthrough = passthrough_view(remote.config)
     if remote is not None and remote.status == "archived":
         return _blocked(
             plan,
@@ -1028,6 +1059,7 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
 
     ids = [c.model_id for c in plan.picks]
     plan.config = build_config(base_config, ids, [p["tag"] for p in plan.providers], cfg.route, cfg.sort)
+    plan.passthrough = passthrough_view(plan.config)
     plan.url = f"{inputs.base_url}/presets/{quote(cfg.slug, safe='')}/chat/completions"
     plan.body = {**plan.config, "messages": PLACEHOLDER_MESSAGES}
     plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None)

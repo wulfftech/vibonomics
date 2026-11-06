@@ -30,6 +30,8 @@ from vibonomics.presets import (
     merge_endpoints,
     owned_view,
     owner_fingerprint,
+    passthrough_digest,
+    passthrough_view,
     rank,
     select_models,
     unsaved_keys,
@@ -2043,6 +2045,111 @@ def test_a_changed_sort_is_written_even_while_the_route_is_one_openrouter_does_n
         _remote(router, SLUG, live, version=2)
         plan = _plan(client)
     assert plan["action"] == "update" and "provider.sort" in {c["path"] for c in plan["changes"]}
+
+
+# ---- the passthrough: what the app sends back as it found it -------------------------------------------------------
+
+
+def test_the_passthrough_is_every_key_the_app_does_not_decide_with_the_provider_block_opened_up():
+    config = {
+        "model": "a",
+        "models": ["a", "b"],
+        "route": "sort",
+        "tools": [{"type": "openrouter:web_search"}],
+        "reasoning": {"enabled": True},
+        "provider": {
+            "only": ["x"],
+            "order": ["x"],
+            "sort": "price",
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "data_collection": "deny",
+            "allow_fallbacks": False,
+        },
+    }
+
+    assert passthrough_view(config) == {
+        "tools": [{"type": "openrouter:web_search"}],
+        "reasoning": {"enabled": True},
+        "provider": {
+            "quantizations": ["fp8"],
+            "ignore": ["slow"],
+            "data_collection": "deny",
+            "allow_fallbacks": False,
+        },
+    }
+    for managed in ("model", "models", "route"):
+        assert managed not in passthrough_view(config)
+    for managed in ("only", "order", "sort"):
+        assert managed not in passthrough_view(config)["provider"]
+
+
+def test_a_provider_block_holding_only_what_the_app_decides_leaves_no_provider_in_the_passthrough():
+    assert passthrough_view({"model": "a", "provider": {"only": ["x"], "order": ["x"], "sort": "price"}}) == {}
+    assert passthrough_view({"model": "a", "provider": {}}) == {}
+    assert passthrough_view({"model": "a"}) == {}
+    assert passthrough_view({}) == {}
+    # something that is not a block is not the app's to hide
+    assert passthrough_view({"model": "a", "provider": "odd"}) == {"provider": "odd"}
+
+
+def test_the_passthrough_is_a_copy_and_its_digest_ignores_the_order_of_keys_and_the_managed_ones():
+    config = {"model": "a", "tools": [1], "provider": {"only": ["x"], "quantizations": ["fp8"]}}
+    view = passthrough_view(config)
+    view["tools"].append(2)
+    assert config["tools"] == [1]
+    same = {"provider": {"quantizations": ["fp8"], "only": ["y", "z"]}, "tools": [1], "model": "other"}
+    assert passthrough_digest(config) == passthrough_digest(same)
+    assert passthrough_digest(config) != passthrough_digest({**config, "tools": [1, 2]})
+    assert passthrough_digest(config) != passthrough_digest({**config, "provider": {"quantizations": ["fp4"]}})
+
+
+def test_a_plan_shows_the_passthrough_it_will_send_back_and_the_keys_it_manages(client):
+    _own_as(KEY)
+    live = {
+        "model": "acme/best",
+        "tools": [{"type": "openrouter:web_search"}],
+        "provider": {"quantizations": ["fp8", "bf16"], "data_collection": "deny", "ignore": ["slow"]},
+    }
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=3)
+        plan = _plan(client)
+
+    assert plan["passthrough"] == {
+        "tools": [{"type": "openrouter:web_search"}],
+        "provider": {"quantizations": ["fp8", "bf16"], "data_collection": "deny", "ignore": ["slow"]},
+    }
+    assert plan["managed_keys"] == ["model", "models", "route", "provider.only", "provider.order", "provider.sort"]
+    # it is what the request carries, apart from the keys the app decides
+    body = {key: value for key, value in plan["request"]["body"].items() if key != "messages"}
+    assert passthrough_view(body) == plan["passthrough"]
+
+
+def test_a_new_preset_shows_the_passthrough_it_takes_from_its_template(client):
+    _settings(template_slug="my-tools")
+    template = {
+        "model": "other/model",
+        "tools": [{"type": "openrouter:datetime"}],
+        "provider": {"quantizations": ["fp8"]},
+    }
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _remote(router, "my-tools", template, version=3)
+        plan = _plan(client)
+
+    assert plan["passthrough"] == {"tools": [{"type": "openrouter:datetime"}], "provider": {"quantizations": ["fp8"]}}
+
+
+def test_a_plan_that_is_blocked_still_shows_what_the_live_preset_holds(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best", "tools": [1]}, version=3, system_prompt="Be brief.")
+        plan = _plan(client)
+    assert plan["action"] == "blocked" and plan["passthrough"] == {"tools": [1]}
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        _settings(min_score=99)
+        assert _plan(client)["passthrough"] == {}
 
 
 def test_the_plan_carries_the_id_and_the_workspace_the_account_names_for_the_preset(client):
