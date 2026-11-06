@@ -6,6 +6,11 @@ provider that cannot serve it. So a plan, and the apply that writes it, read the
 model in the config (``GET /models/<id>/endpoints``, no key needed) and say what is wrong. An error refuses the write;
 a warning is shown and lets it through. A listing that cannot be read is a warning: OpenRouter being slow is no proof
 that the preset is wrong, and it must not stop a write that is otherwise fine.
+
+The preset's own provider filters (quantizations, ignore) and the parameters its owner sets are checked too: a model
+none of whose live endpoints passes the filters is never served, and a pinned endpoint that lacks a parameter fails the
+write only when ``provider.require_parameters`` would make OpenRouter refuse it. A preset of free models only is warned
+about the shared daily request cap.
 """
 
 from __future__ import annotations

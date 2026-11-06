@@ -31,7 +31,9 @@ class CatalogPresetOut(BaseModel):
     models: list[str] = Field(description="The `model` and the `models` fallbacks, in order, once each")
     providers: list[str] = Field(description="`provider.only`")
     config: dict[str, Any] = Field(description="The live version's config as OpenRouter holds it")
-    has_system_prompt: bool = Field(description="A preset with a system prompt is never written")
+    has_system_prompt: bool = Field(
+        description="The live version has a system prompt. A write sends it back unless the preset's owner manages it"
+    )
     passthrough_keys: list[str] = Field(
         description="Config keys Vibonomics has no setting for and would send back as they are, "
         "such as `temperature` or `provider.data_collection`"

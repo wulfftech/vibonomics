@@ -67,7 +67,8 @@ tried.
   days, so Vibonomics keeps each day it sees.
 - **Best-value presets.** Optionally keeps OpenRouter presets (up to twenty, each with its own settings) pointed
   at the models that give the most score per dollar today (up to three, the rest as fallbacks), on their cheapest
-  providers. Can take over a preset you made by hand. Preview shows the exact request first. Off by default.
+  providers. Can take over a preset you made by hand, and hold its temperature, token cap, penalties,
+  quantization, ignored providers and system prompt. Preview shows the exact request first. Off by default.
 
 ### A closer look
 
@@ -398,22 +399,58 @@ second row of tabs under Providers, where settings that belong to one provider l
   Vibonomics's: on `fallback` it takes them off a preset that has them. OpenRouter's docs do not describe
   `route`, so it may not keep it. After every write Vibonomics reads the preset back and the page names any
   key OpenRouter dropped, `route` included. A key that was dropped is not sent again on each run.
-- **What it leaves alone.** Everything else in the preset: tools, reasoning, other provider filters. Each
-  write to OpenRouter is the whole config, so Vibonomics reads the preset first and sends back what it found.
-  An edit you make in the OpenRouter UI survives. A new preset can start from one of yours, picked from the
-  list of presets on your account (read only).
+- **What it leaves alone.** Everything else in the preset: tools, reasoning, other provider filters, and any
+  guardrail you leave unmanaged (next bullet). Each write to OpenRouter is the whole config, so Vibonomics
+  reads the preset first and sends back what it found. An edit you make in the OpenRouter UI survives. A new
+  preset can start from one of yours, picked from the list of presets on your account (read only).
+- **Guardrails.** Per preset, each of these is in one of three states: **leave as it is**, **set**, or
+  **remove**. Left alone, whatever is on the preset stays and is shown as passthrough. Set, Vibonomics writes
+  it. Removed, Vibonomics takes it off. One key can't be both.
+
+  | Guardrail | Range | Where OpenRouter keeps it |
+  |---|---|---|
+  | Temperature | 0 to 2 | `temperature` |
+  | Token cap | 1 to 2,000,000 | `max_tokens` |
+  | Repetition penalty | above 0 to 2 | `repetition_penalty` |
+  | Frequency / presence penalty | -2 to 2 | `frequency_penalty`, `presence_penalty` |
+  | Top P | above 0 to 1 | `top_p` |
+  | Quantizations | int4 int8 fp4 mxfp4 nvfp4 fp6 fp8 mxfp8 fp16 bf16 fp32 unknown | `provider.quantizations` |
+  | Ignored providers | up to 50 slugs | `provider.ignore` |
+  | Require parameters | on / off | `provider.require_parameters` |
+  | System prompt | up to 20,000 characters | the system message of the write |
+
+  The token cap is sent as `max_tokens`: OpenRouter drops `max_completion_tokens` from a preset. A quantization
+  list leaves out every endpoint whose precision OpenRouter lists as `unknown`, unless you name `unknown`
+  (OpenRouter answers 404 "No endpoints found" for a model that has none left). A client's own request
+  parameters win over the preset's, so a temperature or token cap here applies only where the client sends
+  none. Repetition penalty is the one clients rarely send.
+- **Capability.** A parameter you set only counts on an endpoint that supports it. Vibonomics pins the endpoints
+  that take every one you set and allow the token cap. If a model has none, it pins the others and warns
+  ("top_p will be ignored for ..."), since OpenRouter drops what an endpoint doesn't take. With
+  `require_parameters` on, OpenRouter refuses the request instead, so the plan is blocked and names the model
+  and the parameter. A model whose every endpoint fails your quantization or ignore list is left out of the
+  ranking with a warning. The preview shows a table of which pinned endpoint takes which parameter.
+- **System prompt.** OpenRouter takes a preset's system prompt from the system message of each write, and a
+  write with none sets it to null. So every write carries the prompt that should be in force: the one you set,
+  none if you remove it, otherwise the live one, sent back as it is. A preset with a system prompt is no longer
+  refused. When a write replaces or removes the live prompt, Vibonomics first keeps the old text (up to 20,000
+  characters) and the preview shows when. After the write it checks the stored prompt against what it sent
+  and names `system_prompt` among the keys OpenRouter did not keep if they differ.
 - **What it will write.** A slug it created itself, or one you adopted. It never deletes: OpenRouter's API has
   no delete, so remove one in the web UI, which archives it. An archived preset takes no new versions, so
   Vibonomics reports that instead of writing; restore it or choose another name.
 - **Adopting a preset you made by hand.** **Inspect** shows any preset on the account: its live config, its
   history, and the raw JSON of every key Vibonomics has no setting for and would send back as it found it
-  (everything but `model`, `models`, `route`, `provider.only`, `provider.order` and `provider.sort`).
-  **Adopt** is refused if the preset changed since you looked, is archived, has a system prompt, is already
-  managed, or sits under another key. Adopting writes nothing: the preset joins the list switched off, under its
-  own name, and the first update is a separate step you turn on. Taking an adopted preset out of the list hands
-  it back; Vibonomics never touches it again until you adopt it again. A scheduled run on an adopted preset
-  writes only while those other keys are still what you reviewed. If someone edits them on OpenRouter, the run
-  is recorded as blocked and writes nothing, until you preview the preset and apply it yourself.
+  (everything but `model`, `models`, `route`, `provider.only`, `provider.order` and `provider.sort`), and its
+  system prompt.
+  **Adopt** is refused if the preset changed since you looked (the prompt included), is archived, is already
+  managed, or sits under another key. A system prompt is no obstacle. Adopting writes nothing: the preset
+  joins the list switched off, under its own name, and the first update is a separate step you turn on. Taking
+  an adopted preset out of the list hands it back; Vibonomics never touches it again until you adopt it again.
+  A scheduled run on an adopted preset writes only while those other keys, and the system prompt, are still
+  what you reviewed. If someone edits them on OpenRouter, the run is recorded as blocked and writes nothing,
+  until you preview the preset and apply it yourself. Changing which guardrails you manage changes what counts
+  as reviewed, so the next scheduled run waits for an apply by hand. Saving with writing on does that.
 - **Preview first.** **Preview** shows what the next update would write: it reads the preset from OpenRouter,
   ranks the models and shows the live version number, the version history, what changes and the providers.
   Previewing writes nothing; the changes are sent by **Apply**, by Save with writing switched on, or by the
@@ -429,7 +466,13 @@ second row of tabs under Providers, where settings that belong to one provider l
   is refused, nothing is sent, and the run is recorded as blocked with the reason. A provider reporting a bad
   status or under 50% uptime, a price more than 20% off what the plan used, and a model that expires within a
   week are warnings, shown and not blocking. So is a listing OpenRouter does not answer in time. The check runs
-  on a preset that is already up to date too, so the preview shows the health of what is written.
+  on a preset that is already up to date too, so the preview shows the health of what is written. It also
+  reads your guardrails: a model none of whose live endpoints passes the quantization and ignore lists is a
+  warning (this preset will never be served it), and an error if that is true of every model; a pinned endpoint
+  that lacks a parameter you set is an error with `require_parameters` on and a warning without it.
+- **Free models.** Free models share an account-wide daily request cap (1000 a day with credits, 50 without).
+  A preset whose models are all free warns about it, in the preview and in the live check. When the cap is
+  spent, requests to that preset fail until it resets at 00:00 UTC.
 - **On a schedule.** A separate switch updates a preset every N hours (as little as 0.5, which is every
   thirty minutes) with no one watching, each on its own timer. Off by default, and it needs the write switch
   too. After a restart, any preset that is overdue runs once.
@@ -437,9 +480,7 @@ second row of tabs under Providers, where settings that belong to one provider l
   it plans from what was just saved and applies that plan, so a change reaches OpenRouter without a second
   step. If the saved settings leave the preset as it is, nothing is sent and the page says so.
 
-A preset with a system prompt cannot be updated: the API takes no system prompt, so a new version would
-drop it. Vibonomics reports that instead of writing. The preset calls use your ordinary OpenRouter API key,
-not the management key.
+The preset calls use your ordinary OpenRouter API key, not the management key.
 
 **Preset catalogue.** Vibonomics keeps a local copy of every preset on your OpenRouter account, up to 100,
 archived ones included: the models, the providers, the live version and the config keys it has no setting for.

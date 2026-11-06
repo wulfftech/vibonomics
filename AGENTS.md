@@ -80,6 +80,31 @@ docker compose logs -f vibonomics
   match (not one with no endpoint data). They narrow the search and never write `provider.ignore`; the plan
   reports `excluded`. `PresetSettings.prefer_own_tests` (None follows `scoring.prefer_own_tests`) is resolved by
   `own_tests_preferred()`, which `rank` hands to `compute_scores` and the plan reports as `own_tests_preferred`.
+  **Guardrails** (`PresetSettings.guardrails: PresetGuardrails`): temperature, `max_tokens` (never
+  `max_completion_tokens`, which OpenRouter drops from a preset), the three penalties, `top_p`, `quantizations`,
+  `ignore`, `require_parameters` and `system_prompt`. A key is unset (not managed: the live value stays and is in
+  the passthrough), a value (written) or in `clear` (taken off); both at once is refused. A guardrail key is owned
+  exactly when it is set or cleared, and `owned_view`, `diff_config`, `unsaved_keys` (which also names a cleared
+  key still on the preset), `passthrough_view` and `passthrough_digest` follow that. A write is the whole config
+  and OpenRouter takes the system prompt from the system message of the write (none nulls it), so every write
+  carries `prompt_in_force()`: the managed text, none when cleared, else the live prompt resent. The prompt is a
+  pseudo-key in the owned view, in the diff (as text), in the plan digest and in the passthrough digest of an
+  adopted preset (so an edit made on OpenRouter blocks an unattended run); there is no refusal for a preset that
+  has one, and adopt no longer blocks on it. Before a write that replaces or removes the live prompt the old text
+  goes to `preset_state.system_backups[slug]` (`text` capped at 20,000, `version`, `at`); the read-back compares
+  `designated_version.system_prompt` with what was sent and reports `system_prompt` among the unsaved keys. The
+  plan pins capability-aware: per pick `choose_endpoints` gets the set numeric parameters (`require_params`) and
+  the cap; with none left it falls back to the endpoints without them and warns, or, when the plan's
+  `provider.require_parameters` is true, blocks (`_pin_for`). Endpoint filters read the config the plan writes
+  (`apply_guardrails`), not the live one, and an endpoint with no listed precision is `unknown`, which a
+  quantization list excludes. `rank` leaves out a model none of whose endpoints pass the managed quantization and
+  ignore lists (`Excluded.unserved`). `validate_live` takes the same requirements: an unservable model is a
+  warning, an error when every model is; a pinned endpoint lacking a parameter is an error with
+  `require_parameters` and a warning without. A plan of free models only warns about the daily cap
+  (`FREE_TIER_WARNING`, also a `free` live check). The plan reports `guardrails`, `system_prompt`,
+  `capabilities` and `system_backup_at`; inspect reports the live `system_prompt`. Changing which guardrails are
+  managed changes the reviewed passthrough digest, so an adopted preset's next unattended run is blocked until a
+  manual apply.
   A model already in the preset is favoured by the switch margin (`select_models`), so near
   ties do not rewrite it daily. The dry run and the apply build the plan with the same function, and apply takes
   the plan's digest and refuses a plan that has changed. `plan` may be given unsaved settings to preview
@@ -92,7 +117,7 @@ docker compose logs -f vibonomics
   a warning or a listing that cannot be read never blocks, and the adapter stores `params`, `max_completion_tokens`
   and `status` per endpoint for `choose_endpoints(require_params=, max_tokens=)`.
   **Adopting** a preset made by hand: `inspect` reads any preset on the account (config, passthrough, blockers,
-  a digest of slug, version and config); `adopt` refuses a changed digest, an archived preset, a system prompt, a
+  a digest of slug, version, config and system prompt); `adopt` refuses a changed digest, an archived preset, a
   preset already managed or recorded under another key, and otherwise records `owners[slug].adopted`, puts the
   slug in `owned`, stores `reviewed[slug]` (a digest of the passthrough the owner was shown) and appends an item
   with `adopted: true`, switched off, in one transaction. `adopted` in the settings grants nothing without that

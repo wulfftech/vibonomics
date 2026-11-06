@@ -11,6 +11,10 @@ What this module touches, and what it leaves alone:
   Everything else in the preset (tools, reasoning, caching, other provider filters: the passthrough) is read from the
   preset as it stands and sent back as it was, so an edit made in the OpenRouter UI survives. OpenRouter keeps no
   partial update: each write is the whole config.
+* The owner can also manage guardrails (``PresetGuardrails``): temperature, token cap, penalties, quantizations, ignored
+  providers, ``require_parameters`` and the system prompt. One that is set or cleared is owned like the keys above;
+  one left unset stays in the passthrough. The system prompt is not in the config but in the system message of a write,
+  and a write with none nulls it, so every write resends the prompt in force.
 * It only ever writes a slug that starts with ``vibonomics-`` and that it created itself, or one the operator adopted
   through ``adopt`` after being shown the passthrough. A preset with that name made by hand is refused, never
   overwritten. The ``template_slug`` preset is read and never written.
@@ -1330,8 +1334,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
 
     # What the endpoints are filtered by is the config this plan will write, so a guardrail the owner manages is what
     # applies (and one they took off no longer does), whatever the live preset says.
-    in_force = apply_guardrails(base_config or {}, cfg.guardrails)
-    provider_block = in_force.get("provider")
+    guarded = apply_guardrails(base_config or {}, cfg.guardrails)
+    provider_block = guarded.get("provider")
     provider_block = provider_block if isinstance(provider_block, dict) else {}
     live_provider = remote.config.get("provider") if remote else None
     live_provider = live_provider if isinstance(live_provider, dict) else {}
