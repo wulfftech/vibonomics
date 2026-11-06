@@ -125,7 +125,18 @@ export function RunTestsModal({
             <ScrollArea.Autosize mah={120}>
               <Pill.Group>
                 {targets.map((row) => (
-                  <Pill key={row.id} withRemoveButton onRemove={() => onRemove(row.id)}>
+                  <Pill
+                    key={row.id}
+                    withRemoveButton
+                    onRemove={() => onRemove(row.id)}
+                    // Mantine hides a pill's remove button from keyboards and screen readers; it is the only way to drop
+                    // one. `undefined` removes the attribute: the modal's focus trap reads aria-hidden="false" as hidden.
+                    removeButtonProps={{
+                      tabIndex: 0,
+                      'aria-hidden': undefined,
+                      'aria-label': `Remove ${row.name} · ${row.provider_name}`,
+                    }}
+                  >
                     {row.name} · {row.provider_name}
                   </Pill>
                 ))}
