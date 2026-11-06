@@ -105,12 +105,36 @@ def test_a_lookup_that_succeeded_with_no_endpoints_does_not_keep_stale_ones():
     assert _stored_extra(provider_id, "m")["endpoints"] == []
 
 
-def test_a_model_that_became_free_does_not_keep_endpoints_that_were_never_looked_up_for_it():
-    # Free models skip the endpoint lookup, so their offer has none by design, not because a lookup failed.
-    provider_id = _provider("endpoints-free")
+STEALTH = [{"provider": "Stealth", "tag": "stealth", "input": 0.0, "output": 0.0, "cache_read": None}]
+
+
+def test_a_free_model_whose_lookup_failed_keeps_the_endpoints_it_already_had():
+    # Free models are looked up like any other now, so a free offer with no "endpoints" key means the lookup failed
+    # or the setting is off, and the stealth or :free preset keeps the pin it had until the next good refresh.
+    provider_id = _provider("endpoints-free-kept")
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", is_free=True, extra={"endpoints": STEALTH})])
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", is_free=True, extra={"description": "new"})])
+    extra = _stored_extra(provider_id, "m")
+    assert extra["endpoints"] == STEALTH
+    assert extra["description"] == "new"
+
+
+def test_a_free_model_whose_lookup_answered_replaces_its_endpoints_even_with_none():
+    provider_id = _provider("endpoints-free-replaced")
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", is_free=True, extra={"endpoints": STEALTH})])
+    other = [{"provider": "AtlasCloud", "tag": "atlas-cloud/fp8", "input": 0.0, "output": 0.0, "cache_read": None}]
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", is_free=True, extra={"endpoints": other})])
+    assert _stored_extra(provider_id, "m")["endpoints"] == other
+    jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", is_free=True, extra={"endpoints": []})])
+    assert _stored_extra(provider_id, "m")["endpoints"] == []
+
+
+def test_a_model_that_became_free_keeps_its_endpoints_when_the_lookup_failed():
+    # The old carve-out dropped them for a model that turned free, though nothing had looked it up and found none.
+    provider_id = _provider("endpoints-became-free")
     jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", extra={"endpoints": ENDPOINTS})])
     jobs.persist_offers(provider_id, [ModelOffer(model_id="m", name="M", is_free=True, extra={})])
-    assert "endpoints" not in _stored_extra(provider_id, "m")
+    assert _stored_extra(provider_id, "m")["endpoints"] == ENDPOINTS
 
 
 async def test_a_provider_that_fails_while_saving_does_not_fail_the_others_or_free_the_lock_early(monkeypatch):

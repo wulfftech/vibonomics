@@ -6,13 +6,17 @@ endpoints that matter. Prices here are USD per 1M tokens; the API sends them per
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 import respx
 
 from vibonomics.catalog.modelsdev import ModelsDevCatalog
-from vibonomics.providers.base import FetchContext, ResolvedProvider
-from vibonomics.providers.openrouter import API, OpenRouterAdapter
+from vibonomics.presets import choose_endpoints
+from vibonomics.pricing import Task
+from vibonomics.providers.base import FetchContext, Price, ResolvedProvider
+from vibonomics.providers.openrouter import API, OpenRouterAdapter, pick_discounted_endpoint
 from vibonomics.settings_store import AppSettings
 
 
@@ -140,3 +144,128 @@ async def test_the_offer_says_nothing_about_endpoints_unless_the_lookup_answered
 
     answered = await offer_for(model, [])
     assert answered.extra["endpoints"] == []
+
+
+# ---- free and stealth models ------------------------------------------------------------------------------------
+# The public API lists endpoints for them too (2026-11-06): stealth/crouton-alpha has one, tag "stealth", provider
+# "Stealth", quantization "unknown"; dots-studio/dots-3-note-preview:free has one, tag "atlas-cloud/fp8", provider
+# "AtlasCloud". Both are priced "0". The preset needs them to pin `provider.only`.
+
+TASK = Task(600_000, 20_000, 0.0)
+
+
+def stealth_endpoint() -> dict:
+    return {**endpoint("Stealth", 0.0, 0.0), "quantization": "unknown"}
+
+
+def atlas_endpoint(discount: float = 0.0) -> dict:
+    return {**endpoint("AtlasCloud", 0.0, 0.0, discount=discount), "tag": "atlas-cloud/fp8"}
+
+
+async def offers_for(models: dict[str, list[dict]], *, failing: frozenset[str] = frozenset()):
+    """Run fetch_models over several listed models; returns the offers by id and the /endpoints route per id."""
+    listed = [
+        listing(mid, 0.0, 0.0) if mid.endswith(":free") or "stealth" in mid else listing(mid, 0.1, 0.4)
+        for mid in models
+    ]
+    ctx = FetchContext(catalog=ModelsDevCatalog({}), settings=AppSettings())
+    cfg = ResolvedProvider(
+        id=1, type="openrouter", name="OpenRouter", api_key=None, mgmt_key=None, base_url=None, options={}
+    )
+    with respx.mock:
+        respx.get(f"{API}/models").mock(return_value=httpx.Response(200, json={"data": listed}))
+        routes = {}
+        for mid, endpoints in models.items():
+            response = (
+                httpx.Response(500, text="down")
+                if mid in failing
+                else httpx.Response(200, json={"data": {"endpoints": endpoints}})
+            )
+            routes[mid] = respx.get(f"{API}/models/{mid}/endpoints").mock(return_value=response)
+        offers = await OpenRouterAdapter(cfg, ctx).fetch_models()
+    return {o.model_id: o for o in offers}, routes
+
+
+@pytest.mark.asyncio
+async def test_a_stealth_model_gets_its_endpoint_with_zero_prices_kept_as_zero():
+    offer = await offer_for(listing("stealth/crouton-alpha", 0.0, 0.0), [stealth_endpoint()])
+    assert offer.is_free
+    (ep,) = offer.extra["endpoints"]
+    assert (ep["tag"], ep["provider"], ep["quantization"]) == ("stealth", "Stealth", "unknown")
+    # Zero is a price here, not a gap: choose_endpoints skips an endpoint whose input or output is None.
+    assert ep["input"] == 0.0 and ep["input"] is not None
+    assert ep["output"] == 0.0 and ep["output"] is not None
+    assert "cache_read" in ep and ep["cache_read"] is None
+    assert ep["discount"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_model_with_free_in_its_id_gets_its_endpoint_too():
+    offer = await offer_for(listing("dots-studio/dots-3-note-preview:free", 0.0, 0.0), [atlas_endpoint()])
+    (ep,) = offer.extra["endpoints"]
+    assert (ep["tag"], ep["provider"], ep["quantization"]) == ("atlas-cloud/fp8", "AtlasCloud", "fp8")
+    assert (ep["input"], ep["output"]) == (0.0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_looking_up_a_free_models_endpoints_does_not_change_its_price_or_give_it_a_discount():
+    # A zero price discounted by a percentage is still zero, and a model that is free must not come out priced.
+    offer = await offer_for(listing("dots-studio/dots-3-note-preview:free", 0.0, 0.0), [atlas_endpoint(0.3)])
+    assert offer.is_free
+    assert (offer.price.input, offer.price.output) == (0.0, 0.0)
+    assert offer.discount is None and offer.list_price is None and offer.discount_note is None
+    assert len(offer.extra["endpoints"]) == 1
+
+    # Same for a model that is free by its id while an endpoint of it is cheaper than its listed price and discounted:
+    # the lookup must not turn it into a priced model.
+    priced = {**endpoint("Paid", 0.05, 0.2, discount=0.3), "tag": "paid/fp8"}
+    offer = await offer_for(listing("vendor/odd:free", 0.1, 0.4), [priced])
+    assert offer.is_free
+    assert (offer.price.input, offer.price.output) == (0.1, 0.4)
+    assert offer.discount is None and offer.list_price is None and offer.discount_note is None
+    assert offer.extra["endpoints"][0]["input"] == 0.05  # the data is kept; only the listed price is untouched
+
+
+def test_a_zero_listed_price_has_nothing_to_discount():
+    zero = {"provider": "Free", "tag": "free", "input": 0.0, "output": 0.0, "cache_read": None, "discount": 0.3}
+    priced = {"provider": "Paid", "tag": "paid", "input": 0.2, "output": 0.8, "cache_read": None, "discount": 0.3}
+    assert pick_discounted_endpoint(Price(input=0.0, output=0.0), [zero], TASK) is None
+    assert pick_discounted_endpoint(Price(input=0.0, output=0.0), [zero, priced], TASK) is None
+    # An endpoint at no cost is not a discount off anything, on a priced model either.
+    assert pick_discounted_endpoint(Price(input=0.2, output=0.8), [zero], TASK) is None
+
+
+@pytest.mark.asyncio
+async def test_every_model_is_looked_up_once_free_ones_included_and_a_failed_free_lookup_is_counted(caplog):
+    caplog.set_level(logging.INFO, logger="vibonomics.providers.openrouter")
+    offers, routes = await offers_for(
+        {
+            "vendor/paid": [endpoint("Plain", 0.1, 0.4)],
+            "vendor/other:free": [atlas_endpoint()],
+            "stealth/crouton-alpha": [stealth_endpoint()],
+            "vendor/down:free": [],
+        },
+        failing={"vendor/down:free"},
+    )
+    assert {mid: route.call_count for mid, route in routes.items()} == {
+        "vendor/paid": 1,
+        "vendor/other:free": 1,
+        "stealth/crouton-alpha": 1,
+        "vendor/down:free": 2,  # one try and the one retry
+    }
+    assert offers["vendor/other:free"].extra["endpoints"][0]["tag"] == "atlas-cloud/fp8"
+    assert offers["stealth/crouton-alpha"].extra["endpoints"][0]["tag"] == "stealth"
+    assert "endpoints" not in offers["vendor/down:free"].extra
+    assert "1 endpoint lookups failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_stealth_endpoint_with_zero_prices_is_one_the_preset_can_pin():
+    offer = await offer_for(listing("stealth/crouton-alpha", 0.0, 0.0), [stealth_endpoint()])
+    chosen = choose_endpoints(offer.extra["endpoints"], TASK, {}, 3)
+    assert [(e["tag"], e["provider"], e["input"], e["output"], e["task_cost"]) for e in chosen] == [
+        ("stealth", "Stealth", 0.0, 0.0, 0.0)
+    ]
+    # ... and a preset that ignores or allows providers still sees it by tag, slug and name.
+    assert choose_endpoints(offer.extra["endpoints"], TASK, {"ignore": ["Stealth"]}, 3) == []
+    assert len(choose_endpoints(offer.extra["endpoints"], TASK, {}, 3, allow=["stealth"])) == 1
