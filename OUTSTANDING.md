@@ -113,9 +113,15 @@ What it showed, so a settled question is not asked again:
   `require_parameters: true` an endpoint without a requested parameter is HTTP 404 "No endpoints found that can handle
   the requested parameters"; there is no fallback to another provider of that model.
 - `stealth` is accepted as a `provider.only` entry (a real write, version 17 of the live preset).
-- **Not measured yet** (the free-model daily cap answered 429 before those calls): whether a client's own request
-  parameters override a preset's (documented as yes), and whether a client's `provider` block merges with or replaces
-  the preset's. Rerun the probe after the daily reset (00:00 UTC) to settle both. What `route: "sort"` actually does
+- **Changed since (2026-11-07):** the same write, made on 2026-11-06 with an ordinary API key, now answers HTTP 401
+  "Invalid management key" for any key that is not a management key, even for a body that fails validation. OpenRouter's
+  presets guide says the create endpoints need a read-write management key. The app now writes under the OpenRouter
+  provider's management key (see the README); whether the management key already stored on the live provider is
+  read-write has not been tried against the live account.
+- **Not measured yet** (the free-model daily cap answered 429 before those calls, and the rerun on 2026-11-07 could not
+  write at all, for the reason above): whether a client's own request parameters override a preset's (documented as
+  yes), and whether a client's `provider` block merges with or replaces the preset's. Rerun the probe with
+  `OPENROUTER_MANAGEMENT_KEY` set for the Workspace2 test workspace to settle both. What `route: "sort"` actually does
   at request time is also unmeasured; it is stored as sent.
 - Free models share an account-wide daily request cap (the response said 1000 a day with credits). The live preset's
   models are all free, so spending the cap makes requests to it fail until the reset; plans now warn about this.

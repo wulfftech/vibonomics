@@ -48,7 +48,7 @@ Level = Literal["ok", "warning", "error"]
 @dataclass
 class Check:
     level: Level
-    check: str  # listing | provider | pins | health | price | expiry | params | max_tokens | served | free
+    check: str  # listing | provider | pins | health | price | expiry | params | max_tokens | served | free | key
     model: str | None
     provider: str | None  # the provider tag the finding is about, when it is about one
     message: str

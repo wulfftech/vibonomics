@@ -119,7 +119,7 @@ A key adds the live model list, whatever balance the provider exposes, and the a
 
 | Type | Live prices without a key | Balance |
 |---|---|---|
-| OpenRouter | yes (public list, per-endpoint discounts, `:free`) | key spend and limits with a normal key; account credits need a management key |
+| OpenRouter | yes (public list, per-endpoint discounts, `:free`) | key spend and limits, and today's free-model request count against its daily cap, with a normal key; account credits need a management key |
 | OpenCode Console / Go | yes (public list; models.dev prices) | Go plan usage windows with the workspace key (rolling, weekly, monthly); Console credits are console-only |
 | Anthropic | yes (pricing page) | no prepaid balance or credit-balance API; an org Admin key reports month-to-date and 30-day API spend; a Claude Code login token adds subscription usage |
 | OpenAI | yes (pricing page) | no balance; an org Admin key reports 30-day spend |
@@ -471,8 +471,9 @@ second row of tabs under Providers, where settings that belong to one provider l
   warning (this preset will never be served it), and an error if that is true of every model; a pinned endpoint
   that lacks a parameter you set is an error with `require_parameters` on and a warning without it.
 - **Free models.** Free models are left out unless you switch on **Allow free models**. They share an
-  account-wide daily request cap (1000 a day with credits, 50 without). A preset whose models are all free
-  warns about it, in the preview and in the live check. When the cap is spent, requests to that preset fail
+  account-wide daily request cap (1000 a day with credits, 50 without), and the OpenRouter card on the main
+  page shows how much of it today's requests have used and when it resets (00:00 UTC), as of its last refresh.
+  A preset whose models are all free warns about it, in the preview and in the live check. When the cap is spent, requests to that preset fail
   until it resets at 00:00 UTC. Two choices guard against that, both only while free models are allowed:
   - **Keep a paid model as the last fallback.** When every model chosen is free, the last place goes to the
     best-value paid model that passes your filters, so OpenRouter falls through to it when the free ones fail.
@@ -489,12 +490,22 @@ second row of tabs under Providers, where settings that belong to one provider l
   it plans from what was just saved and applies that plan, so a change reaches OpenRouter without a second
   step. If the saved settings leave the preset as it is, nothing is sent and the page says so.
 
-The preset calls use your ordinary OpenRouter API key, not the management key.
+**Writing a preset needs a management key.** Since 2026-11-07 OpenRouter turns an ordinary API key away from the
+call that creates or updates a preset (HTTP 401 "Invalid management key"; their docs now say it needs a
+read-write management key). So the OpenRouter provider needs a **management key with read-write access** (the
+same field the spend history uses; create it at openrouter.ai/settings/management-keys). The write goes out
+under that key, and under it alone; reading the preset, the catalogue, the ranking and the live check use the
+API key, and requests to `@preset/<name>` are ordinary calls. Without a management key the preview says so as a
+live-check error, Apply stays off, and a scheduled run is recorded as blocked; a preset that is already up to
+date needs none. The management key is taken from the same provider row as the API key, never from another row,
+because a management key belongs to an account. The write names the workspace: the preset's own for an update,
+the API key's (read from the last balance refresh) for a new one, so the preset lands where `@preset/` requests
+look for it. If OpenRouter answers from a different workspace than the one asked for, nothing is recorded.
 
 **Preset catalogue.** Vibonomics keeps a local copy of every preset on your OpenRouter account, up to 100,
 archived ones included: the models, the providers, the live version and the config keys it has no setting for.
-It reads the account every 30 minutes, at startup and when you press Refresh, with the same API key as the
-update, and only reads. A preset's config can hold anything you put in it, so a visitor to an instance that is
+It reads the account every 30 minutes, at startup and when you press Refresh, with the API key (not the
+management key the update is written with), and only reads. A preset's config can hold anything you put in it, so a visitor to an instance that is
 open to read does not get the catalogue. If one preset can't be read, its last copy stays and the page says the
 sync was partial.
 

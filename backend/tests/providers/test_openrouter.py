@@ -321,3 +321,31 @@ async def test_a_stealth_endpoint_with_zero_prices_is_one_the_preset_can_pin():
     # ... and a preset that ignores or allows providers still sees it by tag, slug and name.
     assert choose_endpoints(offer.extra["endpoints"], TASK, {"ignore": ["Stealth"]}, 3) == []
     assert len(choose_endpoints(offer.extra["endpoints"], TASK, {}, 3, allow=["stealth"])) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_balance_keeps_the_free_model_quota_and_the_workspace_of_the_key():
+    cfg = ResolvedProvider(
+        id=1, type="openrouter", name="OpenRouter", api_key="sk-or-test-key", mgmt_key=None, base_url=None, options={}
+    )
+    quota = {"used": 120, "limit": 1000, "remaining": 880}
+    key = {
+        "label": "sk-or-v1-abc...xyz",
+        "usage": 1.5,
+        "limit": 10,
+        "limit_remaining": 8.5,
+        "is_free_tier": False,
+        "free_model_daily_requests": quota,
+        "workspace_id": "e9154937-3809-48ce-a4f5-390955c8453c",
+        "creator_user_id": "user_secret_id",
+    }
+    with respx.mock:
+        respx.get(f"{API}/key").mock(return_value=httpx.Response(200, json={"data": key}))
+        respx.get(f"{API}/credits").mock(return_value=httpx.Response(401, json={"error": "management key needed"}))
+        info = await OpenRouterAdapter(
+            cfg, FetchContext(catalog=ModelsDevCatalog({}), settings=AppSettings())
+        ).fetch_balance()
+    assert info.status == "ok"
+    assert info.details["key"]["free_model_daily_requests"] == quota
+    assert info.details["key"]["workspace_id"] == "e9154937-3809-48ce-a4f5-390955c8453c"
+    assert "creator_user_id" not in info.details["key"], "only the listed fields are kept"

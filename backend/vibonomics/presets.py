@@ -35,11 +35,12 @@ import hashlib
 import json
 import logging
 import math
+import re
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -48,8 +49,8 @@ from . import events
 from .db import session_scope
 from .http import FetchError, get_json, public_url, request, scrub_secrets
 from .jobs import failure_text
-from .orm import Model, ProviderConfig, Setting, utcnow
-from .preset_validation import FREE_TIER_WARNING, Validation, cap_below, unsupported, validate_live
+from .orm import Balance, Model, ProviderConfig, Setting, utcnow
+from .preset_validation import FREE_TIER_WARNING, Check, Validation, cap_below, unsupported, validate_live
 from .pricing import Task, task_cost, value_of
 from .provider_service import resolve
 from .providers.openrouter import OpenRouterAdapter
@@ -68,6 +69,10 @@ from .settings_store import (
 log = logging.getLogger(__name__)
 
 STATE_KEY = "preset_state"
+NEEDS_WRITE_KEY = (
+    "Writing a preset needs an OpenRouter management key with read-write access, and the OpenRouter provider has "
+    "none. OpenRouter turns an ordinary API key away when a preset is written. Add one under Settings, Providers."
+)
 # The create endpoint insists on `messages` and then ignores them: only fields that overlap the preset config are kept.
 PLACEHOLDER_MESSAGES = [{"role": "user", "content": "Vibonomics preset update"}]
 RUNNERS_UP = 5
@@ -225,6 +230,11 @@ class Inputs:
     draft: bool = False  # the settings are unsaved ones, offered for a preview
     ignored_base: str | None = None  # a Base URL override on the provider row, which the preset calls do not use
     excluded: Excluded = field(default_factory=Excluded)
+    # OpenRouter refuses a preset write made with an ordinary API key, so a write goes out under the management key of
+    # the same provider row (reads and the ranking still use ``api_key``). None when the row has none.
+    write_key: str | None = None
+    # The workspace the API key belongs to, as the last balance refresh recorded it; None until one has.
+    key_workspace: str | None = None
 
 
 # ---- blocklists ----------------------------------------------------------------------------------------------
@@ -1113,6 +1123,37 @@ def _access(resolved: list[Any]) -> tuple[str, str | None, str | None]:
     return base, keyed.api_key if keyed else None, ignored
 
 
+def _write_access(s: Session, providers: list[ProviderConfig], resolved: list[Any]) -> tuple[str | None, str | None]:
+    """The management key of the provider row whose API key is used, and the workspace that API key belongs to.
+
+    The same row, never another: a management key of a different OpenRouter account would write the preset where the
+    API key cannot see it. The workspace is what the last balance refresh read from ``GET /key``.
+    """
+    for row, access in zip(providers, resolved, strict=True):
+        if not access.api_key:
+            continue
+        details = s.scalar(select(Balance.details).where(Balance.provider_config_id == row.id))
+        key = details.get("key") if isinstance(details, dict) else None
+        workspace = key.get("workspace_id") if isinstance(key, dict) else None
+        return access.mgmt_key or None, workspace if isinstance(workspace, str) and workspace else None
+    return None, None
+
+
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def write_workspace(remote: Remote | None, key_workspace: str | None) -> str | None:
+    """The workspace a write should name: the preset's own, when OpenRouter named it by id, else the API key's.
+
+    Without it OpenRouter uses the management key's workspace, or the account's default one, which is not always the
+    workspace the API key (and so a ``@preset/`` request) looks in.
+    """
+    for candidate in (remote.workspace if remote is not None else None, key_workspace):
+        if isinstance(candidate, str) and _UUID.match(candidate):
+            return candidate
+    return None
+
+
 def _openrouter_providers(s: Session) -> list[ProviderConfig]:
     return list(
         s.scalars(
@@ -1145,6 +1186,7 @@ def load_inputs(slug: str, draft: PresetSettings | None = None) -> Inputs:
         excluded = Excluded()
         candidates, task, profile_id = rank(s, settings, [p.id for p in providers], preset, excluded)
         state = _load_state(s)
+        write_key, key_workspace = _write_access(s, providers, resolved)
     base, key, ignored = _access(resolved)
     return Inputs(
         settings,
@@ -1158,6 +1200,8 @@ def load_inputs(slug: str, draft: PresetSettings | None = None) -> Inputs:
         draft=draft is not None,
         ignored_base=ignored,
         excluded=excluded,
+        write_key=write_key,
+        key_workspace=key_workspace,
     )
 
 
@@ -1451,6 +1495,8 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
     )
     plan.passthrough = passthrough_view(plan.config, cfg.guardrails)
     plan.url = f"{inputs.base_url}/presets/{quote(cfg.slug, safe='')}/chat/completions"
+    if workspace := write_workspace(remote, inputs.key_workspace):
+        plan.url += "?" + urlencode({"workspace_id": workspace})
     plan.body = write_body(plan.config, plan.prompt)
     plan.digest = digest_of(cfg.slug, plan.config, plan.fingerprint, remote.version if remote else None, plan.prompt)
     plan.changes = diff_config(remote.config if remote else None, plan.config, plan.live_prompt, plan.prompt)
@@ -1542,6 +1588,11 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
         ignore=[s for s in block.get("ignore") or [] if isinstance(s, str)],
         require_parameters=block.get("require_parameters") is True,
     )
+    if plan.action in ("create", "update") and not inputs.write_key:
+        # A refusal in the plan, not at the write: the preview says it, Apply stays off, and a scheduled run is
+        # recorded as blocked instead of failing against OpenRouter every time.
+        plan.validation.items.insert(0, Check("error", "key", None, None, NEEDS_WRITE_KEY))
+        plan.validation.ok = False
     return plan
 
 
@@ -1852,7 +1903,8 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
             # The write replaces the live system prompt, and the version it held stays only in OpenRouter's history,
             # which no call here can read it from. Kept first, so the owner can get the text back whatever follows.
             await asyncio.to_thread(_update_state, {"system_backups": {cfg.slug: backup}})
-        headers = {**_auth(inputs.api_key), "Content-Type": "application/json"}
+        assert inputs.write_key is not None  # the live check refuses a write without one, above
+        headers = {**_auth(inputs.write_key), "Content-Type": "application/json"}
         try:
             resp = await request(
                 "POST",
@@ -1876,9 +1928,27 @@ async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Appl
             final = isinstance(exc, FetchError) and exc.status is not None and exc.status < 500
             if not final and (recovered := await _read_back(plan, inputs, trigger)) is not None:
                 return plan, recovered
-            message = scrub_secrets(f"OpenRouter did not take the update: {exc}", headers)
+            secrets = (headers, _auth(inputs.api_key))  # an error body may echo either key
+            message = scrub_secrets(f"OpenRouter did not take the update: {exc}", *secrets)
+            if isinstance(exc, FetchError) and exc.status in (401, 403):
+                message = scrub_secrets(
+                    f"OpenRouter refused the management key (HTTP {exc.status}). A preset can be written only with a "
+                    f"read-write management key, not with an ordinary API key or a read-only management key. {exc}",
+                    *secrets,
+                )
             await asyncio.to_thread(_record_run, cfg.slug, "failed", message, trigger)
             raise PresetWriteError(message) from exc
+        landed = _workspace(data)
+        wanted = write_workspace(plan.current, inputs.key_workspace)
+        if wanted and landed and _UUID.match(landed) and landed.lower() != wanted.lower():
+            # Not claimed: the API key could not see this preset, and every later plan would write it again.
+            message = (
+                f"OpenRouter wrote {cfg.slug} to workspace {landed}, but the API key's workspace is {wanted}. The "
+                "management key probably belongs to another workspace or account than the API key. Nothing was "
+                "recorded; the stray version has to be archived in the OpenRouter web UI."
+            )
+            await asyncio.to_thread(_record_run, cfg.slug, "failed", message, trigger)
+            raise PresetWriteError(message)
         ident = _stable_id(data)
         if plan.action == "create":
             ident = await _identity(inputs, cfg.slug, ident)

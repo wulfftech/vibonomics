@@ -16,7 +16,7 @@ from vibonomics import crypto
 from vibonomics.app import create_app
 from vibonomics.config import get_config
 from vibonomics.db import init_db, session_scope
-from vibonomics.orm import BenchmarkScore, EvalResult, EvalRun, Model, ProviderConfig, Setting
+from vibonomics.orm import Balance, BenchmarkScore, EvalResult, EvalRun, Model, ProviderConfig, Setting
 from vibonomics.preset_validation import FREE_TIER_WARNING
 from vibonomics.presets import (
     PLACEHOLDER_MESSAGES,
@@ -51,6 +51,7 @@ from vibonomics.settings_store import (
 BASE = "https://openrouter.ai/api/v1"
 SLUG = "vibonomics-best-value"
 KEY = "sk-or-test-key-1234567890"
+MGMT = "sk-or-mgmt-test-key-0987654321"  # OpenRouter takes a preset write only under a management key
 PROVIDER = "Preset test router"
 TASK = Task(600_000, 20_000, 0.8)
 
@@ -137,7 +138,13 @@ def client(monkeypatch) -> TestClient:
     init_db()
     with session_scope() as session:
         _clean(session)
-        provider = ProviderConfig(type="openrouter", name=PROVIDER, enabled=True, api_key_enc=crypto.encrypt(KEY))
+        provider = ProviderConfig(
+            type="openrouter",
+            name=PROVIDER,
+            enabled=True,
+            api_key_enc=crypto.encrypt(KEY),
+            mgmt_key_enc=crypto.encrypt(MGMT),
+        )
         session.add(provider)
         session.flush()
         for model_id, (price_in, price_out, score, extra) in MODELS.items():
@@ -196,7 +203,7 @@ def _remote(router: respx.Router, slug: str, config: dict[str, Any] | None, **kw
 def _plan(client: TestClient, slug: str = SLUG) -> dict[str, Any]:
     response = client.post("/api/presets/plan", json={"slug": slug})
     assert response.status_code == 200, response.text
-    assert KEY not in response.text
+    assert KEY not in response.text and MGMT not in response.text
     return response.json()
 
 
@@ -614,13 +621,15 @@ def test_apply_writes_exactly_the_reviewed_plan_and_the_slug_becomes_ours(client
         post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
         plan = _plan(client)
         response = _apply(client, plan)
+        reads = {c.request.headers["authorization"] for c in router.calls if c.request.method == "GET"}
     assert response.status_code == 200, response.text
-    assert KEY not in response.text
+    assert KEY not in response.text and MGMT not in response.text
     body = response.json()
     assert body["applied"] is True and body["version"] == 1 and body["unsaved"] == []
     assert post.call_count == 1
     request = post.calls[0].request
-    assert request.headers["authorization"] == f"Bearer {KEY}"
+    assert request.headers["authorization"] == f"Bearer {MGMT}", "a preset is written under the management key"
+    assert reads == {f"Bearer {KEY}"}, "everything else is read under the ordinary API key"
     assert json.loads(request.content) == plan["request"]["body"]
     assert client.get("/api/presets/state").json()["owned"] == [SLUG]
     state = _slug_state(client)
@@ -1676,7 +1685,7 @@ def test_a_base_url_override_on_the_provider_row_never_receives_the_key(client):
         assert client.post("/api/presets/list").status_code == 200
         assert gateway.call_count == 0
         assert {call.request.url.host for call in router.calls} == {"openrouter.ai"}
-        assert write.call_count == 1 and write.calls[0].request.headers["authorization"] == f"Bearer {KEY}"
+        assert write.call_count == 1 and write.calls[0].request.headers["authorization"] == f"Bearer {MGMT}"
     assert plan["request"]["url"].startswith(BASE)
     assert any("Base URL" in w and "gateway.example.net" in w for w in plan["warnings"])
 
@@ -4550,3 +4559,154 @@ def test_inspect_gives_the_live_system_prompt_in_full_and_nothing_when_there_is_
     with respx.mock(assert_all_called=False) as router:
         _remote(router, HAND, HAND_CONFIG, version=3, system_prompt="z" * 25_000)
         assert len(_inspect(client).json()["system_prompt"]) == 20_000
+
+
+# ---- a preset is written under a management key -------------------------------------------------------------------
+
+WORKSPACE = "e9154937-3809-48ce-a4f5-390955c8453c"
+OTHER_WORKSPACE = "750e8400-e29b-41d4-a716-446655440002"
+
+
+def _no_management_key() -> None:
+    with session_scope() as session:
+        session.query(ProviderConfig).filter_by(type="openrouter").update({"mgmt_key_enc": None})
+
+
+def _key_workspace(workspace: str | None) -> None:
+    """What the last balance refresh recorded of the API key's workspace."""
+    with session_scope() as session:
+        provider = session.scalars(select(ProviderConfig).where(ProviderConfig.type == "openrouter")).one()
+        details = {"key": {"workspace_id": workspace}} if workspace else {}
+        session.merge(Balance(provider_config_id=provider.id, status="ok", details=details))
+
+
+def _refused(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(401, json={"error": {"message": "Invalid management key", "code": 401}})
+
+
+def test_without_a_management_key_the_plan_says_so_and_nothing_is_sent(client):
+    _no_management_key()
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["action"] == "create" and plan["valid"] is False
+        keyed = [c for c in plan["validation"] if c["check"] == "key"]
+        assert [c["level"] for c in keyed] == ["error"]
+        assert "management key" in keyed[0]["message"] and "Settings, Providers" in keyed[0]["message"]
+        response = _apply(client, plan)
+        assert response.status_code == 409 and "management key" in response.json()["detail"]
+        assert post.call_count == 0
+    assert _slug_state(client)["last_status"] == "blocked"
+
+
+def test_a_preset_that_is_already_up_to_date_needs_no_management_key(client):
+    _own_as(KEY)
+    _no_management_key()
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, LIVE_DESIRED, version=2)
+        plan = _plan(client)
+    assert plan["action"] == "unchanged" and plan["valid"] is True
+    assert not [c for c in plan["validation"] if c["check"] == "key"]
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_without_a_management_key_is_recorded_as_blocked(client):
+    from vibonomics import presets as engine
+
+    _no_management_key()
+    _settings(auto_apply=True)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        await engine.sync(SLUG, "schedule")
+        assert post.call_count == 0
+    last = _state()["last"][SLUG]
+    assert last["status"] == "blocked" and "management key" in last["message"]
+
+
+def test_the_management_key_of_another_provider_row_is_never_used(client):
+    # A management key belongs to an account. Only the row whose API key is used may lend its own.
+    _no_management_key()
+    with session_scope() as session:
+        session.add(
+            ProviderConfig(
+                type="openrouter", name="Elsewhere", enabled=True, mgmt_key_enc=crypto.encrypt("sk-or-other-mgmt-key-1")
+            )
+        )
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["valid"] is False and _apply(client, plan).status_code == 409
+        assert post.call_count == 0
+
+
+def test_a_refused_management_key_is_explained_and_neither_key_is_shown(client):
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            return_value=httpx.Response(401, json={"error": {"message": f"Invalid management key {MGMT} {KEY}"}})
+        )
+        plan = _plan(client)
+        response = _apply(client, plan)
+        assert post.call_count == 1
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "read-write management key" in detail and "HTTP 401" in detail
+    assert KEY not in response.text and MGMT not in response.text
+    state = _slug_state(client)
+    assert state["last_status"] == "failed" and "read-write management key" in state["last_message"]
+    assert client.get("/api/presets/state").json()["owned"] == []
+
+
+def test_an_existing_preset_is_written_in_its_own_workspace(client):
+    _own_as(KEY)
+    _settings(max_models=2)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/old"}, version=2, workspace_id=WORKSPACE)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["action"] == "update"
+        assert plan["request"]["url"] == f"{BASE}/presets/{SLUG}/chat/completions?workspace_id={WORKSPACE}"
+        assert _apply(client, plan).status_code == 200
+        sent = post.calls[0].request.url
+        assert sent.params["workspace_id"] == WORKSPACE and sent.path.endswith("/chat/completions")
+
+
+def test_a_new_preset_is_written_in_the_workspace_of_the_api_key(client):
+    _key_workspace(WORKSPACE)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_echo)
+        plan = _plan(client)
+        assert plan["request"]["url"].endswith(f"?workspace_id={WORKSPACE}")
+        assert _apply(client, plan).status_code == 200
+        assert post.calls[0].request.url.params["workspace_id"] == WORKSPACE
+
+
+@pytest.mark.parametrize("known", [None, "default", "team-a"])
+def test_no_workspace_is_named_when_none_is_known_by_id(client, known):
+    _key_workspace(known)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        plan = _plan(client)
+    assert plan["request"]["url"] == f"{BASE}/presets/{SLUG}/chat/completions"
+
+
+def test_a_write_that_lands_in_another_workspace_is_not_claimed(client):
+    _key_workspace(WORKSPACE)
+
+    def elsewhere(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        sent.pop("messages", None)
+        return httpx.Response(200, json=_preset(SLUG, sent, version=1, workspace_id=OTHER_WORKSPACE))
+
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, None)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=elsewhere)
+        response = _apply(client, _plan(client))
+    assert response.status_code == 502
+    assert OTHER_WORKSPACE in response.json()["detail"] and WORKSPACE in response.json()["detail"]
+    assert client.get("/api/presets/state").json()["owned"] == []
+    assert _slug_state(client)["last_status"] == "failed"

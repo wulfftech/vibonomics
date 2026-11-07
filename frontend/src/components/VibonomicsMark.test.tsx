@@ -28,7 +28,8 @@ describe('VibonomicsMark', () => {
     const mark = screen.getByRole('img', { name: 'Managed by Vibonomics' });
     expect(mark).toHaveAttribute('width', '20');
     await user.hover(mark);
-    // The tooltip opens after a transition, which a loaded full run can push past the default one second.
+    // The tooltip opens after a transition, which a loaded full run can push past the default one second. The test's
+    // own limit has to outlast that wait, or the run is cut off at the same five seconds.
     expect(await screen.findByRole('tooltip', {}, { timeout: 5000 })).toHaveTextContent('Managed by Vibonomics');
-  });
+  }, 20_000);
 });

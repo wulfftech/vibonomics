@@ -18,6 +18,11 @@ export function UsageWindows({ windows }: { windows: UsageWindowView[] }) {
             </Text>
           </Group>
           <Progress value={window.used_percentage} size={4} color={usageColor(window.used_percentage)} />
+          {window.detail && (
+            <Text size="xs" c="dimmed">
+              {window.detail}
+            </Text>
+          )}
           {window.limit_reached && (
             <Text size="xs" c="dimmed">
               limit reached

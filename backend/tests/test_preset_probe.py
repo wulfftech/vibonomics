@@ -296,6 +296,31 @@ def test_a_key_given_as_an_argument_is_not_accepted_or_echoed(tmp_path, capsys):
     assert fake.calls == []
 
 
+MANAGEMENT = "sk-or-v1-mgmt0123456789abcdef0123456789abcdef"
+
+
+def test_preset_writes_go_under_the_management_key_and_everything_else_under_the_api_key(tmp_path, capsys):
+    fake = Fake()
+    code, report, out = run(fake, tmp_path, env={probe.KEY_ENV: KEY, probe.WRITE_KEY_ENV: MANAGEMENT})
+    assert code == 0 and report is not None
+    writes = [c for c in fake.calls if c.method == "POST" and c.path.startswith("/presets/")]
+    others = [c for c in fake.calls if c not in writes]
+    assert writes and {c.authorization for c in writes} == {f"Bearer {MANAGEMENT}"}
+    assert others and {c.authorization for c in others if c.authorization} == {f"Bearer {KEY}"}
+    shown = capsys.readouterr()
+    assert KEY not in out.read_text(encoding="utf-8") + shown.out + shown.err
+    assert MANAGEMENT not in out.read_text(encoding="utf-8") + shown.out + shown.err
+
+
+def test_without_a_management_key_the_writes_use_the_api_key_as_before(tmp_path):
+    fake = Fake()
+    code, _report, _out = run(fake, tmp_path)
+    assert code == 0
+    writes = [c for c in fake.calls if c.method == "POST" and c.path.startswith("/presets/")]
+    assert writes and {c.authorization for c in writes} == {f"Bearer {KEY}"}
+    assert probe.WRITE_KEY_ENV == "OPENROUTER_MANAGEMENT_KEY"
+
+
 def test_refuses_a_workspace_that_holds_other_presets(tmp_path, capsys):
     fake = Fake()
     fake.presets["my-real-preset"] = {"status": "active", "versions": []}

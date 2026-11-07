@@ -2,7 +2,10 @@
 
 Run it by hand against a TEST workspace, with a key that has no spend:
 
-    OPENROUTER_API_KEY=... python scripts/preset_probe.py --out probe-report.json
+    OPENROUTER_API_KEY=... OPENROUTER_MANAGEMENT_KEY=... python scripts/preset_probe.py --out probe-report.json
+
+OpenRouter takes a preset write only under a read-write management key, so OPENROUTER_MANAGEMENT_KEY (a key of the
+same test workspace) is used for the writes; every read and every completion call uses OPENROUTER_API_KEY.
 
 It creates at most two presets (``vibonomics-probe-a`` and ``vibonomics-probe-b``, reused as new versions: the API
 has no delete) and makes at most ``--max-live-calls`` completion calls, all to free models, ``max_tokens`` 8. Every
@@ -37,6 +40,9 @@ import httpx
 
 DEFAULT_BASE = "https://openrouter.ai/api/v1"
 KEY_ENV = "OPENROUTER_API_KEY"
+# OpenRouter takes a preset write only under a read-write management key (since 2026-11-07); this one is used for the
+# writes alone. Without it every write goes out under KEY_ENV, which OpenRouter now answers with HTTP 401.
+WRITE_KEY_ENV = "OPENROUTER_MANAGEMENT_KEY"
 PROBE_PREFIX = "vibonomics-probe-"
 SLUG_A = PROBE_PREFIX + "a"
 SLUG_B = PROBE_PREFIX + "b"
@@ -744,10 +750,12 @@ class Probe:
         skip_calls: bool,
         max_live_calls: int,
         say: Callable[[str], None],
+        write_key: str | None = None,
     ) -> None:
         self.client = client
         self.base = base
         self.key = key
+        self.write_key = write_key or key
         self.skip_calls = skip_calls
         self.max_live_calls = max_live_calls
         self.say = say
@@ -791,7 +799,8 @@ class Probe:
         self._guard(method, path, body)
         headers = {"Accept": "application/json"}
         if auth:
-            headers["Authorization"] = f"Bearer {self.key}"
+            writes = method == "POST" and path.startswith("/presets/")
+            headers["Authorization"] = f"Bearer {self.write_key if writes else self.key}"
         try:
             resp = self.client.request(method, self.base + path, headers=headers, json=body, timeout=timeout)
         except httpx.HTTPError as exc:
@@ -825,7 +834,7 @@ class Probe:
             path=path,
             request_body=body,
             status=reply.status if reply else None,
-            response_excerpt=scrub(" ".join(excerpt.split()), self.key)[:EXCERPT_CHARS],
+            response_excerpt=scrub(scrub(" ".join(excerpt.split()), self.key), self.write_key)[:EXCERPT_CHARS],
             observed=observed,
         )
         self.steps.append(step)
@@ -1480,8 +1489,8 @@ def build_report(
     }
 
 
-def write_report(path: str, report: Mapping[str, Any], key: str) -> None:
-    text = scrub(json.dumps(report, indent=2, ensure_ascii=False), key)
+def write_report(path: str, report: Mapping[str, Any], key: str, write_key: str | None = None) -> None:
+    text = scrub(scrub(json.dumps(report, indent=2, ensure_ascii=False), key), write_key)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8", newline="\n") as fh:
@@ -1537,13 +1546,15 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         args = build_parser().parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else EXIT_REFUSED
-    key = ((os.environ if env is None else env).get(KEY_ENV) or "").strip()
+    source = os.environ if env is None else env
+    key = (source.get(KEY_ENV) or "").strip()
+    write_key = (source.get(WRITE_KEY_ENV) or "").strip() or None
 
     def say(text: str) -> None:
-        _print(scrub(text, key or None), sys.stdout)
+        _print(scrub(scrub(text, key or None), write_key), sys.stdout)
 
     def err(text: str) -> None:
-        _print(scrub(text, key or None), sys.stderr)
+        _print(scrub(scrub(text, key or None), write_key), sys.stderr)
 
     if not key:
         err(
@@ -1564,16 +1575,24 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         f"Probing {base} (at most {args.max_live_calls} live calls{', none: --skip-calls' if args.skip_calls else ''})."
     )
     with httpx.Client(follow_redirects=False) as client:
-        probe = Probe(client, base, key, skip_calls=args.skip_calls, max_live_calls=args.max_live_calls, say=say)
+        probe = Probe(
+            client,
+            base,
+            key,
+            skip_calls=args.skip_calls,
+            max_live_calls=args.max_live_calls,
+            say=say,
+            write_key=write_key,
+        )
         code = preflight(probe, args.i_know, err)
         if code is not None:
             if code == EXIT_FAILED:
-                write_report(args.out, build_report(probe, args, base, started, code), key)
+                write_report(args.out, build_report(probe, args, base, started, code), key, write_key)
             return code
         try:
             probe.run()
         finally:
-            write_report(args.out, build_report(probe, args, base, started, EXIT_OK), key)
+            write_report(args.out, build_report(probe, args, base, started, EXIT_OK), key, write_key)
     say("")
     presets = ", ".join(sorted(probe.created)) or "no preset"
     say(

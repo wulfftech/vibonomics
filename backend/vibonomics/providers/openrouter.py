@@ -91,7 +91,8 @@ class OpenRouterAdapter(ProviderAdapter):
         balance="management",
         balance_note="Key spend/limit works with a normal key; account credits need a management key.",
         mgmt_key_label="Management key",
-        mgmt_key_help="Optional. Needed for account-wide credits (GET /api/v1/credits).",
+        mgmt_key_help="Optional. Needed for account-wide credits and spend history, and, with read-write access, to "
+        "write presets: OpenRouter turns an ordinary API key away from that.",
         default_enabled=True,
         aider_prefix="openrouter",
     )
@@ -242,6 +243,7 @@ class OpenRouterAdapter(ProviderAdapter):
                         "is_free_tier",
                         "expires_at",
                         "free_model_daily_requests",
+                        "workspace_id",
                     )
                     if k in key
                 }

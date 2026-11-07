@@ -104,7 +104,16 @@ docker compose logs -f vibonomics
   (`FREE_TIER_WARNING`, also a `free` live check). `PresetSettings.paid_fallback` (`with_paid_fallback`, applied
   in `make_plan` right after `select_models`) swaps the last place of an all-free lineup for the best-value paid
   candidate, chosen with the switch margin so an incumbent paid model sticks; `allow_free_only=False` blocks a
-  plan that is still all free after that. Both matter only while `include_free` is on. The plan reports `guardrails`, `system_prompt`,
+  plan that is still all free after that. Both matter only while `include_free` is on. OpenRouter refuses an
+  ordinary API key on the preset write route (HTTP 401 "Invalid management key", from 2026-11-07), so `apply` writes
+  under `Inputs.write_key`: the management key of the provider row whose API key is used (never another row's,
+  `_write_access`); reads, the catalogue and the live check keep the API key. A create or update plan without one
+  gets a `key` error in its live check (Apply stays off, a scheduled run is recorded as blocked). The write URL
+  carries `?workspace_id=` from `write_workspace`: the preset's own id for an update, else the API key's, read
+  from the `workspace_id` the OpenRouter balance job keeps in `details.key`; an answer naming another workspace
+  is a failure and claims nothing. `scripts/preset_probe.py` writes under `OPENROUTER_MANAGEMENT_KEY` likewise.
+  The OpenRouter balance card shows the free-model daily cap (`details.key.free_model_daily_requests`, drawn by
+  `freeModelWindow` in `frontend/src/lib/usageWindows.ts`). The plan reports `guardrails`, `system_prompt`,
   `capabilities` and `system_backup_at`; inspect reports the live `system_prompt`. Changing which guardrails are
   managed changes the reviewed passthrough digest, so an adopted preset's next unattended run is blocked until a
   manual apply.
