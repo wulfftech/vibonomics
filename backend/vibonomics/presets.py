@@ -743,6 +743,27 @@ def select_models(
     return ordered, [c.model_id for c in ordered] != [c.model_id for c in ranked[:count]]
 
 
+def with_paid_fallback(
+    picks: list[Candidate], ranked: list[Candidate], incumbents: list[str], count: int, margin_pct: float
+) -> tuple[list[Candidate], str | None]:
+    """``picks`` with the best-value paid model last, when every pick is free; else ``picks`` as they are.
+
+    Free models share one daily request cap, and a preset of nothing else stops being served when it is spent. The
+    paid model takes the last of the ``count`` places, so the free ones keep the lead and OpenRouter falls through to
+    it only when they fail. It is chosen with the same margin as any other, so a paid model already in the preset is
+    not swapped for a near tie. The second value says why no fallback could be added, when none could.
+    """
+    if not picks or not all(c.is_free for c in picks):
+        return picks, None
+    if count < 2:
+        return picks, "A paid fallback needs the preset to list at least two models, and this one lists one."
+    paid = [c for c in ranked if not c.is_free]
+    if not paid:
+        return picks, "No paid model passes the filters, so there is nothing to put last."
+    chosen, _kept = select_models(paid, incumbents, 1, margin_pct)
+    return [*picks[: count - 1], chosen[0]], None
+
+
 def merge_endpoints(per_model: list[tuple[str, list[dict[str, Any]]]], limit: int) -> list[dict[str, Any]]:
     """One provider list for several models: each model's cheapest endpoint in turn, then its next, up to ``limit``.
 
@@ -1298,9 +1319,29 @@ async def make_plan(slug: str, inputs: Inputs | None = None, draft: PresetSettin
 
     before = current_models(remote.config) if remote else []
     plan.picks, plan.kept_current = select_models(inputs.candidates, before, cfg.max_models, cfg.switch_margin_pct)
+    why_no_fallback = None
+    if cfg.paid_fallback:
+        plan.picks, why_no_fallback = with_paid_fallback(
+            plan.picks, inputs.candidates, before, cfg.max_models, cfg.switch_margin_pct
+        )
     pick = plan.pick = plan.picks[0]
     plan.runners_up = [c for c in inputs.candidates if c not in plan.picks][:RUNNERS_UP]
     if all(c.is_free for c in plan.picks):
+        if not cfg.allow_free_only:
+            hint = why_no_fallback or (
+                ""
+                if cfg.paid_fallback
+                else "Turn on the paid fallback, or loosen the filters so that a paid model qualifies."
+            )
+            said = [
+                "Every model that qualifies is free, and this preset does not allow a lineup of free models only, so "
+                "nothing is written.",
+                hint,
+                "Free models share a daily request cap, which is what this guards against.",
+            ]
+            return _blocked(plan, " ".join(s for s in said if s))
+        if why_no_fallback:
+            plan.warnings.append(f"No paid fallback was added. {why_no_fallback}")
         plan.warnings.append(FREE_TIER_WARNING)
     if inputs.excluded.unserved:
         left = inputs.excluded.unserved

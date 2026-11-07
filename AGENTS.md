@@ -101,7 +101,10 @@ docker compose logs -f vibonomics
   ignore lists (`Excluded.unserved`). `validate_live` takes the same requirements: an unservable model is a
   warning, an error when every model is; a pinned endpoint lacking a parameter is an error with
   `require_parameters` and a warning without. A plan of free models only warns about the daily cap
-  (`FREE_TIER_WARNING`, also a `free` live check). The plan reports `guardrails`, `system_prompt`,
+  (`FREE_TIER_WARNING`, also a `free` live check). `PresetSettings.paid_fallback` (`with_paid_fallback`, applied
+  in `make_plan` right after `select_models`) swaps the last place of an all-free lineup for the best-value paid
+  candidate, chosen with the switch margin so an incumbent paid model sticks; `allow_free_only=False` blocks a
+  plan that is still all free after that. Both matter only while `include_free` is on. The plan reports `guardrails`, `system_prompt`,
   `capabilities` and `system_backup_at`; inspect reports the live `system_prompt`. Changing which guardrails are
   managed changes the reviewed passthrough digest, so an adopted preset's next unattended run is blocked until a
   manual apply.

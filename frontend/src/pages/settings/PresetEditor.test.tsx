@@ -304,6 +304,43 @@ describe('PresetEditor routing, blocklists and own tests', () => {
     await waitFor(() => expect(savedPresets()?.items[0].prefer_own_tests).toBe(saved === null ? false : null));
   });
 
+  it('keeps the two free-only choices switched off until free models are allowed, and saves them', async () => {
+    serve({ items: [item({ enabled: false, max_models: 2 })] });
+    open();
+    const user = userEvent.setup();
+    renderSection();
+    // a switch's description sits inside its label, so a label is found by how it begins
+    const fallback = await screen.findByLabelText(/^Keep a paid model as the last fallback/);
+    const freeOnly = screen.getByLabelText(/^Allow a lineup of free models only/);
+    expect(fallback).toBeDisabled();
+    expect(freeOnly).toBeDisabled();
+    expect(freeOnly).toBeChecked();
+    expect(fallback).not.toBeChecked();
+
+    await user.click(screen.getByLabelText(/^Allow free models/));
+    expect(fallback).toBeEnabled();
+    expect(freeOnly).toBeEnabled();
+    await user.click(fallback);
+    await user.click(freeOnly);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(savedPresets()?.items[0]).toMatchObject({
+        include_free: true,
+        paid_fallback: true,
+        allow_free_only: false,
+      }),
+    );
+  });
+
+  it('says a paid fallback needs a second place when the preset lists one model', async () => {
+    serve({ items: [item({ enabled: false, include_free: true, paid_fallback: true, max_models: 1 })] });
+    open();
+    renderSection();
+    await screen.findByLabelText(/^Keep a paid model as the last fallback/);
+    expect(screen.getByText(/Needs room for two or more models: raise Models listed/)).toBeInTheDocument();
+  });
+
   it('saves the global blocklists without touching a preset, and keeps a pattern once whatever its case', async () => {
     serve({ items: [item({ enabled: false })] });
     const user = userEvent.setup();

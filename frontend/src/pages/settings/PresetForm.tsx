@@ -198,10 +198,31 @@ export function PresetForm({
           />
           <Switch
             label="Allow free models"
+            description="Free models share one daily request cap across your account."
             checked={item.include_free}
             onChange={(event) => onChange({ include_free: event.currentTarget.checked })}
           />
         </Group>
+        <Stack gap="xs" pl="md">
+          <Switch
+            label="Keep a paid model as the last fallback"
+            description={
+              item.include_free && item.paid_fallback && item.max_models < 2
+                ? 'Needs room for two or more models: raise Models listed.'
+                : 'When every model chosen is free, the last place goes to the best-value paid model, so the preset keeps working once the free cap is spent.'
+            }
+            disabled={!item.include_free}
+            checked={item.paid_fallback}
+            onChange={(event) => onChange({ paid_fallback: event.currentTarget.checked })}
+          />
+          <Switch
+            label="Allow a lineup of free models only"
+            description="Off: when no paid model makes the lineup, the update is refused and nothing is written."
+            disabled={!item.include_free}
+            checked={item.allow_free_only}
+            onChange={(event) => onChange({ allow_free_only: event.currentTarget.checked })}
+          />
+        </Stack>
 
         <Title order={5}>Routing</Title>
         <SimpleGrid type="container" cols={TWO_COLUMNS} spacing="md">

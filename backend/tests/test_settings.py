@@ -214,7 +214,17 @@ def test_a_stored_value_that_no_longer_validates_falls_back_without_losing_the_r
 
 def _single_preset(**changes: object) -> dict:
     """The section as a release with one preset stored it: that preset's own fields, and nothing around them."""
-    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort", "prefer_own_tests", "guardrails"}
+    new = {
+        "blocked_models",
+        "blocked_providers",
+        "adopted",
+        "route",
+        "sort",
+        "prefer_own_tests",
+        "guardrails",
+        "paid_fallback",
+        "allow_free_only",
+    }
     return PresetSettings(**changes).model_dump(mode="json", exclude=new)
 
 
@@ -257,8 +267,19 @@ def test_the_one_preset_an_older_release_stored_becomes_the_first_item_with_ever
     loaded = _stored_presets(old).presets
 
     (item,) = loaded.items
-    new = {"blocked_models", "blocked_providers", "adopted", "route", "sort", "prefer_own_tests", "guardrails"}
+    new = {
+        "blocked_models",
+        "blocked_providers",
+        "adopted",
+        "route",
+        "sort",
+        "prefer_own_tests",
+        "guardrails",
+        "paid_fallback",
+        "allow_free_only",
+    }
     assert item.model_dump(mode="json", exclude=new) == old
+    assert (item.paid_fallback, item.allow_free_only) == (False, True), "an older release behaved as these do"
     assert (item.route, item.sort, item.adopted, item.blocked_models, item.blocked_providers) == (
         "fallback",
         None,
@@ -295,6 +316,25 @@ def test_a_presets_own_test_choice_is_saved_and_can_be_cleared(client):
 
     body = {**current, "presets": {"items": [{**item, "prefer_own_tests": "sometimes"}]}}
     assert client.put("/api/settings", json={"settings": body}).status_code == 422
+
+
+def test_the_free_only_choices_default_to_the_old_behaviour_and_are_saved(client):
+    assert (PresetSettings().paid_fallback, PresetSettings().allow_free_only) == (False, True)
+    stored = PresetSettings(slug="vibonomics-kept", min_score=70).model_dump(mode="json")
+    del stored["paid_fallback"], stored["allow_free_only"]
+    (item,) = _stored_presets({"items": [stored]}).presets.items
+    assert (item.paid_fallback, item.allow_free_only) == (False, True)
+
+    current = client.get("/api/settings").json()["settings"]
+    given = PresetSettings(slug="vibonomics-mine", include_free=True).model_dump(mode="json")
+    body = {**current, "presets": {"items": [{**given, "paid_fallback": True, "allow_free_only": False}]}}
+    saved = client.put("/api/settings", json={"settings": body})
+    assert saved.status_code == 200, saved.text
+    with session_scope() as s:
+        (kept,) = load_settings(s).presets.items
+    assert (kept.paid_fallback, kept.allow_free_only) == (True, False)
+    wrong = {**current, "presets": {"items": [{**given, "paid_fallback": "sometimes"}]}}
+    assert client.put("/api/settings", json={"settings": wrong}).status_code == 422
 
 
 def test_a_stored_preset_nobody_ever_set_up_becomes_no_item():

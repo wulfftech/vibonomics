@@ -119,7 +119,9 @@ What it showed, so a settled question is not asked again:
   at request time is also unmeasured; it is stored as sent.
 - Free models share an account-wide daily request cap (the response said 1000 a day with credits). The live preset's
   models are all free, so spending the cap makes requests to it fail until the reset; plans now warn about this.
-  An option to keep one paid model as the last fallback was proposed and not built.
+  Two per-preset options now guard against it: a paid model kept as the last fallback, and a refusal to write a
+  lineup of free models only. Neither is switched on for the live preset yet. Whether OpenRouter really falls
+  through from a rate-limited free model to the next one in `models` is documented but unmeasured.
 
 ## Fixed on 2026-10-28, second pass (an independent review of the first)
 

@@ -157,6 +157,8 @@ export const PRESET_DEFAULTS: PresetSettings = {
   max_task_cost: null,
   min_value: null,
   include_free: false,
+  paid_fallback: false,
+  allow_free_only: true,
   switch_margin_pct: 10,
   max_models: 1,
   max_providers: 3,

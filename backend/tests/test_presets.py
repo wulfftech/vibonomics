@@ -4216,6 +4216,151 @@ def test_a_preset_with_no_free_model_has_no_free_warning(client):
     assert not any("daily" in w for w in plan["warnings"])
 
 
+# ---- keeping a paid model in a preset of free ones ------------------------------------------------------------------
+
+
+def _add_free(model_id: str, score: float = 90) -> None:
+    """Another free model that outranks every paid one in the test data."""
+    with session_scope() as session:
+        provider = session.scalars(select(ProviderConfig).where(ProviderConfig.type == "openrouter")).one()
+        session.add(
+            Model(
+                provider_config_id=provider.id,
+                model_id=model_id,
+                name=model_id.split("/")[1],
+                canonical_id=_canonical(model_id),
+                price_input=0.0,
+                price_output=0.0,
+                active=True,
+                is_free=True,
+                tool_call=True,
+                context_length=200_000,
+            )
+        )
+        session.add(
+            BenchmarkScore(
+                source="epoch",
+                metric="eci",
+                dimension="intelligence",
+                source_model=f"preset-test-{model_id}",
+                canonical_id=_canonical(model_id),
+                value=score,
+                percentile=score,
+            )
+        )
+
+
+def _planned(client: TestClient, live: dict[str, Any] | None = None) -> dict[str, Any]:
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, live, version=2)  # no live config: the account has no such preset
+        return _plan(client)
+
+
+def _lineup(plan: dict[str, Any]) -> list[str]:
+    return [p["model_id"] for p in plan["picks"]]
+
+
+def test_without_the_paid_fallback_two_free_models_are_listed_as_they_rank(client):
+    _add_free("acme/free2:free")
+    _settings(include_free=True, max_models=2)
+    plan = _planned(client)
+    assert sorted(_lineup(plan)) == ["acme/free2:free", "acme/free:free"]
+    assert FREE_TIER_WARNING in plan["warnings"]
+
+
+def test_the_paid_fallback_takes_the_last_place_when_every_chosen_model_is_free(client):
+    _add_free("acme/free2:free")
+    _settings(include_free=True, max_models=2, paid_fallback=True)
+    plan = _planned(client)
+    lineup = _lineup(plan)
+    assert lineup[0] in ("acme/free2:free", "acme/free:free") and lineup[1] == "acme/best"
+    assert plan["config"]["models"] == lineup
+    assert FREE_TIER_WARNING not in plan["warnings"]  # the lineup has a paid model now
+    assert not [c for c in plan["validation"] if c["check"] == "free"]
+    assert plan["action"] == "create"
+
+
+def test_the_paid_fallback_does_nothing_when_a_paid_model_is_already_listed(client):
+    _settings(include_free=True, max_models=2, paid_fallback=True)  # one free and one paid: nothing to add
+    plan = _planned(client)
+    assert _lineup(plan)[0] == "acme/free:free" and len(plan["picks"]) == 2
+    assert [p["model_id"] for p in plan["picks"] if p["model_id"].endswith(":free")] == ["acme/free:free"]
+
+
+def test_the_paid_fallback_keeps_a_paid_model_already_listed_over_a_near_tie(client):
+    _own_as(KEY)  # a preset that is already on the account is only planned for when Vibonomics made it
+    _add_free("acme/free2:free")
+    _settings(include_free=True, max_models=2, paid_fallback=True)
+    live = {"model": "acme/free:free", "models": ["acme/free:free", "acme/steady"]}
+    plan = _planned(client, live)
+    assert _lineup(plan)[1] == "acme/steady"  # acme/best is about 5% better, inside the 10% margin
+
+
+def test_the_paid_fallback_needs_a_second_place_and_says_so(client):
+    _settings(include_free=True, max_models=1, paid_fallback=True)
+    plan = _planned(client)
+    assert _lineup(plan) == ["acme/free:free"]
+    assert any("No paid fallback was added" in w and "at least two models" in w for w in plan["warnings"])
+    assert FREE_TIER_WARNING in plan["warnings"]
+
+
+def test_the_paid_fallback_says_so_when_no_paid_model_qualifies(client):
+    _add_free("acme/free2:free")
+    paid = ["acme/best", "acme/steady", "acme/pricey"]
+    _settings(include_free=True, max_models=2, paid_fallback=True, blocked_models=paid)
+    plan = _planned(client)
+    assert sorted(_lineup(plan)) == ["acme/free2:free", "acme/free:free"]
+    assert any("No paid fallback was added" in w and "No paid model passes the filters" in w for w in plan["warnings"])
+
+
+def test_a_preset_that_may_not_be_all_free_is_refused_when_every_qualifying_model_is_free(client):
+    _settings(include_free=True, max_models=1, allow_free_only=False)
+    plan = _planned(client)
+    assert plan["action"] == "blocked" and plan["request"] is None
+    assert "does not allow a lineup of free models only" in plan["reason"]
+    assert "Turn on the paid fallback" in plan["reason"]
+    assert "daily request cap" in plan["reason"]
+
+
+def test_a_refused_preset_that_has_the_paid_fallback_on_says_why_that_did_not_help(client):
+    _settings(include_free=True, max_models=1, paid_fallback=True, allow_free_only=False)
+    plan = _planned(client)
+    assert plan["action"] == "blocked"
+    assert "at least two models" in plan["reason"] and "Turn on the paid fallback" not in plan["reason"]
+
+
+def test_the_paid_fallback_is_what_lets_a_preset_that_may_not_be_all_free_through(client):
+    _add_free("acme/free2:free")
+    _settings(include_free=True, max_models=2, allow_free_only=False)
+    assert _planned(client)["action"] == "blocked"
+    _settings(include_free=True, max_models=2, allow_free_only=False, paid_fallback=True)
+    plan = _planned(client)
+    assert plan["action"] == "create" and _lineup(plan)[1] == "acme/best"
+
+
+def test_a_preset_that_may_not_be_all_free_is_left_alone_when_it_lists_a_paid_model_or_no_free_one(client):
+    _settings(include_free=True, max_models=2, allow_free_only=False)  # one free, one paid
+    assert _planned(client)["action"] == "create"
+    _settings(max_models=1, allow_free_only=False)  # free models are not considered at all
+    plan = _planned(client)
+    assert plan["action"] == "create" and "acme/free:free" not in _lineup(plan)
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_that_would_list_free_models_only_writes_nothing_and_says_why(client):
+    from vibonomics import presets as engine
+
+    _own_as(KEY)
+    _settings(include_free=True, max_models=1, allow_free_only=False, auto_apply=True)
+    with respx.mock(assert_all_called=False) as router:
+        _remote(router, SLUG, {"model": "acme/best"}, version=2)
+        post = router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(return_value=httpx.Response(200, json={}))
+        await engine.sync(SLUG, "schedule")
+        assert post.call_count == 0
+    last = _state()["last"][SLUG]
+    assert last["status"] == "blocked" and "does not allow a lineup of free models only" in last["message"]
+
+
 # ---- what the plan says about the guardrails ------------------------------------------------------------------------
 
 

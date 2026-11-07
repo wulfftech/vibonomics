@@ -470,9 +470,18 @@ second row of tabs under Providers, where settings that belong to one provider l
   reads your guardrails: a model none of whose live endpoints passes the quantization and ignore lists is a
   warning (this preset will never be served it), and an error if that is true of every model; a pinned endpoint
   that lacks a parameter you set is an error with `require_parameters` on and a warning without it.
-- **Free models.** Free models share an account-wide daily request cap (1000 a day with credits, 50 without).
-  A preset whose models are all free warns about it, in the preview and in the live check. When the cap is
-  spent, requests to that preset fail until it resets at 00:00 UTC.
+- **Free models.** Free models are left out unless you switch on **Allow free models**. They share an
+  account-wide daily request cap (1000 a day with credits, 50 without). A preset whose models are all free
+  warns about it, in the preview and in the live check. When the cap is spent, requests to that preset fail
+  until it resets at 00:00 UTC. Two choices guard against that, both only while free models are allowed:
+  - **Keep a paid model as the last fallback.** When every model chosen is free, the last place goes to the
+    best-value paid model that passes your filters, so OpenRouter falls through to it when the free ones fail.
+    The free models keep the lead. It needs room for two models or more. A paid model already in the preset
+    is kept over one that is only a few percent better, like any other model. If it can't be added (one place,
+    or no paid model qualifies) the plan says so and warns about the cap as before.
+  - **Allow a lineup of free models only.** Switched off, a plan whose models are all free is refused:
+    nothing is written, and a scheduled run is recorded as blocked with the reason. With the paid fallback on
+    too, the fallback is tried first, and the plan is refused only if it could not be added.
 - **On a schedule.** A separate switch updates a preset every N hours (as little as 0.5, which is every
   thirty minutes) with no one watching, each on its own timer. Off by default, and it needs the write switch
   too. After a restart, any preset that is overdue runs once.

@@ -4720,6 +4720,18 @@
             "title": "Include Free",
             "default": false
           },
+          "paid_fallback": {
+            "type": "boolean",
+            "title": "Paid Fallback",
+            "description": "When every model chosen is free, the last one is the best-value paid model instead, so the preset keeps being served when the free models' shared daily cap is spent. Needs `max_models` of 2 or more. Only matters while `include_free` is on.",
+            "default": false
+          },
+          "allow_free_only": {
+            "type": "boolean",
+            "title": "Allow Free Only",
+            "description": "Whether the preset may list free models only. Off, a lineup of free models only is refused: nothing is written until a paid model qualifies. Only matters while `include_free` is on.",
+            "default": true
+          },
           "switch_margin_pct": {
             "type": "number",
             "maximum": 100.0,

@@ -404,6 +404,17 @@ class PresetSettings(BaseModel):
         description="Least value a model may give, in score points per dollar of one task; none for no limit",
     )
     include_free: bool = False
+    paid_fallback: bool = Field(
+        False,
+        description="When every model chosen is free, the last one is the best-value paid model instead, so the "
+        "preset keeps being served when the free models' shared daily cap is spent. Needs `max_models` of 2 or more. "
+        "Only matters while `include_free` is on.",
+    )
+    allow_free_only: bool = Field(
+        True,
+        description="Whether the preset may list free models only. Off, a lineup of free models only is refused: "
+        "nothing is written until a paid model qualifies. Only matters while `include_free` is on.",
+    )
     switch_margin_pct: float = Field(
         10,
         ge=0,

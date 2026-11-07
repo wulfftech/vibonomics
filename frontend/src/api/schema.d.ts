@@ -1880,6 +1880,18 @@ export interface components {
              */
             include_free: boolean;
             /**
+             * Paid Fallback
+             * @description When every model chosen is free, the last one is the best-value paid model instead, so the preset keeps being served when the free models' shared daily cap is spent. Needs `max_models` of 2 or more. Only matters while `include_free` is on.
+             * @default false
+             */
+            paid_fallback: boolean;
+            /**
+             * Allow Free Only
+             * @description Whether the preset may list free models only. Off, a lineup of free models only is refused: nothing is written until a paid model qualifies. Only matters while `include_free` is on.
+             * @default true
+             */
+            allow_free_only: boolean;
+            /**
              * Switch Margin Pct
              * @description A new model replaces one already in the preset only when it gives this much more value
              * @default 10
