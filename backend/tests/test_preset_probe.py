@@ -34,6 +34,9 @@ FREE_A = "acme/alpha:free"  # two free providers, both support repetition_penalt
 FREE_B = "acme/beta:free"  # one free provider, no repetition_penalty
 STEALTH = "stealth/crouton-alpha"  # free by price, one endpoint of unknown quantization
 PAID = "acme/paid"
+TEST_WORKSPACE = "11111111-2222-5333-8444-555555555555"  # the API key's workspace: the throwaway one
+DEFAULT_WORKSPACE = "99999999-8888-5777-9666-444444444444"  # where a write that names no workspace would land
+MANAGEMENT = "sk-or-v1-mgmt0123456789abcdef0123456789abcdef"
 
 KNOWN_TOP = {
     "model",
@@ -63,6 +66,14 @@ def no_real_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", refuse)
 
 
+@pytest.fixture(autouse=True)
+def waits(monkeypatch) -> list[float]:
+    """The waits between re-reads, recorded and not slept."""
+    seen: list[float] = []
+    monkeypatch.setattr(probe, "pause", seen.append)
+    return seen
+
+
 def _endpoint(name: str, tag: str, quant: str, params: list[str], pricing: dict[str, str] | None = None) -> dict:
     return {
         "provider_name": name,
@@ -79,6 +90,7 @@ class Call:
     path: str
     body: Any
     authorization: str | None
+    workspace: str | None = None
 
 
 class Fake:
@@ -90,8 +102,16 @@ class Fake:
         self.list_extra: dict[str, Any] = {}
         self.list_status = 200
         self.network_down = False
+        # how many reads of a preset, right after a write, still show the version before it
+        self.read_lag = 0
+        self.stale_left: dict[str, int] = {}
         self.write_status: int | None = None
         self.write_body: Any = None
+        # what GET /key says: the API key's workspace, and what the management key is
+        self.key_workspace: str | None = TEST_WORKSPACE
+        self.key_status = 200
+        self.management_status = 200
+        self.management_is_management = True
         # what the preset API does
         self.rename_max_tokens = False
         self.sort_object = False
@@ -148,9 +168,15 @@ class Fake:
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/api/v1")
         body = json.loads(request.content) if request.content else None
-        self.calls.append(Call(request.method, path, body, request.headers.get("authorization")))
+        self.calls.append(
+            Call(
+                request.method, path, body, request.headers.get("authorization"), request.url.params.get("workspace_id")
+            )
+        )
         if self.network_down:
             raise httpx.ConnectError("no route to host", request=request)
+        if path == "/key" and request.method == "GET":
+            return self.key_details(request.headers.get("authorization"))
         if path == "/presets" and request.method == "GET":
             rows = [{"slug": s, "name": s, "status": p["status"]} for s, p in self.presets.items()]
             return httpx.Response(self.list_status, json={"data": rows, **self.list_extra})
@@ -174,9 +200,25 @@ class Fake:
             return self.complete(body)
         return httpx.Response(404, json={"error": {"message": f"no route {request.method} {path}", "code": 404}})
 
+    def key_details(self, authorization: str | None) -> httpx.Response:
+        """GET /key: a management key belongs to no workspace of its own (the account's default one is reported)."""
+        if authorization == f"Bearer {MANAGEMENT}":
+            if self.management_status != 200:
+                return httpx.Response(self.management_status, json={"error": {"message": "refused", "code": 401}})
+            data = {"is_management_key": self.management_is_management, "workspace_id": DEFAULT_WORKSPACE}
+            return httpx.Response(200, json={"data": data})
+        if self.key_status != 200:
+            return httpx.Response(self.key_status, json={"error": {"message": "refused", "code": self.key_status}})
+        return httpx.Response(200, json={"data": {"is_management_key": False, "workspace_id": self.key_workspace}})
+
     def view(self, slug: str) -> dict[str, Any]:
         preset = self.presets[slug]
-        return {"slug": slug, "name": slug, "status": preset["status"], "designated_version": self.latest(slug)}
+        shown = self.latest(slug)
+        if self.stale_left.get(slug, 0) > 0 and len(preset["versions"]) >= 2:
+            # the read lags the write: the version before the latest is still the designated one
+            self.stale_left[slug] -= 1
+            shown = preset["versions"][-2]
+        return {"slug": slug, "name": slug, "status": preset["status"], "designated_version": shown}
 
     def write(self, slug: str, body: dict[str, Any]) -> httpx.Response:
         if self.write_status is not None:
@@ -215,6 +257,7 @@ class Fake:
         prompt = sent if sent is not None and self.store_system else kept
         version = {"version": len(versions) + 1, "config": config, "system_prompt": prompt}
         versions.append(version)
+        self.stale_left[slug] = self.read_lag
         data: dict[str, Any] = {"slug": slug, "name": slug, "status": "active"}
         if self.return_version:
             data["designated_version"] = version
@@ -296,29 +339,137 @@ def test_a_key_given_as_an_argument_is_not_accepted_or_echoed(tmp_path, capsys):
     assert fake.calls == []
 
 
-MANAGEMENT = "sk-or-v1-mgmt0123456789abcdef0123456789abcdef"
+BOTH_KEYS = {probe.KEY_ENV: KEY, probe.WRITE_KEY_ENV: MANAGEMENT}
 
 
 def test_preset_writes_go_under_the_management_key_and_everything_else_under_the_api_key(tmp_path, capsys):
     fake = Fake()
-    code, report, out = run(fake, tmp_path, env={probe.KEY_ENV: KEY, probe.WRITE_KEY_ENV: MANAGEMENT})
+    code, report, out = run(fake, tmp_path, env=BOTH_KEYS)
     assert code == 0 and report is not None
     writes = [c for c in fake.calls if c.method == "POST" and c.path.startswith("/presets/")]
-    others = [c for c in fake.calls if c not in writes]
+    details = [c for c in fake.calls if c.path == "/key"]
+    others = [c for c in fake.calls if c not in writes and c not in details]
     assert writes and {c.authorization for c in writes} == {f"Bearer {MANAGEMENT}"}
     assert others and {c.authorization for c in others if c.authorization} == {f"Bearer {KEY}"}
+    assert [c.authorization for c in details] == [f"Bearer {KEY}", f"Bearer {MANAGEMENT}"]
     shown = capsys.readouterr()
     assert KEY not in out.read_text(encoding="utf-8") + shown.out + shown.err
     assert MANAGEMENT not in out.read_text(encoding="utf-8") + shown.out + shown.err
 
 
+def test_every_write_under_the_management_key_names_the_api_keys_workspace(tmp_path):
+    fake = Fake()
+    code, report, _out = run(fake, tmp_path, env=BOTH_KEYS)
+    assert code == 0 and report is not None
+    writes = [c for c in fake.calls if c.method == "POST" and c.path.startswith("/presets/")]
+    assert writes and {c.workspace for c in writes} == {TEST_WORKSPACE}
+    assert DEFAULT_WORKSPACE not in {c.workspace for c in fake.calls}
+    assert report["workspace_id"] == TEST_WORKSPACE
+    assert steps_named(report, "preflight: which workspace")[0]["observed"].startswith(f"workspace {TEST_WORKSPACE}")
+    # Reads and completion calls name no workspace: the API key carries its own.
+    assert {c.workspace for c in fake.calls if c not in writes} == {None}
+
+
 def test_without_a_management_key_the_writes_use_the_api_key_as_before(tmp_path):
     fake = Fake()
-    code, _report, _out = run(fake, tmp_path)
-    assert code == 0
+    code, report, _out = run(fake, tmp_path)
+    assert code == 0 and report is not None
     writes = [c for c in fake.calls if c.method == "POST" and c.path.startswith("/presets/")]
     assert writes and {c.authorization for c in writes} == {f"Bearer {KEY}"}
+    assert {c.workspace for c in writes} == {None}
+    assert not [c for c in fake.calls if c.path == "/key"]
+    assert report["workspace_id"] is None
     assert probe.WRITE_KEY_ENV == "OPENROUTER_MANAGEMENT_KEY"
+
+
+@pytest.mark.parametrize("workspace", [None, "", "default", "not-a-uuid?x=1", 7])
+def test_an_api_key_with_no_known_workspace_refuses_to_write_under_a_management_key(tmp_path, capsys, workspace):
+    fake = Fake(key_workspace=workspace)
+    code, _report, out = run(fake, tmp_path, env=BOTH_KEYS)
+    assert code == probe.EXIT_REFUSED == 2
+    assert "workspace" in capsys.readouterr().err
+    assert not fake.posts() and not out.exists()
+    # It stopped before it listed the workspace, let alone wrote to it.
+    assert [c.path for c in fake.calls] == ["/key"]
+
+
+def test_a_management_key_that_is_not_one_is_refused_before_any_write(tmp_path, capsys):
+    fake = Fake(management_is_management=False)
+    code, _report, _out = run(fake, tmp_path, env=BOTH_KEYS)
+    assert code == 2
+    assert "not a management key" in capsys.readouterr().err
+    assert not fake.posts()
+
+
+def test_a_refused_management_key_exits_1_with_a_report_and_without_writing(tmp_path, capsys):
+    fake = Fake(management_status=401)
+    code, report, out = run(fake, tmp_path, env=BOTH_KEYS)
+    assert code == probe.EXIT_FAILED == 1 and report is not None
+    assert "management key" in capsys.readouterr().err
+    assert not fake.posts()
+    assert MANAGEMENT not in out.read_text(encoding="utf-8")
+
+
+def test_a_read_back_that_is_current_is_read_once(tmp_path, waits):
+    code, report, _out = run(Fake(), tmp_path)
+    assert code == 0 and report is not None
+    assert waits == []
+    assert not [s for s in report["steps"] if ", try " in s["name"]]
+    assert answer(report, "Does a read right after a write").startswith("yes: all")
+
+
+def test_a_stale_read_back_is_read_again_until_it_shows_the_version_written(tmp_path, waits):
+    _code, plain, _out = run(Fake(), tmp_path / "plain")
+    code, report, _out = run(Fake(read_lag=2), tmp_path / "lag")
+    assert code == 0 and report is not None and plain is not None
+    tries = steps_named(report, "1b: read back")
+    assert [s["name"] for s in tries] == ["1b: read back", "1b: read back, try 2", "1b: read back, try 3"]
+    assert tries[0]["observed"].startswith("stale: it shows version 1 and the write made 2")
+    assert (
+        "stale" not in tries[-1]["observed"] and "designated version 2; the write answered 2" in tries[-1]["observed"]
+    )
+    assert waits[:2] == [1.0, 2.0]
+    # What the probe concludes from the reads is what it concludes when they are never stale.
+    assert _findings_but_the_lag(report) == _findings_but_the_lag(plain)
+    verdict = answer(report, "Does a read right after a write")
+    assert verdict.startswith("not always:") and "0 never matched" in verdict
+
+
+def _findings_but_the_lag(report: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in report["findings"].items() if k != "read_lag"}
+
+
+def test_a_read_that_never_catches_up_is_not_compared_and_no_live_call_goes_through_it(tmp_path, waits):
+    plain = Fake()
+    run(plain, tmp_path / "plain")
+    fake = Fake(read_lag=99)
+    code, report, _out = run(fake, tmp_path / "lag")
+    assert code == 0 and report is not None
+    last = steps_named(report, "1b: read back")[-1]
+    assert last["observed"].startswith("still version 1 after 6 reads")
+    assert "nothing was compared" in last["observed"]
+    assert last["name"] == "1b: read back, try 6" and len(steps_named(report, "1b: read back")) == 6
+    assert set(waits) <= set(probe.READ_WAITS) and waits
+    assert len(plain.completions()) == 6
+    assert len(fake.completions()) < 6  # a preset that was never seen as written gets no live call
+    verdict = answer(report, "Does a read right after a write")
+    assert verdict.startswith("not always:") and "never matched" in verdict and "0 never matched" not in verdict
+
+
+def test_an_answer_that_names_no_version_is_read_once_without_waiting(tmp_path, waits):
+    fake = Fake(return_version=False, read_lag=3)
+    code, report, _out = run(fake, tmp_path)
+    assert code == 0 and report is not None
+    assert waits == []
+    assert not [s for s in report["steps"] if ", try " in s["name"]]
+
+
+def test_an_api_key_whose_details_cannot_be_read_exits_1(tmp_path, capsys):
+    fake = Fake(key_status=401)
+    code, report, _out = run(fake, tmp_path, env=BOTH_KEYS)
+    assert code == 1 and report is not None
+    assert not fake.posts()
+    assert "Nothing was changed" in capsys.readouterr().err
 
 
 def test_refuses_a_workspace_that_holds_other_presets(tmp_path, capsys):

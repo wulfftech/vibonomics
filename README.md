@@ -492,8 +492,9 @@ second row of tabs under Providers, where settings that belong to one provider l
 
 **Writing a preset needs a management key.** Since 2026-11-07 OpenRouter turns an ordinary API key away from the
 call that creates or updates a preset (HTTP 401 "Invalid management key"; their docs now say it needs a
-read-write management key). So the OpenRouter provider needs a **management key with read-write access** (the
-same field the spend history uses; create it at openrouter.ai/settings/management-keys). The write goes out
+read-write management key). So the OpenRouter provider needs a **management key** (the same field the spend
+history uses; create it at openrouter.ai/settings/management-keys, which offers a name and an expiry but no
+read or write setting: OpenRouter's docs call these keys unscoped). The write goes out
 under that key, and under it alone; reading the preset, the catalogue, the ranking and the live check use the
 API key, and requests to `@preset/<name>` are ordinary calls. Without a management key the preview says so as a
 live-check error, Apply stays off, and a scheduled run is recorded as blocked; a preset that is already up to

@@ -1824,35 +1824,47 @@ async def _identity(
     return seen.preset_id or fallback[0], seen.created_at or fallback[1]
 
 
+# Seconds to wait before each further read of a preset whose write may have gone through. A read right after a write
+# is often stale: the probe of 2026-11-08 got the previous version back for 7 of 11 writes, and the newest one a few
+# minutes later. The write's own answer is never stale, so only this recovery read has to wait it out.
+READ_BACK_WAITS: tuple[float, ...] = (1.0, 2.0, 3.0)
+
+
 async def _read_back(plan: Plan, inputs: Inputs, trigger: str) -> Applied | None:
     """After a write whose outcome is unknown, claim it if the preset now holds exactly what the plan sent.
 
     OpenRouter may have made the version and lost the answer (a timeout, a body that is not JSON, a gateway error).
-    Without this the preset exists, is not recorded as ours, and every later plan is blocked.
+    Without this the preset exists, is not recorded as ours, and every later plan is blocked. The preset is read
+    again, a few seconds apart, while it does not hold the plan: a read that is stale looks just like a write that
+    never happened.
     """
     assert inputs.api_key is not None
-    try:
-        remote = await fetch_remote(inputs.base_url, inputs.api_key, plan.slug)
-    except FetchError:
-        return None
-    if (
-        remote is None
-        or not remote.readable
-        or remote.config != plan.config
-        or _norm_prompt(remote.system_prompt) != _norm_prompt(plan.prompt)
-    ):
-        return None
-    return await _settle(
-        plan,
-        inputs,
-        trigger,
-        remote.version,
-        remote.config,
-        remote.preset_id,
-        remote.created_at,
-        True,
-        remote.system_prompt,
-    )
+    for wait in (0.0, *READ_BACK_WAITS):
+        if wait:
+            await asyncio.sleep(wait)
+        try:
+            remote = await fetch_remote(inputs.base_url, inputs.api_key, plan.slug)
+        except FetchError:
+            continue
+        if (
+            remote is None
+            or not remote.readable
+            or remote.config != plan.config
+            or _norm_prompt(remote.system_prompt) != _norm_prompt(plan.prompt)
+        ):
+            continue
+        return await _settle(
+            plan,
+            inputs,
+            trigger,
+            remote.version,
+            remote.config,
+            remote.preset_id,
+            remote.created_at,
+            True,
+            remote.system_prompt,
+        )
+    return None
 
 
 async def apply(slug: str, digest: str | None, trigger: str) -> tuple[Plan, Applied | None]:

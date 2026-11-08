@@ -4,8 +4,13 @@ Run it by hand against a TEST workspace, with a key that has no spend:
 
     OPENROUTER_API_KEY=... OPENROUTER_MANAGEMENT_KEY=... python scripts/preset_probe.py --out probe-report.json
 
-OpenRouter takes a preset write only under a read-write management key, so OPENROUTER_MANAGEMENT_KEY (a key of the
-same test workspace) is used for the writes; every read and every completion call uses OPENROUTER_API_KEY.
+OpenRouter takes a preset write only under a management key, so OPENROUTER_MANAGEMENT_KEY is used for the writes;
+every read and every completion call uses OPENROUTER_API_KEY. A management key belongs to no workspace (a write
+without ``workspace_id`` lands in the account's default one), so the probe asks GET /key which workspace the API key
+belongs to and names it on every write. It refuses to run when it cannot find that out.
+
+A read of a preset right after a write has come back with the version before it, so each read-back is repeated, with
+growing waits, until it shows the version the write made; one that never does is reported and not compared.
 
 It creates at most two presets (``vibonomics-probe-a`` and ``vibonomics-probe-b``, reused as new versions: the API
 has no delete) and makes at most ``--max-live-calls`` completion calls, all to free models, ``max_tokens`` 8. Every
@@ -16,8 +21,8 @@ The key comes from the environment only. It is never an argument, never written 
 anything shaped like an OpenRouter key, from every line printed.
 
 Exit codes: 0 the probe ran (an individual step may still have failed: that is a finding), 1 it could not start
-(the key was refused or OpenRouter was unreachable), 2 it refused to run (no key, a bad base URL, or the workspace
-holds presets that are not the probe's own).
+(a key was refused or OpenRouter was unreachable), 2 it refused to run (no key, a bad base URL, a management key that
+is not one or an API key with no known workspace, or a workspace that holds presets that are not the probe's own).
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -63,6 +69,9 @@ USER_MESSAGE = "Vibonomics preset probe. This request only makes a preset versio
 EXIT_OK, EXIT_FAILED, EXIT_REFUSED = 0, 1, 2
 REDACTED = "[redacted]"
 MAX_PEELS = 3
+# GET /presets/{slug} has answered with the version before the one just written, so a read-back is repeated, with
+# these waits in seconds between the reads, until it shows the version the write made.
+READ_WAITS = (1.0, 2.0, 3.0, 4.0, 5.0)
 # Most free models have a single provider, so finding one with two takes some looking.
 MAX_A_LOOKUPS = 25
 MAX_B_LOOKUPS = 8
@@ -91,6 +100,7 @@ QUESTIONS: tuple[tuple[str, str], ...] = (
     ("unknown_quantization", "provider.quantizations against an endpoint whose quantization is unknown"),
     ("require_parameters", "require_parameters with an unsupported parameter: the error"),
     ("write_version", "Does a write answer with the version it made"),
+    ("read_lag", "Does a read right after a write show the version it made"),
 )
 
 
@@ -113,6 +123,11 @@ def scrub(text: str, secret: str | None = None) -> str:
 
 class Refused(Exception):
     """A safety rail stopped a request or the whole run."""
+
+
+def pause(seconds: float) -> None:
+    """Wait between two reads of a preset. A function of its own so that the tests need not sleep."""
+    time.sleep(seconds)
 
 
 # ---- one HTTP answer, one step of the report -------------------------------------------------------------------
@@ -756,6 +771,8 @@ class Probe:
         self.base = base
         self.key = key
         self.write_key = write_key or key
+        # Set by resolve_workspace when the writes use a management key, which is tied to no workspace.
+        self.workspace_id: str | None = None
         self.skip_calls = skip_calls
         self.max_live_calls = max_live_calls
         self.say = say
@@ -764,6 +781,10 @@ class Probe:
         self.found = Found()
         self.live_calls = 0
         self.writes = 0
+        # Reads taken right after a write: how many, how many showed an older version first, the most reads one needed,
+        # and how many never caught up.
+        self.reads = self.stale_reads = self.never_current = 0
+        self.most_reads = 1
         self.created: set[str] = set()
         self.write_versions: list[Any] = []
         self.system_seen: dict[str, str | None] = {}
@@ -795,14 +816,26 @@ class Probe:
             return
         raise Refused(f"{method} {path} is not something the probe may send")
 
-    def _send(self, method: str, path: str, body: Any = None, *, auth: bool = True, timeout: float = 60.0) -> Reply:
+    def _send(
+        self,
+        method: str,
+        path: str,
+        body: Any = None,
+        *,
+        auth: bool = True,
+        timeout: float = 60.0,
+        with_write_key: bool = False,
+    ) -> Reply:
         self._guard(method, path, body)
         headers = {"Accept": "application/json"}
+        writes = method == "POST" and path.startswith("/presets/")
         if auth:
-            writes = method == "POST" and path.startswith("/presets/")
-            headers["Authorization"] = f"Bearer {self.write_key if writes else self.key}"
+            headers["Authorization"] = f"Bearer {self.write_key if writes or with_write_key else self.key}"
+        url = self.base + path
+        if writes and self.workspace_id:
+            url += f"?workspace_id={quote(self.workspace_id, safe='')}"
         try:
-            resp = self.client.request(method, self.base + path, headers=headers, json=body, timeout=timeout)
+            resp = self.client.request(method, url, headers=headers, json=body, timeout=timeout)
         except httpx.HTTPError as exc:
             return Reply(None, error=f"{type(exc).__name__}: {exc}")
         try:
@@ -852,8 +885,10 @@ class Probe:
         step.details = details
         return step
 
-    def fetch(self, name: str, asked: str, path: str, *, auth: bool = True) -> tuple[Reply, Step]:
-        reply = self._send("GET", path, auth=auth, timeout=30.0)
+    def fetch(
+        self, name: str, asked: str, path: str, *, auth: bool = True, with_write_key: bool = False
+    ) -> tuple[Reply, Step]:
+        reply = self._send("GET", path, auth=auth, timeout=30.0, with_write_key=with_write_key)
         return reply, self.record(name, asked, "GET", path, None, reply)
 
     def run_guarded(self, label: str, fn: Callable[[], None]) -> None:
@@ -895,6 +930,43 @@ class Probe:
         reply, step = self.fetch(name, asked, f"/presets/{slug}")
         return parse_preset(reply), step
 
+    def read_current(self, slug: str, name: str, asked: str, written: Any) -> tuple[PresetView | None, Step]:
+        """Read the preset, and again (after a wait) while it still shows an older version than the write made.
+
+        A read right after a write has come back with the previous version, and a comparison against that says
+        nothing about what the write stored. None when the preset never caught up: nothing is compared then.
+        """
+        view, step = self.read_preset(slug, name, asked)
+        self.reads += 1
+        tries = 1
+        stale = written is not None and view.reply.ok and view.version != written
+        if stale:
+            self.stale_reads += 1
+        while written is not None and view.reply.ok and view.version != written and tries <= len(READ_WAITS):
+            step.observed = f"stale: it shows version {view.version} and the write made {written}; reading again"
+            pause(READ_WAITS[tries - 1])
+            tries += 1
+            view, step = self.read_preset(slug, f"{name}, try {tries}", asked)
+        self.most_reads = max(self.most_reads, tries)
+        caught_up = not (written is not None and view.reply.ok and view.version != written)
+        if not caught_up:
+            self.never_current += 1
+            step.observed = (
+                f"still version {view.version} after {tries} reads, and the write made {written}: nothing was compared"
+            )
+        self.findings["read_lag"] = self._read_lag()
+        return (view if caught_up else None), step
+
+    def _read_lag(self) -> str:
+        if not self.stale_reads:
+            return f"yes: all {self.reads} reads taken right after a write showed the version it made"
+        waits = ", ".join(f"{w:g}" for w in READ_WAITS)
+        return (
+            f"not always: {self.stale_reads} of {self.reads} reads taken right after a write showed an older version. "
+            f"The probe read again (waits of {waits} s) until the version matched, which took up to {self.most_reads} "
+            f"reads; {self.never_current} never matched, so what they showed was not compared"
+        )
+
     def write_and_read(
         self, slug: str, config: Mapping[str, Any], system: str | None, name: str, asked: str, *, peel: bool = False
     ) -> WriteRead:
@@ -918,10 +990,16 @@ class Probe:
         out = WriteRead(sent=sent, reply=reply, system_sent=system, write_step=step)
         if not out.accepted:
             return out
-        view, rstep = self.read_preset(
-            slug, f"{name}: read back", f"Read {slug} back with GET /presets/{slug} to see what was stored."
+        view, rstep = self.read_current(
+            slug,
+            f"{name}: read back",
+            f"Read {slug} back with GET /presets/{slug} to see what was stored.",
+            written_version(reply.body),
         )
-        out.view, out.read_step = view, rstep
+        out.read_step = rstep
+        if view is None:
+            return out
+        out.view = view
         if view.config is None:
             rstep.observed = "the answer carries no designated_version.config, so nothing could be compared"
             return out
@@ -1430,6 +1508,61 @@ def check_base(base: str) -> str:
     raise Refused(f"--base must be an https URL (the key is sent to it); got {scrub(base)!r}")
 
 
+_WORKSPACE_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+
+def resolve_workspace(probe: Probe, err: Callable[[str], None]) -> int | None:
+    """With a management key doing the writes, find the workspace they must name. An exit code when the probe must
+    not go on, None when it may.
+
+    A management key is tied to no workspace, so a write that names none lands in the account's default one, which
+    is not the workspace the preflight is about to vouch for. The API key's own workspace is the test one.
+    """
+    if probe.write_key == probe.key:
+        return None
+    reply, step = probe.fetch(
+        "preflight: which workspace the API key belongs to",
+        "Ask GET /key (under the API key) for its workspace_id, which every preset write will then name.",
+        "/key",
+    )
+    data = reply.body.get("data") if isinstance(reply.body, dict) else None
+    workspace = data.get("workspace_id") if isinstance(data, dict) else None
+    if not reply.ok:
+        step.observed = _failed(reply)
+        err(f"Could not read the API key's details: {step.observed} Nothing was changed.")
+        return EXIT_FAILED
+    if not isinstance(workspace, str) or not _WORKSPACE_ID.fullmatch(workspace):
+        step.observed = "the answer names no workspace_id"
+        err(
+            "Refusing to run: the API key's workspace is unknown, and a write under a management key without a "
+            "workspace lands in the account's default workspace. Nothing was changed."
+        )
+        return EXIT_REFUSED
+    step.observed = f"workspace {workspace}; every preset write names it"
+    probe.workspace_id = workspace
+
+    reply, step = probe.fetch(
+        "preflight: check the management key",
+        "Ask GET /key (under the management key) whether it is a management key.",
+        "/key",
+        with_write_key=True,
+    )
+    data = reply.body.get("data") if isinstance(reply.body, dict) else None
+    if not reply.ok:
+        step.observed = _failed(reply)
+        err(
+            f"OpenRouter did not accept the management key ({step.observed}). Create one at "
+            "openrouter.ai/settings/management-keys. Nothing was changed."
+        )
+        return EXIT_FAILED
+    if not (isinstance(data, dict) and data.get("is_management_key") is True):
+        step.observed = "OpenRouter says this is not a management key"
+        err(f"Refusing to run: {WRITE_KEY_ENV} is not a management key, so OpenRouter would refuse every write.")
+        return EXIT_REFUSED
+    step.observed = "a management key"
+    return None
+
+
 def preflight(probe: Probe, allow_foreign: bool, err: Callable[[str], None]) -> int | None:
     """List the workspace's presets. An exit code when the probe must not go on, None when it may."""
     reply, step = probe.fetch(
@@ -1475,6 +1608,7 @@ def build_report(
         "started_at": started,
         "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "base": base,
+        "workspace_id": probe.workspace_id,
         "options": {"skip_calls": args.skip_calls, "max_live_calls": args.max_live_calls},
         "counts": {
             "steps": len(probe.steps),
@@ -1584,7 +1718,9 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             say=say,
             write_key=write_key,
         )
-        code = preflight(probe, args.i_know, err)
+        code = resolve_workspace(probe, err)
+        if code is None:
+            code = preflight(probe, args.i_know, err)
         if code is not None:
             if code == EXIT_FAILED:
                 write_report(args.out, build_report(probe, args, base, started, code), key, write_key)

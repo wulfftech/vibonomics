@@ -116,13 +116,33 @@ What it showed, so a settled question is not asked again:
 - **Changed since (2026-11-07):** the same write, made on 2026-11-06 with an ordinary API key, now answers HTTP 401
   "Invalid management key" for any key that is not a management key, even for a body that fails validation. OpenRouter's
   presets guide says the create endpoints need a read-write management key. The app now writes under the OpenRouter
-  provider's management key (see the README); whether the management key already stored on the live provider is
-  read-write has not been tried against the live account.
-- **Not measured yet** (the free-model daily cap answered 429 before those calls, and the rerun on 2026-11-07 could not
-  write at all, for the reason above): whether a client's own request parameters override a preset's (documented as
-  yes), and whether a client's `provider` block merges with or replaces the preset's. Rerun the probe with
-  `OPENROUTER_MANAGEMENT_KEY` set for the Workspace2 test workspace to settle both. What `route: "sort"` actually does
-  at request time is also unmeasured; it is stored as sent.
+  provider's management key (see the README). The management key stored on the live provider was checked on
+  2026-11-07: `GET /key` calls it a management key in the same workspace as the API key, and a deliberately invalid
+  write under it got a validation 400 (the API key gets the 401 first), so it is accepted on the write route; a real
+  write under it has not been made yet.
+- **Measured on 2026-11-08** (Workspace2, a fresh management key in `OPENROUTER_MANAGEMENT_KEY` and the workspace's
+  API key; 41 steps, 11 writes, 6 free-model calls):
+  - All 11 writes answered HTTP 200 under the management key with `?workspace_id=` set to the API key's workspace,
+    and the answers named that workspace. A management key made on the key page has no read or write setting, so
+    this is the kind the live provider holds.
+  - **A client's own parameters win over the preset's:** a preset with `max_tokens` 3 and a request with 8 gave an
+    8-token answer. (Taken from `max_tokens`; the other parameters are assumed to behave the same.)
+  - **A client's `provider` block replaces the preset's whole `provider` block, it does not merge:** a preset with
+    `require_parameters: true` refused its request on its own (HTTP 404), and was served once the request carried a
+    `provider` block that did not mention `require_parameters`.
+  - An unknown key inside `provider` is accepted and dropped too (read from the stored version, not the read-back).
+  - **A read-back right after a write is often stale.** `GET /presets/{slug}` returned the previous designated
+    version for 7 of the 11 writes (the old temperature, system prompt, model or `require_parameters`), and a few
+    minutes later it returned the newest one for both presets. The write's own answer was right every time, and the
+    stored versions (`/presets/{slug}/versions`) hold what was sent. So the probe's read-back comparisons for those
+    steps (1a, 2b, 3b, 5i, 5ii, 5iii, 5v) are not evidence of what OpenRouter stores. How long the lag lasts is
+    unmeasured. Both ends now allow for it: the probe repeats a read-back (waits of 1 to 5 s) until it shows the
+    version the write made, reports how many reads were stale in its summary, and compares nothing from a read that
+    never catches up; and the app's `_read_back` (after a lost write answer) reads up to four times, 1, 2 and 3 s
+    apart (`READ_BACK_WAITS`), before it calls the write not done. The app's normal path never reads after a write:
+    it uses the write's own answer. A plan made seconds after an Apply can still show the old version.
+  - Not measured: a 429 from a spent free-model cap (the cap was nowhere near spent), and what `route: "sort"` does
+    at request time (it is stored as sent).
 - Free models share an account-wide daily request cap (the response said 1000 a day with credits). The live preset's
   models are all free, so spending the cap makes requests to it fail until the reset; plans now warn about this.
   Two per-preset options now guard against it: a paid model kept as the last fallback, and a refusal to write a

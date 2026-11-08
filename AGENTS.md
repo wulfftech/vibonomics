@@ -111,7 +111,11 @@ docker compose logs -f vibonomics
   gets a `key` error in its live check (Apply stays off, a scheduled run is recorded as blocked). The write URL
   carries `?workspace_id=` from `write_workspace`: the preset's own id for an update, else the API key's, read
   from the `workspace_id` the OpenRouter balance job keeps in `details.key`; an answer naming another workspace
-  is a failure and claims nothing. `scripts/preset_probe.py` writes under `OPENROUTER_MANAGEMENT_KEY` likewise.
+  is a failure and claims nothing. `scripts/preset_probe.py` writes under `OPENROUTER_MANAGEMENT_KEY` likewise, and
+  names on every write the workspace its `GET /key` gives the API key (a management key is tied to no workspace, so
+  a write without it would land in the account's default one); it refuses to run when it cannot find that out. A read
+  of a preset right after a write is often stale (the previous version), so the probe re-reads until the version
+  matches and `_read_back` retries on `READ_BACK_WAITS`; never trust one read taken seconds after a write.
   The OpenRouter balance card shows the free-model daily cap (`details.key.free_model_daily_requests`, drawn by
   `freeModelWindow` in `frontend/src/lib/usageWindows.ts`). The plan reports `guardrails`, `system_prompt`,
   `capabilities` and `system_backup_at`; inspect reports the live `system_prompt`. Changing which guardrails are

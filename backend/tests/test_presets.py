@@ -12,7 +12,7 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
-from vibonomics import crypto
+from vibonomics import crypto, presets
 from vibonomics.app import create_app
 from vibonomics.config import get_config
 from vibonomics.db import init_db, session_scope
@@ -1567,16 +1567,80 @@ def test_an_update_whose_answer_was_lost_is_reported_as_applied_when_the_preset_
     assert _slug_state(client)["last_status"] == "applied"
 
 
+class _LaggingAccount(_Account):
+    """An account whose first reads after the write still show the version before it (OpenRouter's did, 2026-11-08)."""
+
+    def __init__(self, router: respx.Router, before: dict[str, Any] | None, lag: int, **kwargs: Any) -> None:
+        super().__init__(router, before, **kwargs)
+        self.lag, self.reads_after_write = lag, 0
+
+    def _get(self, request: httpx.Request) -> httpx.Response:
+        if self.written is not None:
+            self.reads_after_write += 1
+            if self.reads_after_write <= self.lag:
+                if self.before is None:
+                    return httpx.Response(404, json={"error": {"message": "Preset not found"}})
+                return httpx.Response(200, json=_preset(SLUG, self.before, version=self.version - 1, **self.ids))
+        return super()._get(request)
+
+
+@pytest.fixture(autouse=True)
+def _no_waiting_between_read_backs(monkeypatch):
+    """The reads after a lost answer are spaced out in production; here they follow one another."""
+    monkeypatch.setattr(presets, "READ_BACK_WAITS", (0.0, 0.0, 0.0))
+
+
+def test_a_stale_read_after_a_lost_answer_is_read_again_until_it_shows_the_write(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        account = _LaggingAccount(router, {"model": "acme/best"}, lag=3, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, lambda request: httpx.Response(504, text="gateway timeout"))
+        )
+        plan = _plan(client)
+        response = _apply(client, plan)
+    assert response.status_code == 200, response.text
+    assert response.json()["applied"] is True and response.json()["version"] == 3
+    assert account.reads_after_write == 4  # three that still showed the version before, then the write
+    assert _slug_state(client)["last_status"] == "applied"
+
+
+def test_a_create_that_is_not_visible_yet_after_a_lost_answer_is_read_again(client):
+    with respx.mock(assert_all_called=False) as router:
+        account = _LaggingAccount(router, None, lag=2, id="p-1", created_at="2026-11-05T00:00:00Z")
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(side_effect=_lost_after_taking(account, _timeout))
+        plan = _plan(client)
+        response = _apply(client, plan)
+    assert response.status_code == 200, response.text
+    assert response.json()["applied"] is True
+    assert _state()["owned"] == [SLUG]
+
+
+def test_a_read_that_stays_stale_for_every_try_is_a_failure_that_claims_nothing(client):
+    _own_as(KEY)
+    with respx.mock(assert_all_called=False) as router:
+        account = _LaggingAccount(router, {"model": "acme/best"}, lag=99, version=2)
+        router.post(f"{BASE}/presets/{SLUG}/chat/completions").mock(
+            side_effect=_lost_after_taking(account, lambda request: httpx.Response(504, text="gateway timeout"))
+        )
+        plan = _plan(client)
+        response = _apply(client, plan)
+    assert response.status_code == 502
+    assert "did not take the update" in response.json()["detail"]
+    assert account.reads_after_write == 1 + len(presets.READ_BACK_WAITS)  # it gives up, and does not read for ever
+    assert _slug_state(client)["last_status"] == "failed"
+
+
 def test_a_lost_answer_is_a_failure_when_the_preset_is_not_what_the_plan_wrote(client):
     with respx.mock(assert_all_called=False) as router:
         _remote(router, SLUG, None)
         plan = _plan(client)
     with respx.mock(assert_all_called=False) as router:
         # the preset is not there when the apply plans, and someone has made one of their own by the time it re-reads
-        reads = iter([404, 200])
+        reads = iter([404])
 
         def get(request: httpx.Request) -> httpx.Response:
-            if next(reads) == 404:
+            if next(reads, 200) == 404:
                 return httpx.Response(404, json={"error": {"message": "Preset not found"}})
             return httpx.Response(200, json=_preset(SLUG, {"model": "by/hand"}, version=1))
 
