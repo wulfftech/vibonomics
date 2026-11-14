@@ -50,6 +50,10 @@ adopted preset that someone edits on OpenRouter stops being updated until you re
 shows the exact request before anything is sent. Free models are opt-in, with a paid model as the last
 fallback so a spent daily free-model cap doesn't take the preset down.
 
+![A preset's Preview: no change needed because the better-value challenger wins by less than 10%, 3 live checks passed, then the 3 models in fallback order with score, cost per task and value, and the cheapest provider pinned for each](docs/screenshots/preset-preview-dark.png)
+
+*A Preview that decides to leave the preset alone, which is most of them. Taken 2026-11-14.*
+
 Off by default. Writing needs an OpenRouter **management key**: since 2026-11-07 the preset API refuses an
 ordinary key, and says so in a 401 that calls it an invalid management key, because of course it does.
 Turn it on under **Settings → Providers → OpenRouter**.
