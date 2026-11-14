@@ -118,8 +118,9 @@ What it showed, so a settled question is not asked again:
   presets guide says the create endpoints need a read-write management key. The app now writes under the OpenRouter
   provider's management key (see the README). The management key stored on the live provider was checked on
   2026-11-07: `GET /key` calls it a management key in the same workspace as the API key, and a deliberately invalid
-  write under it got a validation 400 (the API key gets the 401 first), so it is accepted on the write route; a real
-  write under it has not been made yet.
+  write under it got a validation 400 (the API key gets the 401 first). Real writes under it then went through on
+  2026-11-07: `vibonomics-1` version 18 at 09:41 UTC and `vibonomics-stonks` version 2 at 11:13 UTC (applied by
+  hand), both read from the live preset state.
 - **Measured on 2026-11-08** (Workspace2, a fresh management key in `OPENROUTER_MANAGEMENT_KEY` and the workspace's
   API key; 41 steps, 11 writes, 6 free-model calls):
   - All 11 writes answered HTTP 200 under the management key with `?workspace_id=` set to the API key's workspace,

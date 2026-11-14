@@ -1,86 +1,81 @@
-﻿# Vibonomics
+# Vibonomics
 
-A self-hosted dashboard of LLM model prices, published scores and per-provider balances. It answers one
-question: what does this model cost for what it does?
+A self-hosted dashboard of LLM prices, published benchmark scores and provider balances. It works out
+what a model costs for what it does, and can keep your OpenRouter presets pointed at whichever models
+give the most score per dollar today.
 
 Every pricing page says its model is the best deal. Every leaderboard says someone else's model is the
-best model. Vibonomics puts both on one screen and does the division. It also runs its own sandboxed
-tests against models that nobody has scored, so a free or brand-new model can be compared with the paid
-ones next to it.
+best model. Vibonomics puts both on one screen and does the division. For models nobody has scored yet,
+it runs its own sandboxed tests.
 
 ![The Models page sorted by value: free and cheap models that score well come first, each with its price, estimated cost per task, scores and a value index](docs/screenshots/models.png)
 
 *Best value first, on a fresh install with no API keys. Screenshots taken 2026-10-31; prices and scores
 move.*
 
-Vibonomics reads from providers and leaderboards; it does not sit in front of your inference traffic.
-It stores everything in one SQLite file and sends nothing anywhere except the requests you enable.
-Two containers: the app, and a sandbox sidecar that runs model-written code with no secrets and no
-network.
+It reads from providers and leaderboards and does not sit in front of your inference traffic. Everything
+lives in one SQLite file, and nothing is sent anywhere except the requests you enable. Two containers:
+the app, and a sandbox sidecar that runs model-written code with no secrets and no network.
 
 **Status: 0.1.0, pre-1.0.** The UI and most of the API are settled; the database schema and a few
-response shapes may still change between releases. There is one maintainer. The app has been run on
-Windows (development) and Linux (Docker). macOS is untested, which is a polite way of saying nobody has
-tried.
+response shapes may change between releases. One maintainer. Run on Windows (development) and Linux
+(Docker). macOS is untested, as in, nobody has tried that.
 
-## What it does
+## Best-value presets on OpenRouter
 
-- **Prices from the source.** Every model from each provider you enable, with input, output and cache
-  prices per 1M tokens. Prices come from provider APIs where one exists, otherwise from the official
-  pricing page, and fall back to the models.dev catalogue when a page cannot be read. The refresh job
-  records the failure instead of silently showing stale numbers.
-- **Discounts and price changes.** Discounts are detected where a provider publishes them: OpenRouter's
-  per-provider discounts (a model's row shows the cheapest discounted provider, and only when it beats
-  OpenRouter's listed price; the rest sit in its details) and `:free` models, Requesty's discount field,
-  and strike-through prices or
-  "50% off" notes on the OpenAI, Anthropic, Google, xAI, Mistral and OpenCode pages. A model's price
-  history is kept, so a model that is new, discounted, or newly cheaper is marked as such.
-- **Balances where they exist.** Credit left (DeepSeek, Moonshot, Chutes), a prepaid balance from a
-  management key (OpenRouter, xAI, Requesty), spend from an admin API (OpenAI, Anthropic orgs), Claude
-  subscription windows. Where a vendor exposes nothing, the card says "not exposed by the API" and links
-  the console, which beats a confident zero. One card per vendor, each with its own refresh button that
-  re-fetches only that vendor's providers.
-- **Scores from named sources.** Terminal-Bench 4.0, Arena (text, Code Arena and Agent Arena) and the
-  Epoch AI hub are on by default. OpenRouter's datasets, LiveBench and Artificial Analysis are opt-in.
-  Each number keeps its source, licence and date.
-- **One cost figure.** A blended $/1M price and an estimated $/task for a workload profile you pick
-  (agentic coding with cache hits by default). A value index ranks score per dollar, and free models
-  are costed at a configurable stand-in price so "free" alone does not top the list.
-- **A sortable table.** Search, quick filters (free, best value, new, discounted, scored, tool calling,
-  testable), grouping by provider, creator, model, price band or value tier, and copy-ready model IDs.
-  Once an OpenCode key is set, **Hide OpenCode-only** drops the free models that only the OpenCode client can call.
-  Where several providers sell the same model, the canonical model id groups them. OpenCode's two
-  catalogues are folded: a model both Console and Go list appears once, marked **also on Go**.
-- **Your own tests.** Pick models, pick a judge model, and run agentic coding, tool-use,
-  instruction-following and accuracy tasks. Coding tasks run in the sandbox and are graded by real unit
-  tests; the judge scores code quality and writes a short assessment per model.
-- **Config snippets.** For each model, a copyable setup for VS Code (Copilot Chat custom endpoint,
-  Continue, Cline, Roo Code, Kilo Code), OpenCode, Claude Code, Codex CLI, Aider, Zed, Crush, Goose,
-  curl and the OpenAI Python SDK. Keys are referenced through environment variables or placeholders.
-  For an OpenRouter model, **Route via** picks how requests find a provider: OpenRouter's own routing, the
-  cheapest (`:floor`) or fastest (`:nitro`), or one provider pinned through a `provider` block. The block goes
-  where a harness has room for it (VS Code Copilot, Continue, OpenCode, Aider, curl, Python); the others say
-  they can't pin. A discounted row starts pinned to the provider behind its discount, because that price
-  holds only while requests reach that provider.
-- **Spend history.** What an OpenRouter account has spent, in dollars and tokens, by day, model, provider
-  and API key, with the cost of a million tokens and the cache hit rate. OpenRouter only shows the last 30
-  days, so Vibonomics keeps each day it sees.
-- **Best-value presets.** Optionally keeps OpenRouter presets (up to twenty, each with its own settings) pointed
-  at the models that give the most score per dollar today (up to three, the rest as fallbacks), on their cheapest
-  providers. Can take over a preset you made by hand, and hold its temperature, token cap, penalties,
-  quantization, ignored providers and system prompt. Preview shows the exact request first. Off by default.
+An OpenRouter preset is a named config that any client calls as `model: "@preset/<slug>"`. Vibonomics can
+own a set of them and rewrite each one on a schedule, so every tool pointed at `@preset/vibonomics-coding`
+follows the best value of the day without being reconfigured.
 
-### A closer look
+For each preset it:
 
-Every number keeps its source. Open a model and the **Scores** tab lists each leaderboard behind the
-composite, with the raw value, the percentile, the effort setting and the date:
+- **Ranks** OpenRouter's models by score per dollar for a usage profile you choose, after your filters:
+  minimum score, tool calling, context size, a cost-per-task ceiling, a value floor, and model and provider
+  blocklists (`openai/*`, `*:free`, `deepinfra`).
+- **Writes** the best 1 to 3 models (lead plus fallbacks) and their cheapest providers, up to 10,
+  to `provider.only` and `provider.order`. A model already in the preset keeps its place unless another
+  beats it by a set margin, so the preset doesn't flap between near ties.
+- **Holds guardrails** you set: temperature, token cap, penalties, top P, quantizations, ignored providers,
+  `require_parameters` and the system prompt. Each is left alone, set, or removed. Providers that don't
+  support a parameter you set are left out, or the plan warns.
+- **Checks before writing.** Every write is previewed against OpenRouter's live endpoint listing. A
+  provider that has gone is an error and nothing is sent; low uptime, a price that moved more than 20%,
+  or a model about to expire is a warning.
+- **Leaves the rest alone.** Tools, reasoning settings and anything else in the preset are read back and
+  sent as found. After a write it reads the preset again and names any key OpenRouter didn't keep.
 
-![Details for Claude Sonnet 5.5 on OpenRouter, Scores tab: a composite of 97 from three sources, then one row per metric from Epoch AI, Terminal-Bench and Arena with its raw value, percentile, effort and date](docs/screenshots/model-scores-dark.png)
+Up to 20 presets, each with its own filters and schedule (every 30 minutes or slower). It touches only
+presets named `vibonomics-*` or ones you adopt by hand, after an **Inspect** of their live config; an
+adopted preset that someone edits on OpenRouter stops being updated until you review it again. **Preview**
+shows the exact request before anything is sent. Free models are opt-in, with a paid model as the last
+fallback so a spent daily free-model cap doesn't take the preset down.
 
-The **Config** tab writes the setup for the tool you already use. The snippet names an environment
-variable and never contains your key.
+Off by default. Writing needs an OpenRouter **management key**: since 2026-11-07 the preset API refuses an
+ordinary key, and says so in a 401 that calls it an invalid management key, because of course it does.
+Turn it on under **Settings → Providers → OpenRouter**.
 
-![Details for Claude Sonnet 5.5 on OpenRouter, Config tab: a VS Code Copilot custom-endpoint snippet, with 13 more tabs from Continue to Python](docs/screenshots/model-config-dark.png)
+The full behaviour, including adoption, the live check and the management key, is in
+[docs/openrouter-presets.md](docs/openrouter-presets.md).
+
+## What else it does
+
+| Feature | What you get |
+|---|---|
+| Prices | Input, output and cache prices per 1M tokens from provider APIs or official pricing pages, falling back to models.dev. A failed refresh is recorded, not hidden behind stale numbers. |
+| Discounts | OpenRouter per-provider discounts and `:free` models, Requesty's discount field, and strike-through prices on the OpenAI, Anthropic, Google, xAI, Mistral and OpenCode pages. Price history marks a model as new, discounted or newly cheaper. |
+| Balances | Credit, prepaid balance or spend wherever a provider exposes one, Claude and OpenCode Go plan windows, and "not exposed by the API" with a console link where it doesn't. |
+| Scores | Terminal-Bench 4.0, Arena and Epoch AI by default; OpenRouter datasets, LiveBench and Artificial Analysis opt-in. Each number keeps its source, licence and date. |
+| Cost and value | A blended $/1M and an estimated $/task for a workload profile, and a value index of score per dollar. |
+| Models table | Search, quick filters, grouping by provider, creator, price band or value tier, and copy-ready model IDs. |
+| Your own tests | Agentic coding, tool-use, instruction-following and accuracy tasks against any models you pick, graded by unit tests in the sandbox and a judge model. |
+| Config snippets | Copyable setup for VS Code (Copilot, Continue, Cline, Roo, Kilo), OpenCode, Claude Code, Codex CLI, Aider, Zed, Crush, Goose, curl and Python, with OpenRouter routing (`:floor`, `:nitro` or a pinned provider). Keys stay in environment variables. |
+| Spend history | An OpenRouter account's spend and tokens by day, model, provider and API key, kept past OpenRouter's 30-day window. Needs a management key. |
+| Value API | `POST /api/models/value` gives a program the same figures, so it can pick between the models it can use. |
+
+Every number keeps its source. A model's **Scores** tab lists each leaderboard behind the composite, with
+the raw value, percentile, effort setting and date:
+
+![Details for Claude Sonnet 5.5 on OpenRouter, Scores tab: a composite of 97 from 3 sources, then one row per metric from Epoch AI, Terminal-Bench and Arena with its raw value, percentile, effort and date](docs/screenshots/model-scores-dark.png)
 
 ## Quick start
 
@@ -93,116 +88,76 @@ cp .env.example .env     # optional; the defaults work as they are
 docker compose up -d --build
 ```
 
-Tagged releases are published to `ghcr.io/wulfftech/vibonomics`, but compose from a checkout is the
-supported way to run it: the sandbox sidecar is part of the stack.
+Open `http://localhost:2289`. No account, no sign-up, no telemetry. Tagged images are published to
+`ghcr.io/wulfftech/vibonomics`, but compose from a checkout is the supported way to run it, because the
+sandbox sidecar is part of the stack.
 
-Then open `http://localhost:2289`. That is the whole install: no account, no sign-up, no telemetry.
+OpenRouter and the OpenCode Console show models without a key. Add keys under **Settings → Providers**,
+press **Test** (it tests what you typed, before saving), then **Save**. The form links to where each key is
+issued.
 
-The first start loads public catalogues; OpenRouter and the OpenCode Console show models without a
-key. Add keys under **Settings → Providers**, press **Test** in the provider form (it tests what you
-typed, before saving), then **Save**. The provider form links to where each key is issued.
-
-What lives where:
-
-| Path | Holds |
-|---|---|
-| `./config` (bind mount, `/config` in the container) | SQLite database, price history, `secret.key`, HTTP cache |
-| `.env` | optional settings and provider keys (see [Configuration](#configuration)) |
-
-Back up `./config`. It holds your encrypted keys, and the key file sits next to the database unless
-you set `VIBONOMICS_SECRET_KEY` from your own secret store.
+`./config` (mounted at `/config`) holds the database, price history, `secret.key` and the HTTP cache. Back
+it up: it holds your encrypted keys, and the key file sits next to the database unless you set
+`VIBONOMICS_SECRET_KEY` from your own secret store.
 
 ## Providers
 
-A key is optional for browsing: prices and models still load from models.dev and public pricing pages.
-A key adds the live model list, whatever balance the provider exposes, and the ability to run tests.
+A key is optional for browsing. It adds the live model list, whatever balance the provider exposes, and
+the ability to run tests.
 
 | Type | Live prices without a key | Balance |
 |---|---|---|
-| OpenRouter | yes (public list, per-endpoint discounts, `:free`) | key spend and limits, and today's free-model request count against its daily cap, with a normal key; account credits need a management key |
-| OpenCode Console / Go | yes (public list; models.dev prices) | Go plan usage windows with the workspace key (rolling, weekly, monthly); Console credits are console-only |
-| Anthropic | yes (pricing page) | no prepaid balance or credit-balance API; an org Admin key reports month-to-date and 30-day API spend; a Claude Code login token adds subscription usage |
-| OpenAI | yes (pricing page) | no balance; an org Admin key reports 30-day spend |
+| OpenRouter | yes (public list, per-endpoint discounts, `:free`) | key spend and limits, and today's free-model requests against the daily cap; account credits need a management key |
+| OpenCode Console / Go | yes (public list; models.dev prices) | Go plan usage windows with the workspace key; Console credits are console-only |
+| Anthropic | yes (pricing page) | an org Admin key reports API spend; a Claude Code login token adds subscription usage |
+| OpenAI | yes (pricing page) | an org Admin key reports 30-day spend |
 | Google Gemini | yes (pricing page, promos, free-tier flags) | none (AI Studio only) |
 | DeepSeek | yes (pricing page, peak and off-peak) | account balance |
 | xAI | yes (pricing page) | prepaid credit, with a management key |
-| Mistral | yes (pricing page) | none (enterprise admin API only) |
+| Mistral | yes (pricing page) | none |
 | Groq | yes (docs table) | none |
 | Moonshot (Kimi) | catalogue only; the price page needs a browser | account balance |
 | Z.ai (GLM) | yes (pricing page) | none |
 | Together, Fireworks | yes | usage, where the account allows it |
-| Cerebras | yes (public API, includes prices) | none |
+| Cerebras | yes (public API) | none |
 | Requesty | yes (public API, includes discounts) | org balance, with a manage-scoped key |
-| Chutes | yes (public API, includes prices) | account balance |
+| Chutes | yes (public API) | account balance |
 | NVIDIA NIM | free trial catalogue | none |
 | Custom (OpenAI-compatible) | your endpoint, or models.dev prices | none |
 
-Keys set as environment variables (`VIBONOMICS_OPENROUTER_API_KEY` and so on) take precedence and show
-as locked in the UI. `/api/providers/types` lists every type with its key URL and balance support.
-Compose passes everything in `.env` to the app, so keys can live there instead of in the database.
+Keys set as environment variables (`VIBONOMICS_OPENROUTER_API_KEY` and so on) take precedence and show as
+locked in the UI. Claude Pro/Max windows and OpenCode Go usage have their own setup, covered in
+[docs/subscriptions.md](docs/subscriptions.md).
 
-## Scores and their sources
+## Scores
 
-Every metric is converted to a percentile inside its own leaderboard. Elo ratings, pass rates and indices
-share no unit; percentiles give them one. Available percentiles form an intelligence, coding and agentic
-subtotal, and those form a weighted composite. The weights are in **Settings → Scoring**.
+Each metric becomes a percentile inside its own leaderboard, since Elo ratings, pass rates and indices
+share no unit. Percentiles roll up into intelligence, coding and agentic subtotals, and those into a
+weighted composite. Weights are in **Settings → Scoring**. Your own test results count as one more entry in
+the coding and agentic subtotals, or, with **prefer own tests** on, replace them for a model with at least
+5 graded tasks.
 
-Your own test results count as one more entry in the coding and agentic subtotals, at the weight set there.
-Switch on the prefer-own-tests option and a model with enough graded results (5 tasks by default, added up
-across its providers) uses its own test score as its coding and agentic score outright. The third-party
-percentiles for those two drop out and the blend weight stops applying. Intelligence stays third-party only, and
-the composite is worked out from the three as usual. A model with fewer tasks, or none, is scored as before, and
-the Models table marks the scores that are your own.
+Sources include Terminal-Bench, Arena (text, Code Arena and Agent Arena), the Epoch AI hub, OpenRouter's
+own evals, LiveBench and Artificial Analysis. Each can be switched on or off in **Settings → Benchmarks**,
+where unmatched model names are also reviewed.
 
-| Source | Default | Licence | What it contributes |
-|---|---|---|---|
-| Terminal-Bench 4.0 | on | Apache-2.0 | agentic coding accuracy, cost and tokens per trial |
-| Arena (LMArena) | on | CC BY 4.0 | text overall and coding, Code Arena, Agent Arena |
-| Epoch AI Benchmarking Hub | on | CC BY 4.0 for Epoch's own data; `*_external.csv` files keep theirs | capability index, Epoch's SWE-bench Verified runs, MirrorCode |
-| OpenRouter datasets | on, needs an OpenRouter key | CC BY 4.0 | OpenRouter's own evals, median agent session cost, programming usage share |
-| LiveBench 2.0 | off | not stated for the data | `long_agentic`, `coding`, `reasoning`, cost per task |
-| Artificial Analysis (direct) | off | Artificial Analysis terms | intelligence, coding and agentic indices |
-| Artificial Analysis and Design Arena via OpenRouter | off | republished third-party data | the same indices without an AA key |
+## Cost and value
 
-**Artificial Analysis is opt-in on purpose.** Its terms restrict using its data in products for model
-selection or comparison and require attribution. Vibonomics fetches it only when an operator enables the
-source and accepts the notice in Settings, with that operator's own key. No AA data is shipped with the
-app, and none is committed to the repository. Leave it off on a shared or public deployment. This is
-not legal advice.
-
-Attribution for every enabled source appears in the table footer and in each model's detail view. The
-matching between a source's model name and a canonical model is reviewed in **Settings → Benchmarks →
-Review unmatched**; corrections are stored as aliases.
-
-![Settings, Benchmarks: each score source with its description, licence and attribution, how many rows were fetched and how many matched a model, and a switch to turn it off](docs/screenshots/settings-benchmarks.png)
-
-The screenshots in this README show scores from Terminal-Bench (Apache-2.0), Arena (CC BY 4.0) and Epoch
-AI (CC BY 4.0), converted to percentiles, and nothing from Artificial Analysis.
-
-## Cost, value and the numbers you see
-
-- **Blended $/1M** weights input and output for the selected profile. The default profile is agentic
-  coding: 20 input tokens per output token, 80% cache hits, 600k input and 20k output per task. Balanced
-  3:1 and output-heavy presets are included, and you can add your own.
-- **$/task** comes from the measured average when you have run Vibonomics's tests, then from a benchmark
-  that reports its own cost per task, then from the profile's token counts. The column marks which one
-  it is.
-- **Value** is composite score per $/task, shown as a 0–100 index on a log scale. Free models use the
-  stand-in price in **Settings → Scoring** (default $0.01 per 1M) so they get a finite value. Set it to
-  0 to restore the older behaviour, where any free model sorted first.
-- **Discount column** shows the percentage; the blended price shows the list price in brackets.
+- **Blended $/1M** weights input and output for the selected profile. The default is agentic coding: 20
+  input tokens per output token, 80% cache hits, 600k input and 20k output per task. Balanced and
+  output-heavy profiles are included, and you can add your own.
+- **$/task** uses your measured average when you have run tests, then a benchmark's own cost per task,
+  then the profile's token counts. The column says which.
+- **Value** is composite score per $/task, as a 0-100 index on a log scale. Free models are costed at a
+  stand-in price (default $0.01 per 1M) so "free" alone doesn't top the list.
 
 ![The Models page in dark mode, sorted by score: Claude Opus 5.5, GPT-5.5 Pro and Claude Sonnet 5.5 at the top, with value indexes between 11 and 54](docs/screenshots/models-top-score-dark.png)
 
 Sorted by score, the top of the table is the expensive end: value indexes of 11 to 54, against 100 at the
-top of the best-value view. Same data, other way up. Dark mode follows your OS, because you were going to
-ask.
+top of the best-value view. Dark mode follows your OS. That was your next question.
 
-### The same figures for a program
-
-`POST /api/models/value` gives a program that sends work to models the numbers the Models page shows,
-so it can choose between the models it can use. It names each model as its provider lists it, and says
-how big a task is, or picks a usage profile:
+`POST /api/models/value` returns the same figures for models you name, ranked by value with a `pick`, a
+one-line `reason`, and optional `alternatives` from the same providers:
 
 ```sh
 curl -s http://localhost:2289/api/models/value -H 'Content-Type: application/json' -d '{
@@ -217,372 +172,75 @@ curl -s http://localhost:2289/api/models/value -H 'Content-Type: application/jso
 }'
 ```
 
-Each model comes back in the order asked, with its price after discounts, the list price and the
-discount's dates while one applies, a direct offer's batch discount, its scores, its estimated cost for
-that task and its value. The ones with a price and a score at or above `min_score` are ranked by value;
-`pick` is the first, and `reason` says why in a sentence. A model Vibonomics doesn't list, or whose
-provider isn't configured, comes back with `found: false` and a note. `alternatives` asks for up to that
-many models the request didn't name, from the same providers, that score at least as well as the pick
-and give better value. Free offers are left out of those, because their rate limits and data
-terms differ from paid ones. `dimension` ranks by `intelligence`, `coding` or `agentic` instead of the
-composite.
-
-The maths is the Models page's: `backend/vibonomics/pricing.py` copies `frontend/src/lib/pricing.ts`.
-The endpoint only reads. It sits behind the password like the rest of `/api`, so a program calling an
-instance with `VIBONOMICS_PASSWORD` set logs in first and sends the session cookie, unless the instance is
-[open to read](#open-to-read): this endpoint only reads, so it needs no login there.
+The maths matches the Models page: `backend/vibonomics/pricing.py` mirrors `frontend/src/lib/pricing.ts`.
 
 ## Testing models
 
-Tests make real API calls on the account behind the selected key. Free models cost nothing; a paid
-judge costs a few tenths of a cent per task. A model grading other models is as circular as it sounds,
-so wherever a check can decide, a check does.
+Tests make real API calls on the account behind the selected key. Free models cost nothing; a paid judge
+costs a few tenths of a cent per task. A model grading other models is as circular as it sounds, so
+wherever a check can decide, a check does. The judge scores code quality and writes the assessment.
 
-Three suites ship: **Quick** (seven tasks) for triage, **Standard** (fourteen) for a clearer ranking, and **Hard**
-(eleven) for telling apart models that all clear Standard. Quick and Standard are pass-or-fail on tasks most capable
-models solve, so on a field of decent free models nearly every score is 100; Hard keeps its visible tests thin and
-puts the difficulty in rules only the hidden tests check (what must not be mutated, boundary cases, an exact format,
-an id that has to come from the last tool result). Expect most free models to miss some of it.
+3 suites: **Quick** (7 tasks) for triage, **Standard** (14) for a ranking, and **Hard** (11), which hides
+its difficulty in rules only the hidden tests check. Most capable models clear Standard; Hard separates
+them.
 
 | Task family | How it is graded |
 |---|---|
-| Agentic coding | the model edits a small Python workspace through tools, then the task's unit tests run in the sandbox; hidden tests and the judge's code-quality score are blended with the pass rate |
+| Agentic coding | the model edits a small Python workspace through tools; unit tests and hidden tests run in the sandbox, blended with the judge's code-quality score |
 | Tool use | exact tool name and arguments, a two-call sequence, and a case where calling a tool is wrong |
 | Instruction following | output format checked exactly (JSON schema, word limits) |
-| Accuracy | answers taken from a supplied passage, plus a trap where the answer is absent, to catch invention |
+| Accuracy | answers from a supplied passage, plus one where the answer is absent |
 
-The judge model administers the tasks: it scores code quality against the task's rubric and writes the
-per-model assessment. Models Vibonomics cannot call (free OpenCode models, OpenCode's Gemini route) are
-not offered as judges, and free models are labelled because they rate-limit often. A run with a broken
-judge still completes, scored by the deterministic checks, and says so.
+Rate-limited tasks wait and retry (30, 60, then 120 seconds). Errored tasks are left out of a score rather
+than counted as zero, and a score resting on under half its tasks is badged **Low coverage**.
 
-A task that gets HTTP 429 waits and tries again (30, 60 then 120 seconds, shared by the model's other tasks)
-before it is called an error. Errored and ungraded tasks are left out of a model's score, not averaged in as
-zero, and a card whose score rests on fewer than half its tasks is badged **Low coverage** so 3 of 14 does not
-read as a clean 100. A free OpenCode Console model is never attempted, since OpenCode admits only its own client
-to it: its tasks error at once with that reason. OpenCode Go is different. Its docs ask other clients to name
-themselves in their own user agent and send a stable id per conversation in `x-opencode-session`, and it answers
-HTTP 400 without one, so Vibonomics does both for Go (one id per task).
-
-**Sandbox.** Model-written code never runs beside your keys. It gets a room with no network, no secrets
-and a strict curfew. The compose file starts `vibonomics-sandbox`
-with no network at all, a read-only filesystem and limits on CPU, memory and processes. Its server runs as
-root with only the capabilities to switch user (`SETUID`, `SETGID`, `CHOWN`), and every run of test code
-starts under its own unprivileged uid, so code that outlives its run cannot touch the next one. The app reaches it through a Unix socket on a small in-memory volume they share, so code
-under test cannot call the app, the host or the internet.
-
-If your Docker host cannot share a Unix socket between containers, add the TCP layout in `.env`:
-`COMPOSE_FILE=docker-compose.yml:docker/compose.sandbox-tcp.yml` (separate the files with `;` on Windows).
-The sandbox then sits on an internal network with the app, still with no route to the internet, and the
-app refuses every request that arrives from that network (`VIBONOMICS_SANDBOX_GUARD`). The guard works
-from the local address a connection arrives on, so a forwarded header cannot get round it, and it turns
-itself off with a warning if the sandbox's network also carries other traffic. To check either layout,
-run `docker/check-sandbox-isolation.sh` (it starts and stops the stack).
-
-Set the mode in **Settings → Testing**:
-
-- **Auto** (default) uses the sidecar when `VIBONOMICS_SANDBOX_URL` is set, otherwise disables execution.
-- **Local** runs code inside the app container. Development only.
-- **Disabled** grades coding tasks from the transcript, with no tests executed.
-
-## Claude subscription usage
-
-Pro and Max subscriptions have no dollar balance, which makes "how much have I got left?" harder than it
-sounds. Usage is a rolling five-hour window and a weekly window, and Claude Code cloud sessions count
-against the same windows; usage credits (optional overage) are the only money-based figure.
-
-The Models page shows one **Anthropic (Claude)** card for the whole account: the Admin API's
-month-to-date spend, then the subscription's plan windows and session figures when Claude Code is
-posting them. The two used to be separate cards, which read as if the subscription were another vendor.
-
-- **Live windows.** A status line is a Claude Code setting, not a Vibonomics one: Claude Code runs the
-  command you configure every time it redraws its footer, with the session's JSON on stdin, and prints
-  whatever the command returns. That JSON carries the rate-limit windows. In **Settings → Providers → Claude**, copy
-  the generated `statusLine` snippet into your user settings file and merge the key into whatever is
-  already there:
-
-  | OS | File |
-  |---|---|
-  | Windows | `C:\Users\<you>\.claude\settings.json` |
-  | macOS | `/Users/<you>/.claude/settings.json` |
-  | Linux | `/home/<you>/.claude/settings.json` |
-
-  `/statusline` in a session also writes it, if you would rather describe the command than edit JSON. The
-  same snapshot carries the session's estimated cost, context-window use and cache hit ratio, which is what
-  the card shows between window resets. The command needs a POSIX shell (Git Bash on Windows, which Claude
-  Code requires anyway), carries an ingest token, can only submit usage snapshots, and the token can be
-  rotated on that page.
-- **Usage credits.** Add your Claude Code login token under **Providers → Anthropic → Claude Code login
-  token**. Vibonomics calls `api.anthropic.com/api/oauth/usage` read-only. Use the `accessToken` from
-  `~/.claude/.credentials.json` after an interactive login; `claude setup-token` tokens lack the profile
-  scope. Vibonomics never refreshes the token, so Claude Code's copy stays valid. The endpoint is not
-  documented for third parties and may change.
-- **Org seats.** Anthropic's Admin API has a daily Claude Code usage report
-  (`/v1/organizations/usage_report/claude_code`) with per-user tokens and estimated cost. It reports Team
-  and Enterprise seats only, so it returns nothing for an individual Pro/Max plan; Vibonomics leaves it
-  uncalled. The status line covers those plans.
-
-OpenCode Go is the other subscription with usable numbers. Its workspace key reads
-`opencode.ai/zen/go/v1/usage`, which returns the rolling, weekly and monthly percentages of the plan's
-included allowance. OpenCode documents no usage API, so the card labels the figures as unofficial. Console
-(pay-as-you-go) credits stay console-only: that endpoint wants a browser session cookie, not an API key.
-
-Console and Go are one vendor with two billing models, so they share a card on the Models page: the Go
-plan's windows sit above a line saying Console credit is only visible in the console. They stay two
-providers underneath, because their catalogues differ (Go covers a subset of Console's models) and each
-needs its own key. Where both list the same model at the same per-token rate, the table shows one row
-marked **also on Go** rather than the same model twice.
-
-Console's free models are OpenCode-client-only: OpenCode's docs say every other harness gets HTTP 403, key or
-not. The table badges them **OpenCode only**, the model details state what the docs say each one does with your
-data (some collect prompts to improve the model; the Nemotron ones are trial use, no personal or confidential
-data), and every other harness's config tab warns that the model will 403. Vibonomics has no way to call them
-from elsewhere, on purpose.
-
-## OpenRouter spend history
-
-The **Usage** page reads an OpenRouter account's activity: spend, prompt and completion tokens, requests and
-cache hits, per day, per model, per provider that served it and per API key. The headline figure is the cost of
-a million tokens, spend over tokens processed, so you can see whether a change (a cheaper model, a warmer
-cache) made the account cheaper to run. Tokens are prompt plus completion, with reasoning counted inside
-completion, as OpenRouter reports it.
-
-It needs a **management key** on the OpenRouter provider: OpenRouter reports activity to nobody else. The
-activity API reaches back 30 finished UTC days and no further, so each pull stores the days it returns and
-the history grows past that window. Each pull replaces the days it fetches, which corrects a figure OpenRouter
-revised. The current day is not in the activity API; the keys list reports it, and the page shows it as
-"so far today" when it was fetched today.
-
-An account is read whole, and then once per API key used in the last 31 days, so spend can be split by key.
-Spend that no listed key accounts for (a key in another workspace, or one since deleted) shows as **Other**
-instead of vanishing. Several OpenRouter providers show as separate accounts, or added together. Pulls run
-every 12 hours (**Settings → Refresh**), at startup and from the Refresh menu.
-
-## Best-value presets on OpenRouter
-
-A preset is a named bundle of model and routing settings that any client selects with
-`model: "@preset/<slug>"`. Vibonomics can keep presets pointed at the best value of the day, so a harness
-that cannot pin a provider still follows them. Turn it on under **Settings → Providers → OpenRouter**, the
-second row of tabs under Providers, where settings that belong to one provider live.
-
-- **Several presets.** Up to twenty, each with its own name, filters, schedule and write switch. Applying one
-  leaves the others alone. They share one lock, so two writes never overlap.
-- **Its name.** You type a name and Vibonomics puts `vibonomics-` in front of it. That prefix is how it
-  knows a preset is its own, so you can't leave it off and a preset of yours without it is never touched
-  (unless you adopt it, below).
-- **How it picks.** The same score per dollar as the Models page, for the usage profile you choose, among
-  OpenRouter models that pass your filters (minimum score, tool calling, context size, no free or batch
-  offers unless you allow them), and two optional limits: the most a model may cost for one task of the usage
-  profile, and the least value it may give, in score points per dollar of one task (the figure the preview
-  shows; the Models page's 0 to 100 index is relative to whatever is on screen, so it makes a poor fixed
-  floor). A model already in the preset keeps its place unless another beats it by a set percentage, so the
-  preset does not flap between near ties. Each preset can turn the prefer-own-tests option (under Scoring) on or
-  off for itself; left unset it follows that setting, and the preview says which scores it ranked with.
-- **Blocklists.** A list of models and a list of providers that the update never considers: one list for every
-  preset, one per preset, added together. Entries are patterns, matched in any case: `openai/*`, `*:free`, an
-  exact id, `deepinfra`. A blocked model (matched on its OpenRouter id or its canonical id) is never picked and
-  never kept, so it drops out of a live preset on the next update. A blocked provider (matched on the endpoint
-  tag, the part before the `/`, or its name) is never pinned. A model whose every known endpoint is blocked is
-  left out; a model with no endpoint data is not, because nothing says its providers are blocked. Blocking
-  only narrows the choice: it writes nothing to `provider.ignore`. The preview says how many models and which
-  providers the lists removed.
-- **How many models.** One to three, which is as many as OpenRouter lets a preset hold (it answers HTTP 400
-  to a fourth). The best is the lead (`model`) and the list, lead first, is `models`:
-  OpenRouter's fallbacks, tried in order when one fails. OpenRouter's docs say a preset can hold an array
-  of models without naming the field, so after a write Vibonomics reads the preset back and reports any key
-  OpenRouter did not keep.
-- **Which providers.** The cheapest endpoints for that task, up to ten, written to `provider.only` and
-  `provider.order`. With several models each takes a turn at its cheapest endpoint, so the first can't use
-  every slot, and a provider two models share is listed once. A discounted endpoint wins on price.
-- **Route.** `fallback` (the default) writes no `route` and takes the models in order. `sort` writes
-  `route: "sort"` and `provider.sort` (price, throughput or latency; price if you pick none). Both keys are
-  Vibonomics's: on `fallback` it takes them off a preset that has them. OpenRouter's docs do not describe
-  `route`, so it may not keep it. After every write Vibonomics reads the preset back and the page names any
-  key OpenRouter dropped, `route` included. A key that was dropped is not sent again on each run.
-- **What it leaves alone.** Everything else in the preset: tools, reasoning, other provider filters, and any
-  guardrail you leave unmanaged (next bullet). Each write to OpenRouter is the whole config, so Vibonomics
-  reads the preset first and sends back what it found. An edit you make in the OpenRouter UI survives. A new
-  preset can start from one of yours, picked from the list of presets on your account (read only).
-- **Guardrails.** Per preset, each of these is in one of three states: **leave as it is**, **set**, or
-  **remove**. Left alone, whatever is on the preset stays and is shown as passthrough. Set, Vibonomics writes
-  it. Removed, Vibonomics takes it off. One key can't be both.
-
-  | Guardrail | Range | Where OpenRouter keeps it |
-  |---|---|---|
-  | Temperature | 0 to 2 | `temperature` |
-  | Token cap | 1 to 2,000,000 | `max_tokens` |
-  | Repetition penalty | above 0 to 2 | `repetition_penalty` |
-  | Frequency / presence penalty | -2 to 2 | `frequency_penalty`, `presence_penalty` |
-  | Top P | above 0 to 1 | `top_p` |
-  | Quantizations | int4 int8 fp4 mxfp4 nvfp4 fp6 fp8 mxfp8 fp16 bf16 fp32 unknown | `provider.quantizations` |
-  | Ignored providers | up to 50 slugs | `provider.ignore` |
-  | Require parameters | on / off | `provider.require_parameters` |
-  | System prompt | up to 20,000 characters | the system message of the write |
-
-  The token cap is sent as `max_tokens`: OpenRouter drops `max_completion_tokens` from a preset. A quantization
-  list leaves out every endpoint whose precision OpenRouter lists as `unknown`, unless you name `unknown`
-  (OpenRouter answers 404 "No endpoints found" for a model that has none left). A client's own request
-  parameters win over the preset's, so a temperature or token cap here applies only where the client sends
-  none. Repetition penalty is the one clients rarely send.
-- **Capability.** A parameter you set only counts on an endpoint that supports it. Vibonomics pins the endpoints
-  that take every one you set and allow the token cap. If a model has none, it pins the others and warns
-  ("top_p will be ignored for ..."), since OpenRouter drops what an endpoint doesn't take. With
-  `require_parameters` on, OpenRouter refuses the request instead, so the plan is blocked and names the model
-  and the parameter. A model whose every endpoint fails your quantization or ignore list is left out of the
-  ranking with a warning. The preview shows a table of which pinned endpoint takes which parameter.
-- **System prompt.** OpenRouter takes a preset's system prompt from the system message of each write, and a
-  write with none sets it to null. So every write carries the prompt that should be in force: the one you set,
-  none if you remove it, otherwise the live one, sent back as it is. A preset with a system prompt is no longer
-  refused. When a write replaces or removes the live prompt, Vibonomics first keeps the old text (up to 20,000
-  characters) and the preview shows when. After the write it checks the stored prompt against what it sent
-  and names `system_prompt` among the keys OpenRouter did not keep if they differ.
-- **What it will write.** A slug it created itself, or one you adopted. It never deletes: OpenRouter's API has
-  no delete, so remove one in the web UI, which archives it. An archived preset takes no new versions, so
-  Vibonomics reports that instead of writing; restore it or choose another name.
-- **Adopting a preset you made by hand.** **Inspect** shows any preset on the account: its live config, its
-  history, and the raw JSON of every key Vibonomics has no setting for and would send back as it found it
-  (everything but `model`, `models`, `route`, `provider.only`, `provider.order` and `provider.sort`), and its
-  system prompt.
-  **Adopt** is refused if the preset changed since you looked (the prompt included), is archived, is already
-  managed, or sits under another key. A system prompt is no obstacle. Adopting writes nothing: the preset
-  joins the list switched off, under its own name, and the first update is a separate step you turn on. Taking
-  an adopted preset out of the list hands it back; Vibonomics never touches it again until you adopt it again.
-  A scheduled run on an adopted preset writes only while those other keys, and the system prompt, are still
-  what you reviewed. If someone edits them on OpenRouter, the run is recorded as blocked and writes nothing,
-  until you preview the preset and apply it yourself. Changing which guardrails you manage changes what counts
-  as reviewed, so the next scheduled run waits for an apply by hand. Saving with writing on does that.
-- **Preview first.** **Preview** shows what the next update would write: it reads the preset from OpenRouter,
-  ranks the models and shows the live version number, the version history, what changes and the providers.
-  Previewing writes nothing; the changes are sent by **Apply**, by Save with writing switched on, or by the
-  schedule. It previews unsaved changes as they
-  stand, so you can try settings before keeping them; such a preview is marked, and cannot be applied. **View API call** opens the exact
-  request it would send. **Apply** sends that plan, and only that plan: if anything moved since you looked,
-  it refuses and asks you to preview again. After a write it reads the preset back and names any key
-  OpenRouter did not keep.
-- **Live check before every write.** The ranking runs on model data from the last refresh, which can be hours
-  old. So the preview, and again the apply that writes, read OpenRouter's public listing for each model in the
-  preset (no key is sent) and check what is about to be written against it: every provider the preset names is
-  still listed for its model, and each model keeps at least one. A provider that is gone is an error: the write
-  is refused, nothing is sent, and the run is recorded as blocked with the reason. A provider reporting a bad
-  status or under 50% uptime, a price more than 20% off what the plan used, and a model that expires within a
-  week are warnings, shown and not blocking. So is a listing OpenRouter does not answer in time. The check runs
-  on a preset that is already up to date too, so the preview shows the health of what is written. It also
-  reads your guardrails: a model none of whose live endpoints passes the quantization and ignore lists is a
-  warning (this preset will never be served it), and an error if that is true of every model; a pinned endpoint
-  that lacks a parameter you set is an error with `require_parameters` on and a warning without it.
-- **Free models.** Free models are left out unless you switch on **Allow free models**. They share an
-  account-wide daily request cap (1000 a day with credits, 50 without), and the OpenRouter card on the main
-  page shows how much of it today's requests have used and when it resets (00:00 UTC), as of its last refresh.
-  A preset whose models are all free warns about it, in the preview and in the live check. When the cap is spent, requests to that preset fail
-  until it resets at 00:00 UTC. Two choices guard against that, both only while free models are allowed:
-  - **Keep a paid model as the last fallback.** When every model chosen is free, the last place goes to the
-    best-value paid model that passes your filters, so OpenRouter falls through to it when the free ones fail.
-    The free models keep the lead. It needs room for two models or more. A paid model already in the preset
-    is kept over one that is only a few percent better, like any other model. If it can't be added (one place,
-    or no paid model qualifies) the plan says so and warns about the cap as before.
-  - **Allow a lineup of free models only.** Switched off, a plan whose models are all free is refused:
-    nothing is written, and a scheduled run is recorded as blocked with the reason. With the paid fallback on
-    too, the fallback is tried first, and the plan is refused only if it could not be added.
-- **On a schedule.** A separate switch updates a preset every N hours (as little as 0.5, which is every
-  thirty minutes) with no one watching, each on its own timer. Off by default, and it needs the write switch
-  too. After a restart, any preset that is overdue runs once.
-- **Saving sends it.** With the write switch on, **Save** on this page also sends the update straight away:
-  it plans from what was just saved and applies that plan, so a change reaches OpenRouter without a second
-  step. If the saved settings leave the preset as it is, nothing is sent and the page says so.
-
-**Writing a preset needs a management key.** Since 2026-11-07 OpenRouter turns an ordinary API key away from the
-call that creates or updates a preset (HTTP 401 "Invalid management key"; their docs now say it needs a
-read-write management key). So the OpenRouter provider needs a **management key** (the same field the spend
-history uses; create it at openrouter.ai/settings/management-keys, which offers a name and an expiry but no
-read or write setting: OpenRouter's docs call these keys unscoped). The write goes out
-under that key, and under it alone; reading the preset, the catalogue, the ranking and the live check use the
-API key, and requests to `@preset/<name>` are ordinary calls. Without a management key the preview says so as a
-live-check error, Apply stays off, and a scheduled run is recorded as blocked; a preset that is already up to
-date needs none. The management key is taken from the same provider row as the API key, never from another row,
-because a management key belongs to an account. The write names the workspace: the preset's own for an update,
-the API key's (read from the last balance refresh) for a new one, so the preset lands where `@preset/` requests
-look for it. If OpenRouter answers from a different workspace than the one asked for, nothing is recorded.
-
-**Preset catalogue.** Vibonomics keeps a local copy of every preset on your OpenRouter account, up to 100,
-archived ones included: the models, the providers, the live version and the config keys it has no setting for.
-It reads the account every 30 minutes, at startup and when you press Refresh, with the API key (not the
-management key the update is written with), and only reads. A preset's config can hold anything you put in it, so a visitor to an instance that is
-open to read does not get the catalogue. If one preset can't be read, its last copy stays and the page says the
-sync was partial.
-
-## Refreshing
-
-The **Refresh** menu on the Models page runs a whole kind — models and prices, balances, benchmarks or spend
-history — across every enabled provider. Each balance card also has its own refresh button, which re-fetches only
-that card's providers: Anthropic's card refreshes Anthropic, OpenCode's refreshes both Console and Go,
-and a provider with its own card refreshes itself.
-
-A card sends one request for its whole set (`POST /api/providers/refresh` with `provider_ids`), because
-the refresh jobs are serialised per kind: two concurrent single-provider calls would leave the second
-waiting on the lock and silently do nothing. `POST /api/providers/{id}/refresh` remains for a single
-provider and delegates to the same path. A single-provider run is quiet unless it fails; the card's own
-spinner and timestamp are the feedback.
+**Sandbox.** Model-written code never runs beside your keys. It gets `vibonomics-sandbox`: no network, a
+read-only filesystem, CPU, memory and process limits, and a fresh unprivileged uid per run. A room with no
+windows and a strict curfew. The app reaches it through a Unix socket
+on a shared in-memory volume. If your Docker host can't share a socket between containers, set
+`COMPOSE_FILE=docker-compose.yml:docker/compose.sandbox-tcp.yml` in `.env` (`;` on Windows) for an
+internal-network layout, and check either with `docker/check-sandbox-isolation.sh`. **Settings → Testing**
+switches between Auto (the sidecar when configured), Local (development only) and Disabled.
 
 ## Configuration
-
-Environment variables for the app and the compose stack:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `VIBONOMICS_CONFIG_DIR` | `./config` | database, key file, cache |
-| `VIBONOMICS_PORT`, `VIBONOMICS_HOST` | `2289`, `0.0.0.0` | listen address. In compose the app always listens on 2289 inside the container, and `VIBONOMICS_PORT` in `.env` picks the host port |
+| `VIBONOMICS_PORT`, `VIBONOMICS_HOST` | `2289`, `0.0.0.0` | listen address; in compose, `VIBONOMICS_PORT` picks the host port |
 | `VIBONOMICS_URL_BASE` | empty | serve under a sub-path such as `/vibonomics` |
-| `VIBONOMICS_PASSWORD` | empty | password gate on the UI (signed cookie session). Changing it ends every session |
-| `VIBONOMICS_OPEN_READ` | off | with a password, let visitors read without logging in. Settings and every change still need the password; see [Open to read](#open-to-read) |
-| `VIBONOMICS_ALLOWED_HOSTS` | empty (any) | comma-separated host names the app answers to. Set it when there is no password: it stops DNS rebinding from a web page on your network |
-| `VIBONOMICS_FORWARDED_ALLOW_IPS` | `*` (anyone) | comma-separated addresses whose `X-Forwarded-For` and `X-Forwarded-Proto` the app believes. The default trusts every peer, so a client can put any address in the access log. Set it to your proxy's address (`127.0.0.1` for a proxy on the same host) to stop that. If the proxy is not on the list, the app logs the proxy's address instead of the client's |
+| `VIBONOMICS_PASSWORD` | empty | password gate on the UI; changing it ends every session |
+| `VIBONOMICS_OPEN_READ` | off | with a password, visitors can read without logging in; every change still needs the password |
+| `VIBONOMICS_ALLOWED_HOSTS` | empty (any) | host names the app answers to; set it when there is no password, against DNS rebinding |
+| `VIBONOMICS_FORWARDED_ALLOW_IPS` | `*` | proxies whose `X-Forwarded-*` headers are believed; set it to your proxy's address |
 | `VIBONOMICS_SECRET_KEY` | generated file | encrypts stored provider keys and signs sessions |
 | `VIBONOMICS_SANDBOX_URL` | empty | sidecar address: `unix:///run/vibonomics-sandbox/sandbox.sock` (compose default) or `http://sandbox:2290` |
-| `VIBONOMICS_SANDBOX_SOCKET` | empty | on the sidecar: serve on this Unix socket instead of TCP port `VIBONOMICS_SANDBOX_PORT` (`2290`) |
 | `VIBONOMICS_SANDBOX_GUARD` | `on` | refuse requests that reach the app from a TCP sidecar's network |
 | `VIBONOMICS_SANDBOX_TOKEN` | empty | shared token between app and sidecar |
-| `VIBONOMICS_SANDBOX_RUN_UIDS` | `65530,65531` in compose | on the sidecar, which runs as root: the unprivileged uids test code is started under, one per concurrent run. Set in `docker-compose.yml`, not `.env` |
+| `VIBONOMICS_SANDBOX_SOCKET` | empty | on the sidecar: serve on this Unix socket instead of TCP port `VIBONOMICS_SANDBOX_PORT` (`2290`) |
+| `VIBONOMICS_SANDBOX_RUN_UIDS` | `65530,65531` in compose | on the sidecar: the unprivileged uids test code runs under, one per concurrent run; set in `docker-compose.yml` |
 | `VIBONOMICS_STATIC_DIR` | packaged UI | override the built frontend location |
 | `VIBONOMICS_LOG_LEVEL` | `info` | `debug`, `info`, `warning` |
-| `PUID`, `PGID`, `UMASK`, `TZ` | `1000`, `1000`, `002`, `Etc/UTC` | file ownership and time zone inside the container |
+| `PUID`, `PGID`, `UMASK`, `TZ` | `1000`, `1000`, `002`, `Etc/UTC` | file ownership and time zone in the container |
 
-Provider secrets: `VIBONOMICS_<TYPE>_API_KEY`, `VIBONOMICS_<TYPE>_MGMT_KEY` and `VIBONOMICS_<TYPE>_EXTRA_KEY`,
-where `<TYPE>` is the provider type in upper case with dashes as underscores (`VIBONOMICS_XAI_API_KEY`,
-`VIBONOMICS_OPENCODE_GO_API_KEY`). Compose loads `.env` into the app container, so any variable listed
-there works without changing the compose file. Refresh intervals, highlight windows, scoring weights,
-usage profiles, judge defaults and benchmark sources live in Settings and are stored in the database.
+Provider secrets are `VIBONOMICS_<TYPE>_API_KEY`, `_MGMT_KEY` and `_EXTRA_KEY`, with `<TYPE>` in upper case
+and dashes as underscores (`VIBONOMICS_OPENCODE_GO_API_KEY`). Compose loads `.env` into the app container.
+Refresh intervals, scoring weights, usage profiles and benchmark sources live in Settings.
 
-Behind a reverse proxy, set `VIBONOMICS_URL_BASE` to the sub-path and forward `X-Forwarded-Proto` and
-`X-Forwarded-For`. The app reads both. Put your proxy's own authentication in front of it if you want
-more than `VIBONOMICS_PASSWORD`; Vibonomics has no user accounts.
-
-The app refuses any change that a web page on another site sent: a `POST`, `PUT` or `DELETE` whose browser says
-`Sec-Fetch-Site: cross-site`, or, from a browser that sends no such header (plain HTTP to a LAN address), whose
-`Origin` is not the `Host`. A script such as `curl` sends neither header and is not affected. If your proxy
-rewrites `Host` and the app then refuses the UI's own changes over plain HTTP, have the proxy pass `X-Forwarded-Host`
-or list the public name in `VIBONOMICS_ALLOWED_HOSTS`.
-
-Proxy authentication and the status line do not mix. The ingest endpoint is exempt from Vibonomics' own
-login guard because its caller has no browser session, but a proxy authenticator in front of it will still
-answer that caller with a redirect to a login portal, and the snapshot is lost. Point the status line at an
-address that reaches the app without passing the proxy — a LAN address and port is the simple choice.
+Behind a reverse proxy, set `VIBONOMICS_URL_BASE` and forward `X-Forwarded-Proto` and `X-Forwarded-For`.
+Vibonomics has no user accounts, so put your proxy's own authentication in front if you need more than the
+password. Changes sent by a page on another site are refused (`Sec-Fetch-Site: cross-site`, or an `Origin`
+that isn't the `Host`); `curl` is unaffected. If your proxy rewrites `Host`, pass `X-Forwarded-Host` or list
+the public name in `VIBONOMICS_ALLOWED_HOSTS`. Point the Claude status line at an address that skips the
+proxy's authentication, or its snapshots get a login redirect.
 
 ### Open to read
 
-Anyone can look; only the password can touch. Set `VIBONOMICS_PASSWORD` and `VIBONOMICS_OPEN_READ=1`, and
-anyone who can reach the instance can look at the models, prices, scores and test results without logging
-in. Changing anything needs the password: the Settings pages, refreshing, running, cancelling or deleting
-tests, fixing unmatched benchmark names, previewing or applying the OpenRouter preset (both call OpenRouter
-with your key) and the Claude subscription token. The UI shows visitors those
-controls disabled, and the Settings page asks for the password. A visitor sees which provider keys are
-set but no part of one, and never the status-line token. `POST /api/models/value` stays open, because it
-only reads.
-
-The API enforces this, not just the UI: any route that is not a read is refused to a visitor until
-`api/auth.py` lists it as open, so a route added later is protected by default. This keeps visitors from
-changing things; it does not keep them from reading. If prices, scores or test results must stay private,
-leave `VIBONOMICS_OPEN_READ` off, and set `VIBONOMICS_ALLOWED_HOSTS` if a web page on your network should
-not be able to read them either.
+With `VIBONOMICS_PASSWORD` and `VIBONOMICS_OPEN_READ=1`, anyone who can reach the instance sees models,
+prices, scores and test results. Settings, refreshes, tests, preset preview and apply, and the Claude token
+need the password; visitors see those controls disabled and never see a key or the preset catalogue. The
+API enforces it: any route that isn't a read is refused to visitors unless `api/auth.py` lists it as open.
+If the data itself must stay private, leave open-read off.
 
 ## Development
 
@@ -608,9 +266,9 @@ npm run gen:api                   # regenerate API types after changing a router
 npm run typecheck && npm run lint && npm test && npm run build
 ```
 
-The Docker build runs the frontend tests and copies `frontend/dist` into the image, which the backend
-serves (including under a URL base). Database changes: edit `backend/vibonomics/orm.py`, then
-`python -m vibonomics.migrations revision "..."` from `backend/`; migrations run at startup.
+The Docker build runs the frontend tests and serves `frontend/dist` from the backend. For database
+changes, edit `backend/vibonomics/orm.py`, then run `python -m vibonomics.migrations revision "..."` from
+`backend/`; migrations run at startup.
 
 ```
 backend/vibonomics/
@@ -626,21 +284,13 @@ frontend/src/     React 19, Mantine 9
 docker/           Dockerfile and entrypoint
 ```
 
-Known follow-ups, and questions already checked and settled, are recorded in
-[OUTSTANDING.md](OUTSTANDING.md), each with how it was verified.
-
-## Contributing and security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, and [SECURITY.md](SECURITY.md) for
-how to report a vulnerability and what the threat model covers. Bug reports go through the issue form,
-which asks for the version, deployment method and logs with keys removed.
+Known follow-ups and settled questions are in [OUTSTANDING.md](OUTSTANDING.md), each with how it was
+checked. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and [SECURITY.md](SECURITY.md) for
+reporting a vulnerability and the threat model.
 
 ## Licence
 
-Vibonomics is licensed under the GNU Affero General Public License v3.0; the full text is in
-[LICENSE](LICENSE). In short: you can run, modify and redistribute it, and if you run a modified
-version as a network service, you must offer its source to the people using it.
-
-The benchmark and price data that Vibonomics fetches stays under its own licences, listed in the table
-above and shown in the UI. Models.dev data is MIT-licensed. Nothing from Artificial Analysis is
-included in the repository.
+GNU Affero General Public License v3.0; the full text is in [LICENSE](LICENSE). You can run, modify and
+redistribute it, and if you run a modified version as a network service, you must offer its source to its
+users. Fetched benchmark and price data stays under its own licences, shown in the UI.
+Models.dev data is MIT-licensed.

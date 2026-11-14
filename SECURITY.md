@@ -86,4 +86,4 @@ empty by default).
 - Keep the compose default for the sandbox (no network, reached through its socket). With the TCP
   layout, keep `VIBONOMICS_SANDBOX_GUARD` on and set `VIBONOMICS_SANDBOX_TOKEN`.
 - Back up the config directory, and treat a copy of it as a copy of your keys.
-- If you enable Artificial Analysis, keep that instance private (see the README on its terms).
+- If you enable Artificial Analysis, keep that instance private (its terms are shown when you enable it in Settings → Benchmarks).
